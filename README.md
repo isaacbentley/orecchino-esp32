@@ -1,52 +1,37 @@
 # Orecchino
 
-A little ear for drone Remote ID. Orecchino pairs a **Seeed Studio XIAO
-ESP32-C3** sniffer with a **native macOS app**: the board hears ASTM F3411 /
-Open Drone ID broadcasts and streams them as JSON over USB; the app plots
-drones and their operators live on a dark MapKit map.
+Orecchino is a small ear for drone Remote ID. Most drones must broadcast
+their identity and position using a standard called Remote ID (ASTM F3411 /
+Open Drone ID). Orecchino listens for those broadcasts and puts them on a
+map.
+
+The project has three parts:
+
+- A USB receiver stick, built on the Seeed XIAO ESP32-C3.
+- A touch-screen console, built on the Seeed SenseCAP Indicator, that
+  works on its own with no computer attached.
+- A native macOS app that shows every drone and its operator on a live map.
 
 ```
  [drone]  ~~WiFi beacon / NAN / BLE~~>  [receiver]  --USB JSON-->  [Orecchino.app]
 ```
 
-Receive-only on every path: nothing is transmitted on either radio.
-
-Two receiver targets share one radio core and serial contract: a **XIAO
-ESP32-C3** dongle, and a **SenseCAP Indicator** that doubles as a standalone
-touch console with an offline map:
+Orecchino only listens. It never transmits on any radio.
 
 ![Device console and app UI](docs/screens.png)
-*Simulated frames rendered from the actual UI code and map tiles.*
+*Simulated data, rendered with the real UI code and map tiles.*
 
-## Firmware — `firmware/orecchino_fw`
+## How it works
 
-Listens simultaneously on:
+Drones broadcast Remote ID over Wi-Fi and Bluetooth. The receiver listens
+on every path at once: Wi-Fi beacons, Wi-Fi Aware (NAN), and Bluetooth LE —
+including the long-range mode added in Bluetooth 5. Each decoded broadcast
+is sent over USB as one line of JSON. The Mac app reads that stream and
+draws it.
 
-| Path | Details |
-| --- | --- |
-| WiFi beacon + probe resp. | Vendor IE type `0x0D`, OUI `FA:0B:BC` (ASD-STAN) or `90:3A:E6` (Parrot) |
-| WiFi NAN | Public action frames, service `org.opendroneid.remoteid` (spec-locked to channel 6) |
-| Bluetooth LE | Service data UUID `0xFFFA` **or** draft-era mfg-specific AD (`0xFF`, code `0x0200`), app code `0x0D` — legacy BT4 and BT5 extended advertising on the 1M and coded (long-range) PHYs |
+## USB receiver — `firmware/orecchino_fw`
 
-Channel plan: the radio parks on channel 6 (75% dwell — NAN lives there and
-it's the Open Drone ID beacon default) with 200 ms visits to 1 and 11;
-20 MHz-wide channels on 5 MHz spacing mean `{1,6,11}` hears the whole
-2.4 GHz band. Modem power save is off (`WIFI_PS_NONE`) so promiscuous RX
-isn't gated. Heartbeats carry per-path match counters (`rid_w/rid_n/rid_b`)
-plus `pfail` so "why no NAN?" is answerable in the field.
-
-BLE uses [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) compiled
-with `CONFIG_BT_NIMBLE_EXT_ADV=1` (set in `firmware/orecchino_fw/build_opt.h`,
-which the ESP32 core picks up automatically) — the core's own precompiled
-NimBLE has extended advertising compiled out. BLE reports include which PHY
-carried the payload (`"phy":"coded"` = long range). The C3 is 2.4 GHz-only,
-so 5 GHz beacon Remote ID is out of reach.
-
-Decoded messages (Basic ID, Location, Self ID, System, Operator ID — singles
-or message packs) are emitted as one JSON object per line at 115200 baud on
-the native USB CDC port, with a `{"type":"hb"}` heartbeat every 2 s.
-
-Build + flash:
+Install the one library it needs, then build and flash:
 
 ```bash
 arduino-cli lib install "NimBLE-Arduino"
@@ -57,78 +42,74 @@ arduino-cli compile -b esp32:esp32:XIAO_ESP32C3:PartitionScheme=huge_app firmwar
 arduino-cli upload  -b esp32:esp32:XIAO_ESP32C3:PartitionScheme=huge_app -p /dev/cu.usbmodemXXXX firmware/orecchino_fw
 ```
 
-## SenseCAP Indicator — `firmware/orecchino_sensecap`
+## Touch console — `firmware/orecchino_sensecap`
 
-The same radio core and serial contract on a Seeed SenseCAP Indicator D1
-(ESP32-S3 + 4" 480×480 touch LCD), rendered as a standalone C-UAS console:
-offline dark map with live contact markers, tap a marker for a detail card,
-drag to pan, pinch or on-screen buttons to zoom, target button to re-enable
-auto-follow, side hardware button for a list view. Header shows contact
-count and RX health (red banner on an emergency-status contact); footer
-shows last-RX age. Frames compose off-screen in PSRAM (3×3-tile world
-canvas + flip-crop) so the panel never shows partial redraws.
+The SenseCAP Indicator (ESP32-S3 with a 4-inch, 480×480 touch screen) runs
+the same radio core as the USB stick, plus a full drone console. It shows
+contacts on an offline dark map. Drag to pan, pinch to zoom, and tap a
+drone for its details. The side button switches between map and list views.
+If a drone enters an active flight restriction, the console beeps and
+flags it.
 
-Build + flash (the Indicator's USB-C goes to a **CH340 UART**, not the S3's
-native USB — use the `usbserial` port; the `usbmodem` port is the RP2040.
-If auto-reset fails, hold the green top button while plugging in USB):
+There is also a hidden extra: hold the side button for ten seconds to open
+a live spectrum analyzer. It shows 2.4 GHz activity by Wi-Fi channel and
+uses the LoRa radio to sweep 850–930 MHz. Tap the lower chart to zoom in;
+the display re-scales itself as the signal picture changes.
+
+Install the libraries, then build and flash with one script:
 
 ```bash
 arduino-cli lib install "GFX Library for Arduino" PCA95x5 PNGdec
 ```
 
 ```bash
-arduino-cli compile -b "esp32:esp32:esp32s3:FlashMode=qio,FlashSize=8M,PSRAM=opi,CPUFreq=240,UploadSpeed=115200,CDCOnBoot=default" firmware/orecchino_sensecap
-arduino-cli upload  -b "esp32:esp32:esp32s3:FlashMode=qio,FlashSize=8M,PSRAM=opi,CPUFreq=240,UploadSpeed=115200,CDCOnBoot=default" -p /dev/cu.usbserial-XXXX firmware/orecchino_sensecap
+tools/flash_indicator.sh /dev/cu.usbserial-XXXX
 ```
 
-Offline map tiles (San Francisco + 1 mi buffer, zooms 11–15, ~4.8 MB;
-map data © OpenStreetMap contributors, tiles © CARTO dark_all):
+Two things to know when flashing:
+
+- The Indicator's USB-C port is a CH340 serial chip. Use the `usbserial`
+  port, not the `usbmodem` one. If auto-reset fails, hold the green top
+  button while plugging in USB.
+- Flashing replaces Meshtastic on LoRa models. The Meshtastic web flasher
+  can restore it.
+
+The Mac app keeps the console's offline map tiles up to date over USB on
+its own. To load tiles by hand instead:
 
 ```bash
 python3 tools/fetch_tiles.py            # downloads into firmware/orecchino_sensecap/data
-tools/pack_fs.sh /dev/cu.usbserial-XXXX # LittleFS image -> tile partition
+tools/pack_fs.sh /dev/cu.usbserial-XXXX # writes them to the device
 ```
 
-Display bring-up follows Seeed's Arduino wiki recipe: Arduino_GFX RGB panel
-+ ST7701 type-1 init, with the LCD CS/RESET routed through the TCA9535 IO
-expander via the vendored `Indicator_SWSPI`/`Indicator_Extender` shims
-(from LongDirtyAnimAlf/SenseCap). Touch is a raw-register FT6336U poll.
-Flashing wipes Meshtastic on LoRa models; the Meshtastic web flasher
-restores it.
+Map data © OpenStreetMap contributors; tiles © CARTO.
 
 ## macOS app — `app/`
 
-SwiftUI + MapKit, no dependencies, builds with Command Line Tools only
-(macOS 14+):
+SwiftUI and MapKit, with no outside dependencies. It builds with the
+Command Line Tools alone (macOS 14 or newer):
 
 ```bash
 app/Scripts/make_app.sh     # produces app/build/Orecchino.app
 open app/build/Orecchino.app
 ```
 
-- Dark map with per-drone colour, heading arrows, breadcrumb trails,
-  operator position markers and drone↔operator sight lines; marker ink
-  goes freshness-grey when a track ages out while its trail keeps the
-  identity colour
-- **FAA TFR overlay**: active Temporary Flight Restriction polygons from
-  tfr.faa.gov's GeoServer (WFS layer `TFR:V_TFR_LOC`), refreshed every
-  15 min, with per-zone NOTAM cards; toolbar toggle
-- Sidebar: live drone list with recency micro-bars, source/long-range
-  badges, RSSI and staleness; click to fly to a drone
-- Detail card: six-field vitals grid (RSSI meter, height, speed, operator
-  distance, age, link) above grouped Identity / Position / Operator fields;
-  absent values render as dimmed em-dashes, never fake zeros; an evidence
-  string (`BL·Y·`) shows which ODID message types have actually been decoded
-- Spoof heuristic: flags a drone whose claimed operator is >15 km away
-- Auto-detects the receiver's serial port, rotating across candidate ports
-  until JSON heartbeats appear (multi-port devices like the Indicator expose
-  a silent RP2040 CDC next to the real CH340 feed), reconnects on unplug
-- **Demo** toolbar toggle injects two simulated drones for UI testing
-  without hardware
-- Tracks merge across WiFi/BLE by UAS ID (trails and counters merge too);
-  stale tracks dim after 30 s and expire after 10 min
+What it does:
 
-## Feed format
+- Live dark map with color-coded drones, heading arrows, flight trails,
+  and operator positions
+- Active FAA flight restrictions (TFRs) drawn on the map, refreshed every
+  15 minutes
+- A sidebar list and a detail card for each drone; missing data is shown
+  as blank, never as fake zeros
+- Flags a drone whose claimed operator position is more than 15 km away
+- Finds the receiver's USB port by itself and reconnects after unplugs
+- A demo mode with two simulated drones, so the UI can be tried with no
+  hardware
+
+## Data format
+
+Each decoded broadcast is one JSON object per line:
 
 ```json
 {"type":"rid","src":"ble","mac":"AA:BB:CC:DD:EE:FF","rssi":-61,"phy":"coded",
@@ -142,8 +123,8 @@ open app/build/Orecchino.app
  "op_id":{"id_type":0,"id":"FIN87astrdge12k8"}}
 ```
 
-Anything speaking this schema over a serial port works as a source — an SDR
-pipeline could feed the app just as well as the ESP32 receivers.
+Any device that speaks this format over a serial port can feed the app —
+an SDR pipeline works just as well as the ESP32 receivers.
 
 ## Testing
 
@@ -151,19 +132,13 @@ pipeline could feed the app just as well as the ESP32 receivers.
 tests/run_tests.sh
 ```
 
-The ASTM F3411 decoder is shared between both firmware targets
-(`firmware/common/odid_decode.h`) and unit-tested host-side against golden
-vectors from the official OpenDroneID Wireshark dissector's sample
-captures — real over-the-air frames, every field cross-checked against the
-reference dissector (which caught a real bug: the vertical-speed invalid
-marker, raw 126, now decodes as unknown instead of +63 m/s). App tests
-cover the serial JSON schema, CRC32 (pinned against the firmware's
-esp_rom_crc32), tile math, and the manufacturer decode.
+Both firmware targets share one Remote ID decoder
+(`firmware/common/odid_decode.h`). It is tested on the host against real
+over-the-air captures from the official OpenDroneID reference tools. App
+tests cover the serial format, checksums, and tile math.
 
 ## License
 
-GPL-3.0-or-later — see [LICENSE](LICENSE). Third-party components and data
-sources are inventoried in [THIRD_PARTY.md](THIRD_PARTY.md); all are
-GPL-compatible (Apache-2.0, MIT, BSD, and GNU FreeFont with the
-font-embedding exception). Map tiles are fetched by the user and are not
-distributed with this repository.
+GPL-3.0-or-later — see [LICENSE](LICENSE). Third-party components are
+listed in [THIRD_PARTY.md](THIRD_PARTY.md); all are GPL-compatible. Map
+tiles are fetched by the user and are not part of this repository.
