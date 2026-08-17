@@ -62,11 +62,21 @@ struct PortMenu: View {
     @Environment(AppModel.self) private var model
     var body: some View {
         let ports = SerialManager.candidatePorts()
+        let connected: String? = {
+            if case .connected(let p) = model.serialStatus { return p }
+            return nil
+        }()
         Menu {
             Button("Auto-detect") { model.selectPort(nil) }
             Divider()
             ForEach(ports, id: \.self) { p in
-                Button(p) { model.selectPort(p) }
+                Button { model.selectPort(p) } label: {
+                    if p == connected {
+                        Label(p, systemImage: "checkmark")
+                    } else {
+                        Text(p)
+                    }
+                }
             }
             if ports.isEmpty { Text("No serial ports found") }
         } label: {
@@ -100,16 +110,15 @@ struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        List {
+        @Bindable var model = model
+        // Native list selection: arrow keys walk the list, clicks select,
+        // and the selection pill takes each drone's identity color.
+        List(selection: $model.selection) {
             Section("Drones — \(model.trackList.count)") {
                 ForEach(model.trackList) { t in
                     DroneRow(track: t)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            model.selection = (model.selection == t.id) ? nil : t.id
-                        }
-                        .listRowBackground(RowBackground(selected: model.selection == t.id,
-                                                         color: t.color))
+                        .tag(t.id)
+                        .listItemTint(t.color)
                 }
             }
         }
@@ -124,21 +133,6 @@ struct SidebarView: View {
                          : "Waiting for the receiver…")
                 }
             }
-        }
-    }
-}
-
-/// Selection: inset left accent bar plus a tint — reads even in greyscale.
-struct RowBackground: View {
-    let selected: Bool
-    let color: Color
-    var body: some View {
-        if selected {
-            HStack(spacing: 0) {
-                Rectangle().fill(color).frame(width: 3)
-                color.opacity(0.10)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
     }
 }
@@ -438,6 +432,14 @@ struct DroneDetailCard: View {
                 Spacer(minLength: 12)
                 Text(RidNames.uaType(track.uaType))
                     .font(.caption).foregroundStyle(Theme.muted)
+                Button {
+                    model.selection = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Theme.muted)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
             }
 
             VitalsGrid(track: track)
@@ -672,6 +674,15 @@ struct StatusStrip: View {
         return model.now.timeIntervalSince(hb) < 6
     }
 
+    private var deviceHelp: String {
+        var parts: [String] = []
+        if let f = model.stats.firmware { parts.append("firmware \(f)") }
+        if model.stats.uptimeMs > 0 {
+            parts.append("up \(fmtAge(Double(model.stats.uptimeMs) / 1000))")
+        }
+        return parts.isEmpty ? "receiver link" : parts.joined(separator: " · ")
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             Seg {
@@ -683,6 +694,7 @@ struct StatusStrip: View {
                      ? (heartbeatOK ? model.serialStatus.label : "no heartbeat")
                      : "no device")
             }
+            .help(deviceHelp)
             divider
             Seg { Text("wifi \(model.stats.wifiFrames.formatted())") }
             divider
