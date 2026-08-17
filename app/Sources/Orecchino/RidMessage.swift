@@ -15,6 +15,15 @@ struct RidMessage: Decodable {
     var system: SystemMsg? = nil
     var op_id: OpId? = nil
 
+    // tile-sync replies (fs_f / fs_ls_done / ack / fs_ok / fs_err / fs_info)
+    var q: Int? = nil
+    var p: String? = nil
+    var s: Int? = nil
+    var n: Int? = nil
+    var total: Int? = nil
+    var used: Int? = nil
+    var msg: String? = nil
+
     // heartbeat / boot fields
     var up: Int? = nil
     var wifi_frames: Int? = nil

@@ -30,6 +30,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key>  <string>14.0</string>
     <key>LSApplicationCategoryType</key> <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key> <true/>
+    <key>NSLocationUsageDescription</key>
+    <string>Your location is sent to the Remote ID receiver so it can show range to detected drones.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Your location is sent to the Remote ID receiver so it can show range to detected drones.</string>
     <key>NSHumanReadableCopyright</key> <string>Receive-only ASTM F3411 Remote ID viewer</string>
 </dict>
 </plist>

@@ -30,6 +30,13 @@ struct ContentView: View {
                     Label("Demo", systemImage: "sparkles")
                 }
                 .help("Inject two simulated drones")
+                Menu {
+                    Button("Sync Map Tiles to Receiver") { model.tileSync.start() }
+                    if let l = model.tileSync.phase.label { Text(l) }
+                } label: {
+                    Label("Device", systemImage: "square.and.arrow.down.on.square")
+                }
+                .help("Download map tiles and push them to the receiver's screen")
             }
         }
     }
@@ -686,6 +693,10 @@ struct StatusStrip: View {
             }
             divider
             Seg { Text("ch \(model.stats.channel)") }
+            if let tl = model.tileSync.phase.label {
+                divider
+                Seg { Text(tl).foregroundStyle(Theme.accent) }
+            }
             divider
             Seg {
                 Text(model.tfr.status.label)

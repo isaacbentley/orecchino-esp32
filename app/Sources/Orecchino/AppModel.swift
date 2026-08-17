@@ -92,6 +92,11 @@ final class AppModel {
     /// follow-all logic refits on it.
     var updateTick = 0
     let tfr = TFRService()
+    let tileSync = TileSync()
+    let location = LocationService()
+    /// False whenever the device needs a fresh home/TFR context push (on
+    /// connect, first location fix, TFR refresh, and daily).
+    var deviceCtxPushed = false
     var showTFR = true
     var selectedTFR: String?
 
@@ -118,7 +123,10 @@ final class AppModel {
         }
         serial.onStatus = { [weak self] st in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.serialStatus = st }
+                MainActor.assumeIsolated {
+                    self?.serialStatus = st
+                    if !st.isConnected { self?.deviceCtxPushed = false }
+                }
             }
         }
         serial.start(preferred: nil)
@@ -133,6 +141,22 @@ final class AppModel {
             }
         }
         tfr.start()
+        location.start()
+        // Daily context refresh (TFRs age out; home may move).
+        Timer.scheduledTimer(withTimeInterval: 86400, repeats: true) { _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { AppModel.shared.deviceCtxPushed = false }
+            }
+        }
+        // Test hook: ORECCHINO_AUTOSYNC=1 starts a tile sync once the port
+        // rotation has had time to settle on the JSON feed.
+        if ProcessInfo.processInfo.environment["ORECCHINO_AUTOSYNC"] != nil {
+            Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { _ in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { AppModel.shared.tileSync.start() }
+                }
+            }
+        }
     }
 
     var trackList: [DroneTrack] {
@@ -161,11 +185,17 @@ final class AppModel {
             stats.bleOk = msg.ble ?? stats.bleOk
             stats.bleExt = msg.ble_ext ?? stats.bleExt
             stats.lastHeartbeat = Date()
+            if !deviceCtxPushed {
+                deviceCtxPushed = true
+                pushDeviceContext()
+            }
         case "boot":
             stats.firmware = "\(msg.fw ?? "?") \(msg.ver ?? "")"
             stats.lastHeartbeat = Date()
         case "rid":
             ingestRid(msg, demo: demo)
+        case "ack", "fs_ok", "fs_err", "fs_f", "fs_ls_done", "fs_info":
+            tileSync.handle(msg)
         default:
             break
         }
@@ -254,6 +284,38 @@ final class AppModel {
             t.seenOp = true
         }
         tracks[key] = t
+    }
+
+    /// Push operator location + nearby TFR polygons to the receiver so it
+    /// can range contacts and buzz on TFR incursions.
+    private func pushDeviceContext() {
+        let home = location.current
+        if let h = home {
+            serial.send(String(format: #"{"cmd":"set_home","lat":%.6f,"lon":%.6f}"#,
+                               h.latitude, h.longitude))
+        }
+        guard !tfr.zones.isEmpty else { return }
+        let ref = home ?? CLLocationCoordinate2D(latitude: 37.7749,
+                                                 longitude: -122.4194)
+        let refLoc = CLLocation(latitude: ref.latitude, longitude: ref.longitude)
+        serial.send(#"{"cmd":"tfr_clear"}"#)
+        var sent = 0
+        for z in tfr.zones {
+            guard sent < 16 else { break }
+            let d = refLoc.distance(from: CLLocation(latitude: z.centroid.latitude,
+                                                     longitude: z.centroid.longitude))
+            guard d < 200_000 else { continue }
+            let ring = z.outerRing
+            let step = max(1, Int(ceil(Double(ring.count) / 24.0)))
+            let pts = stride(from: 0, to: ring.count, by: step).map { ring[$0] }
+            guard pts.count >= 3 else { continue }
+            let ptsStr = pts
+                .map { String(format: "[%.5f,%.5f]", $0.latitude, $0.longitude) }
+                .joined(separator: ",")
+            let id = String(z.notam.prefix(14))
+            serial.send(#"{"cmd":"tfr_add","id":"\#(id)","pts":[\#(ptsStr)]}"#)
+            sent += 1
+        }
     }
 
     private func expireOld() {

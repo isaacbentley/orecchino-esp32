@@ -50,6 +50,45 @@ arduino-cli compile -b esp32:esp32:XIAO_ESP32C3:PartitionScheme=huge_app firmwar
 arduino-cli upload  -b esp32:esp32:XIAO_ESP32C3:PartitionScheme=huge_app -p /dev/cu.usbmodemXXXX firmware/orecchino_fw
 ```
 
+## SenseCAP Indicator — `firmware/orecchino_sensecap`
+
+The same radio core and serial contract on a Seeed SenseCAP Indicator D1
+(ESP32-S3 + 4" 480×480 touch LCD), rendered as a standalone C-UAS console:
+offline dark map with live contact markers, tap a marker for a detail card,
+drag to pan, pinch or on-screen buttons to zoom, target button to re-enable
+auto-follow, side hardware button for a list view. Header shows contact
+count and RX health (red banner on an emergency-status contact); footer
+shows last-RX age. Frames compose off-screen in PSRAM (3×3-tile world
+canvas + flip-crop) so the panel never shows partial redraws.
+
+Build + flash (the Indicator's USB-C goes to a **CH340 UART**, not the S3's
+native USB — use the `usbserial` port; the `usbmodem` port is the RP2040.
+If auto-reset fails, hold the green top button while plugging in USB):
+
+```bash
+arduino-cli lib install "GFX Library for Arduino" PCA95x5 PNGdec
+```
+
+```bash
+arduino-cli compile -b "esp32:esp32:esp32s3:FlashMode=qio,FlashSize=8M,PSRAM=opi,CPUFreq=240,UploadSpeed=115200,CDCOnBoot=default" firmware/orecchino_sensecap
+arduino-cli upload  -b "esp32:esp32:esp32s3:FlashMode=qio,FlashSize=8M,PSRAM=opi,CPUFreq=240,UploadSpeed=115200,CDCOnBoot=default" -p /dev/cu.usbserial-XXXX firmware/orecchino_sensecap
+```
+
+Offline map tiles (San Francisco + 1 mi buffer, zooms 11–15, ~4.8 MB;
+map data © OpenStreetMap contributors, tiles © CARTO dark_all):
+
+```bash
+python3 tools/fetch_tiles.py            # downloads into firmware/orecchino_sensecap/data
+tools/pack_fs.sh /dev/cu.usbserial-XXXX # LittleFS image -> tile partition
+```
+
+Display bring-up follows Seeed's Arduino wiki recipe: Arduino_GFX RGB panel
++ ST7701 type-1 init, with the LCD CS/RESET routed through the TCA9535 IO
+expander via the vendored `Indicator_SWSPI`/`Indicator_Extender` shims
+(from LongDirtyAnimAlf/SenseCap). Touch is a raw-register FT6336U poll.
+Flashing wipes Meshtastic on LoRa models; the Meshtastic web flasher
+restores it.
+
 ## macOS app — `app/`
 
 SwiftUI + MapKit, no dependencies, builds with Command Line Tools only
@@ -74,7 +113,9 @@ open app/build/Orecchino.app
   absent values render as dimmed em-dashes, never fake zeros; an evidence
   string (`BL·Y·`) shows which ODID message types have actually been decoded
 - Spoof heuristic: flags a drone whose claimed operator is >15 km away
-- Auto-detects the ESP32's serial port and reconnects on unplug
+- Auto-detects the receiver's serial port, rotating across candidate ports
+  until JSON heartbeats appear (multi-port devices like the Indicator expose
+  a silent RP2040 CDC next to the real CH340 feed), reconnects on unplug
 - **Demo** toolbar toggle injects two simulated drones for UI testing
   without hardware
 - Tracks merge across WiFi/BLE by UAS ID (trails and counters merge too);

@@ -1,0 +1,8 @@
+# SenseCAP Indicator (8 MB flash): no OTA pair, 2 MB app, rest is map tiles.
+# Layout mirrors the stock schemes so Arduino's boot_app0 write at 0xe000
+# lands on otadata as it expects.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x200000,
+littlefs, data, spiffs,  0x210000, 0x5E0000,

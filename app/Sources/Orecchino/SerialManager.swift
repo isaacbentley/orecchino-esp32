@@ -64,36 +64,117 @@ final class SerialManager: @unchecked Sendable {
         }
     }
 
+    /// Write one line to the device (used by the tile sync protocol).
+    /// Buffered: bytes the port can't take yet are retried via asyncAfter so
+    /// the shared queue (drain, reconnect timer) is never blocked.
+    func send(_ line: String) {
+        queue.async {
+            guard self.fd >= 0 else { return }
+            self.txBuf.append(contentsOf: (line + "\n").utf8)
+            self.flushTx()
+        }
+    }
+
     // MARK: - queue-confined
+
+    private var txBuf = Data()
+    private var txRetryPending = false
+
+    private func flushTx() {
+        guard fd >= 0 else {
+            txBuf.removeAll()
+            return
+        }
+        while !txBuf.isEmpty {
+            let n = txBuf.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+            if n > 0 {
+                txBuf.removeFirst(n)
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else if n < 0 && errno == EAGAIN {
+                if !txRetryPending {
+                    txRetryPending = true
+                    queue.asyncAfter(deadline: .now() + .milliseconds(2)) { [weak self] in
+                        guard let self else { return }
+                        self.txRetryPending = false
+                        self.flushTx()
+                    }
+                }
+                return
+            } else {
+                // Hard error — the read path notices the unplug and reconnects.
+                txBuf.removeAll()
+                return
+            }
+        }
+    }
+
+    private var candidateIdx = 0
+    private var openedAt = Date.distantPast
+    private var sawJson = false
 
     private func startReconnectTimer() {
         reconnect?.cancel()
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + 2, repeating: 2)
         t.setEventHandler { [weak self] in
-            guard let self, self.fd < 0 else { return }
-            self.tryOpen()
+            guard let self else { return }
+            if self.fd < 0 {
+                self.tryOpen()
+            } else if self.preferredPath == nil, !self.sawJson,
+                      Date().timeIntervalSince(self.openedAt) > 6 {
+                // Connected but silent — multi-port devices (e.g. the
+                // SenseCAP's RP2040 CDC vs its CH340) mean the first port
+                // isn't always the right one. Rotate until JSON appears.
+                self.candidateIdx += 1
+                self.closePort()
+                self.onStatus?(.searching)
+                self.tryOpen()
+            }
         }
         t.resume()
         reconnect = t
     }
 
+    /// ORECCHINO_DEBUG=1 traces port selection to /tmp/orecchino-serial.log
+    private let debug = ProcessInfo.processInfo.environment["ORECCHINO_DEBUG"] != nil
+    private func dlog(_ s: String) {
+        guard debug else { return }
+        let line = "\(Date()) \(s)\n"
+        if let d = line.data(using: .utf8),
+           let h = FileHandle(forWritingAtPath: "/tmp/orecchino-serial.log") {
+            h.seekToEndOfFile()
+            h.write(d)
+            try? h.close()
+        } else {
+            FileManager.default.createFile(atPath: "/tmp/orecchino-serial.log",
+                                           contents: line.data(using: .utf8))
+        }
+    }
+
     private func tryOpen() {
-        let path = preferredPath ?? Self.candidatePorts().first
+        let cands = Self.candidatePorts()
+        let path = preferredPath ?? (cands.isEmpty ? nil : cands[candidateIdx % cands.count])
         guard let path else {
+            dlog("no candidates")
             onStatus?(.searching)
             return
         }
+        dlog("trying \(path) of \(cands.count) candidates idx=\(candidateIdx)")
         let f = Darwin.open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard f >= 0 else {
+            dlog("open failed errno=\(errno)")
             onStatus?(.searching)
             return
         }
+        dlog("opened \(path) fd=\(f)")
 
         var tio = termios()
         if tcgetattr(f, &tio) == 0 {
             cfmakeraw(&tio)
-            cfsetspeed(&tio, speed_t(B115200))
+            // 460800 for the SenseCAP's CH340 UART; USB-CDC devices (XIAO)
+            // ignore the baud entirely.
+            cfsetspeed(&tio, 460800)
             tio.c_cflag |= tcflag_t(CLOCAL | CREAD)
             tcsetattr(f, TCSANOW, &tio)
         }
@@ -101,6 +182,8 @@ final class SerialManager: @unchecked Sendable {
         fd = f
         currentPath = path
         buffer.removeAll()
+        openedAt = Date()
+        sawJson = false
 
         let src = DispatchSource.makeReadSource(fileDescriptor: f, queue: queue)
         src.setEventHandler { [weak self] in self?.drain() }
@@ -116,6 +199,7 @@ final class SerialManager: @unchecked Sendable {
         fd = -1
         currentPath = nil
         buffer.removeAll()
+        txBuf.removeAll()
     }
 
     private func drain() {
@@ -140,7 +224,10 @@ final class SerialManager: @unchecked Sendable {
             buffer.removeSubrange(buffer.startIndex...nl)
             if let s = String(data: Data(lineData), encoding: .utf8) {
                 let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { onLine?(trimmed) }
+                if !trimmed.isEmpty {
+                    if trimmed.hasPrefix("{") { sawJson = true }
+                    onLine?(trimmed)
+                }
             }
         }
     }

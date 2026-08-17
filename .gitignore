@@ -5,5 +5,11 @@ app/build/
 # Arduino build artifacts
 firmware/**/build/
 
+# Python
+__pycache__/
+
 # macOS
 .DS_Store
+
+# offline tile cache (fetched by tools/fetch_tiles.py; ~5 MB of PNGs)
+firmware/orecchino_sensecap/data/tiles/
