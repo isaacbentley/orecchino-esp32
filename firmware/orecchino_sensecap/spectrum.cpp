@@ -5,10 +5,11 @@
 //   the sniffer dwells there; the sketch sweeps ch 1-13 evenly in this mode
 //   with the BLE scanner paused for clean airtime), over a scrolling
 //   waterfall. Packet energy, not an FFT — quiet channels decay, loud glow.
-//   Sub-GHz: true swept spectrum from the SX1262 — 128 bins across
-//   850-930 MHz, ~1 s per sweep, with peak hold and its own waterfall
-//   (one row per completed sweep, like a real swept analyzer).
-// Amplitudes are 0..255 ~ -115..-45 dBm.
+//   Sub-GHz: true swept spectrum from the SX1262 — 128 bins, tap-to-zoom
+//   spans from 80 MHz down to 1.25 MHz with RBW to match, ~2.7 sweeps/s,
+//   peak hold, and a waterfall row per completed sweep. The display window
+//   auto-ranges in dBm per sweep, since the floor drops with each zoom.
+// The 2.4 GHz pane maps a fixed -115..-45 dBm window (RBW never changes).
 #include "spectrum.h"
 
 #ifdef ORECCHINO_DISPLAY
@@ -137,11 +138,7 @@ static void apply_span() {
   if (s_center_hz > BAND_HI_HZ - half) s_center_hz = BAND_HI_HZ - half;
   sx1262_sweep_set_span(s_center_hz - half, s_center_hz + half, N_BIN);
   // Old span's data is meaningless at the new tuning — start clean.
-  memset(s_swp, 0, sizeof(s_swp));
-  memset(s_pkb, 0, sizeof(s_pkb));
-  memset(s_wfb, 0, sizeof(s_wfb));
-  s_wfb_head = 0;
-  s_sweep_cursor = 0;
+  clear_sub_data();
 }
 
 void spectrum_tap(int x, int y) {
@@ -171,11 +168,10 @@ void spectrum_reset(uint32_t now) {
   memset(s_a24, 0, sizeof(s_a24));
   memset(s_pk24, 0, sizeof(s_pk24));
   memset(s_wfa, 0, sizeof(s_wfa));
-  memset(s_swp, 0, sizeof(s_swp));
-  memset(s_pkb, 0, sizeof(s_pkb));
-  memset(s_wfb, 0, sizeof(s_wfb));
-  s_wfa_head = s_wfb_head = 0;
-  s_sweep_cursor = 0;
+  clear_sub_data();
+  s_ref_lo = -115;
+  s_ref_hi = -45;
+  s_wfa_head = 0;
   for (int i = 0; i <= N_CH; i++) { s_wsum[i] = 0; s_wcnt[i] = 0; }
   s_last_frame = 0;
   s_radio_ok = sx1262_sweep_begin();
@@ -230,10 +226,34 @@ static void step_live() {
     if (s_sweep_cursor < before) {  // wrapped: one full sweep done
       s_wfb_head = (s_wfb_head + 1) % B_WF_ROWS;
       memcpy(s_wfb[s_wfb_head], s_swp, N_BIN);
+      // Auto-range from this completed sweep: histogram over the chip's
+      // -127..0 dBm range, floor at the 15th percentile.
+      uint8_t hist[128] = {0};
+      int peak = -127;
+      for (int i = 0; i < N_BIN; i++) {
+        hist[s_swp[i] + 127]++;
+        if (s_swp[i] > peak) peak = s_swp[i];
+      }
+      int cum = 0, floor_dbm = -127;
+      for (int d = 0; d < 128; d++) {
+        cum += hist[d];
+        if (cum >= N_BIN * 15 / 100) { floor_dbm = d - 127; break; }
+      }
+      float tlo = floor_dbm - 4;
+      float thi = peak + 6 > 0 ? 0 : peak + 6;
+      if (thi - tlo < 36) thi = tlo + 36;  // keep noise texture ~10% tall
+      if (s_ref_snap) {
+        s_ref_snap = false;
+        s_ref_lo = tlo;
+        s_ref_hi = thi;
+      } else {  // ease over ~3 sweeps so the window doesn't pump
+        s_ref_lo += (tlo - s_ref_lo) * 0.3f;
+        s_ref_hi += (thi - s_ref_hi) * 0.3f;
+      }
     }
     for (int i = 0; i < N_BIN; i++) {
       if (s_swp[i] > s_pkb[i]) s_pkb[i] = s_swp[i];
-      else s_pkb[i] -= 0.15f;
+      else s_pkb[i] -= 0.05f;  // ~0.6 dB/s peak-hold decay
     }
   }
 }
@@ -305,15 +325,24 @@ static void draw(Arduino_Canvas* cv) {
   } else {
     for (int i = 0; i < N_BIN; i++) {
       int x = PX0 + (i * PW) / N_BIN;
-      int v = s_swp[i];
+      int v = sub_lvl(s_swp[i]);
       int h = v * B_H / 255;
       if (h > 0) cv->fillRect(x, B_BASE - h, 3, h, s_lut[8 + (v * 55) / 255]);
-      int ph = (int)s_pkb[i] * B_H / 255;
+      int ph = sub_lvl((int)s_pkb[i]) * B_H / 255;
       if (ph > 1) cv->fillRect(x, B_BASE - ph - 1, 3, 1, C_PEAK);
     }
     // sweep cursor: where the analyzer is measuring right now
     int cx = PX0 + (s_sweep_cursor * PW) / N_BIN;
     cv->drawFastVLine(cx, B_BASE - B_H, B_H, C_TEXT);
+    // reference-level axis: the auto-ranged display window in dBm
+    char db[8];
+    cv->setTextColor(C_MUTED);
+    snprintf(db, sizeof(db), "%d", (int)s_ref_hi);
+    cv->setCursor(462 - strlen(db) * 6, B_BASE - B_H + 2);
+    cv->print(db);
+    snprintf(db, sizeof(db), "%d", (int)s_ref_lo);
+    cv->setCursor(462 - strlen(db) * 6, B_BASE - 10);
+    cv->print(db);
   }
   cv->setTextColor(C_MUTED);
   for (int g = 0; g < 5; g++) {
@@ -327,10 +356,11 @@ static void draw(Arduino_Canvas* cv) {
     cv->print(fb);
   }
   for (int r = 0; r < B_WF_ROWS; r++) {
-    const uint8_t* row = s_wfb[(s_wfb_head - r + B_WF_ROWS) % B_WF_ROWS];
+    const int8_t* row = s_wfb[(s_wfb_head - r + B_WF_ROWS) % B_WF_ROWS];
     int y = B_WF_Y + r;
     for (int i = 0; i < N_BIN; i++)
-      cv->fillRect(PX0 + (i * PW) / N_BIN, y, 3, 1, s_lut[row[i] >> 2]);
+      cv->fillRect(PX0 + (i * PW) / N_BIN, y, 3, 1,
+                   s_lut[sub_lvl(row[i]) >> 2]);
   }
 
   cv->flush();
