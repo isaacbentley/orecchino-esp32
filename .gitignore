@@ -1,0 +1,9 @@
+# SwiftPM
+app/.build/
+app/build/
+
+# Arduino build artifacts
+firmware/**/build/
+
+# macOS
+.DS_Store
