@@ -8,6 +8,7 @@ struct RidMessage: Decodable {
     var mac: String? = nil
     var rssi: Int? = nil
     var ch: Int? = nil
+    var phy: String? = nil   // BLE: "1m" | "2m" | "coded" (BT5 long range)
     var basic_id: [BasicId]? = nil
     var loc: Loc? = nil
     var self_id: SelfId? = nil

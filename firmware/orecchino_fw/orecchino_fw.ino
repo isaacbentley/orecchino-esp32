@@ -5,11 +5,11 @@
 //   * WiFi beacons        — vendor IE, OUI FA:0B:BC, type 0x0D
 //   * WiFi NAN SDF        — public action frames, WFA OUI 50:6F:9A / NAN,
 //                           service org.opendroneid.remoteid
-//   * Bluetooth LE        — service data UUID 0xFFFA, app code 0x0D
-//                           (legacy ADV; extended/long-range only if the
-//                           NimBLE build has BLE_EXT_ADV — the stock Arduino
-//                           core does not, and compliant transmitters send
-//                           legacy BT4 frames alongside BT5 anyway)
+//   * Bluetooth LE        — service data UUID 0xFFFA, app code 0x0D.
+//                           Legacy BT4 ADV plus BT5 extended advertising on
+//                           both 1M and coded (long-range) PHY, via
+//                           NimBLE-Arduino with CONFIG_BT_NIMBLE_EXT_ADV=1
+//                           (see build_opt.h)
 //
 // Output: one JSON object per line on the native USB CDC serial port.
 //   {"type":"boot", ...}   once at startup
@@ -21,12 +21,10 @@
 #include <stdarg.h>
 #include "sdkconfig.h"
 #include "esp_wifi.h"
-#include <BLEDevice.h>
-#include <BLEScan.h>
-#include <BLEAdvertisedDevice.h>
+#include <NimBLEDevice.h>
 
 #define FW_NAME    "orecchino"
-#define FW_VERSION "0.1.0"
+#define FW_VERSION "0.3.0"
 
 // ---------------------------------------------------------------- event queue
 
@@ -39,6 +37,7 @@ typedef struct {
   uint8_t mac[6];
   int8_t  rssi;
   uint8_t chan;
+  uint8_t phy;   // BLE only: 1 = 1M, 2 = 2M, 3 = coded (long range), 0 = n/a
   uint8_t len;
   uint8_t data[232];
 } RidEvt;
@@ -80,6 +79,10 @@ static QueueHandle_t s_q;
 static volatile uint32_t s_cnt_wifi_frames = 0;
 static volatile uint32_t s_cnt_ble_advs    = 0;
 static volatile uint32_t s_cnt_rid         = 0;
+static volatile uint32_t s_cnt_rid_wifi    = 0;  // per-path match counters:
+static volatile uint32_t s_cnt_rid_nan     = 0;  // "why no NAN?" is the
+static volatile uint32_t s_cnt_rid_ble     = 0;  // first field question
+static volatile uint32_t s_cnt_pfail       = 0;  // matched but failed decode
 static volatile uint32_t s_cnt_dropped     = 0;
 static volatile uint8_t  s_cur_chan        = 6;
 static bool s_ble_ok  = false;
@@ -87,13 +90,17 @@ static bool s_ble_ext = false;
 
 // Callbacks run in the WiFi / Bluedroid task context: copy out and return.
 static void enqueue_rid(uint8_t src, const uint8_t* mac, int8_t rssi,
-                        uint8_t chan, const uint8_t* odid, int len) {
+                        uint8_t chan, uint8_t phy, const uint8_t* odid, int len) {
   if (len < 25 || !s_q) return;
+  if (src == SRC_WIFI_BEACON) s_cnt_rid_wifi++;
+  else if (src == SRC_WIFI_NAN) s_cnt_rid_nan++;
+  else s_cnt_rid_ble++;
   RidEvt e;
   e.src  = src;
   memcpy(e.mac, mac, 6);
   e.rssi = rssi;
   e.chan = chan;
+  e.phy  = phy;
   if (len > (int)sizeof(e.data)) len = sizeof(e.data);
   e.len  = len;
   memcpy(e.data, odid, len);
@@ -102,9 +109,12 @@ static void enqueue_rid(uint8_t src, const uint8_t* mac, int8_t rssi,
 
 // ------------------------------------------------------------- WiFi sniffing
 
-// Hop list biased toward channel 6, the Open Drone ID default.
-static const uint8_t HOP[] = { 6, 1, 11, 6, 2, 7, 6, 3, 12, 6, 4, 8, 6, 5, 13, 6, 9, 10 };
-static const uint32_t HOP_DWELL_MS = 175;
+// NAN is spec-locked to the channel 6 social channel, so park there 75% of
+// the time; brief visits to 1 and 11 cover beacon RID on the rest of the
+// band (20 MHz-wide channels on 5 MHz spacing: {1,6,11} hears everything).
+typedef struct { uint8_t chan; uint16_t dwell_ms; } HopSlot;
+static const HopSlot HOP[] = { {6, 600}, {1, 200}, {6, 600}, {11, 200} };
+static const size_t HOP_N = sizeof(HOP) / sizeof(HOP[0]);
 
 static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT) return;
@@ -119,18 +129,20 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
   uint8_t stype = fc0 & 0xF0;
   const uint8_t* sa = d + 10;        // SA in mgmt header
 
-  if (stype == 0x80) {
-    // Beacon: 24 B header + 12 B fixed params, then IEs.
+  if (stype == 0x80 || stype == 0x50) {
+    // Beacon or probe response: 24 B header + 12 B fixed params, then IEs.
     int off = 36;
     while (off + 2 <= len) {
       uint8_t id = d[off], l = d[off + 1];
       if (off + 2 + l > len) break;
       const uint8_t* ie = d + off + 2;
-      // Vendor specific, ASD-STAN OUI FA:0B:BC, type 0x0D, then [counter][ODID]
-      if (id == 221 && l >= 30 &&
-          ie[0] == 0xFA && ie[1] == 0x0B && ie[2] == 0xBC && ie[3] == 0x0D) {
+      // Vendor specific, type 0x0D, then [counter][ODID].
+      // OUIs: FA:0B:BC (ASD-STAN) and 90:3A:E6 (Parrot), same payload.
+      if (id == 221 && l >= 30 && ie[3] == 0x0D &&
+          ((ie[0] == 0xFA && ie[1] == 0x0B && ie[2] == 0xBC) ||
+           (ie[0] == 0x90 && ie[1] == 0x3A && ie[2] == 0xE6))) {
         enqueue_rid(SRC_WIFI_BEACON, sa, p->rx_ctrl.rssi, p->rx_ctrl.channel,
-                    ie + 5, l - 5);
+                    0, ie + 5, l - 5);
       }
       off += 2 + l;
     }
@@ -152,7 +164,7 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
       int avail = blen - (i + 11);
       if (n > avail) n = avail;
       enqueue_rid(SRC_WIFI_NAN, sa, p->rx_ctrl.rssi, p->rx_ctrl.channel,
-                  b + i + 11, n);
+                  0, b + i + 11, n);
       break;
     }
   }
@@ -161,77 +173,79 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
 static void wifi_start_sniffer() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  esp_wifi_set_ps(WIFI_PS_NONE);  // modem sleep gates promiscuous RX
   delay(100);
   wifi_promiscuous_filter_t filt = {};
   filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
   esp_wifi_set_promiscuous_filter(&filt);
   esp_wifi_set_promiscuous_rx_cb(&wifi_cb);
   esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(HOP[0], WIFI_SECOND_CHAN_NONE);
-  s_cur_chan = HOP[0];
+  esp_wifi_set_channel(HOP[0].chan, WIFI_SECOND_CHAN_NONE);
+  s_cur_chan = HOP[0].chan;
 }
 
 // -------------------------------------------------------------- BLE scanning
 
-static void handle_adv(const uint8_t* addr, int rssi, const uint8_t* data, int len) {
+static void handle_adv(const uint8_t* addr, int rssi, uint8_t phy,
+                       const uint8_t* data, int len) {
   s_cnt_ble_advs++;
   int i = 0;
   while (i + 1 < len) {
     uint8_t l = data[i];             // AD length: type byte + payload
     if (l == 0 || i + 1 + l > len) break;
     uint8_t t = data[i + 1];
-    // Service Data 16-bit, UUID 0xFFFA (ASTM), app code 0x0D
-    if (t == 0x16 && l >= 30) {
+    if (l >= 30) {
       const uint8_t* sd = data + i + 2;
-      if (sd[0] == 0xFA && sd[1] == 0xFF && sd[2] == 0x0D) {
+      // Service Data 16-bit, UUID 0xFFFA (ASTM), app code 0x0D — or the
+      // draft-era manufacturer-specific layout, mfg code 0x0200, same 0x0D.
+      bool svc = t == 0x16 && sd[0] == 0xFA && sd[1] == 0xFF && sd[2] == 0x0D;
+      bool mfg = t == 0xFF && sd[0] == 0x00 && sd[1] == 0x02 && sd[2] == 0x0D;
+      if (svc || mfg) {
         // sd[3] = message counter, sd+4 = ODID message or pack
-        enqueue_rid(SRC_BLE, addr, rssi, 0, sd + 4, l - 5);
+        enqueue_rid(SRC_BLE, addr, rssi, 0, phy, sd + 4, l - 5);
       }
     }
     i += 1 + l;
   }
 }
 
-static BLEScan* s_scan = nullptr;
+static NimBLEScan* s_scan = nullptr;
 
-class RidAdvCallbacks : public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice dev) override {
-    uint8_t mac[6] = {0};
-    unsigned b[6];
-    if (sscanf(dev.getAddress().toString().c_str(),
-               "%02x:%02x:%02x:%02x:%02x:%02x",
-               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6)
-      for (int i = 0; i < 6; i++) mac[i] = (uint8_t)b[i];
-    handle_adv(mac, dev.getRSSI(), dev.getPayload(), (int)dev.getPayloadLength());
+class RidScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* dev) override {
+    uint8_t mac[6];
+    const uint8_t* v = dev->getAddress().getVal();  // NimBLE: LSB first
+    for (int i = 0; i < 6; i++) mac[i] = v[5 - i];
+    uint8_t phy = 0;
+#if CONFIG_BT_NIMBLE_EXT_ADV
+    phy = dev->getPrimaryPhy();                     // 1 = 1M, 3 = coded
+    if (dev->getSecondaryPhy() == 3) phy = 3;       // payload rode long range
+#endif
+    const std::vector<uint8_t>& p = dev->getPayload();
+    handle_adv(mac, dev->getRSSI(), phy, p.data(), (int)p.size());
+  }
+
+  void onScanEnd(const NimBLEScanResults&, int) override {
+    if (s_scan) s_scan->start(0, false, true);  // forever means forever
   }
 };
 
 static bool ble_start_scanner() {
-  BLEDevice::init("");
-  s_scan = BLEDevice::getScan();
+  NimBLEDevice::init("");
+  s_scan = NimBLEDevice::getScan();
   if (!s_scan) return false;
-  static RidAdvCallbacks cb;
-  // duplicates on: repeated advertisements carry fresh Location messages.
-  // shouldParse off: we read the raw payload; parsing allocates Strings
-  // per advertisement and starves the heap.
-  s_scan->setAdvertisedDeviceCallbacks(&cb, true, false);
+  static RidScanCallbacks cb;
+  // duplicates on: repeated advertisements carry fresh Location messages
+  s_scan->setScanCallbacks(&cb, true);
   s_scan->setActiveScan(false);
-  s_scan->setInterval(50);  // ms
-  s_scan->setWindow(25);    // ms — leave air time for WiFi coex
-  return s_scan->start(0 /* forever */, nullptr, false);
-}
-
-// BLEScan allocates one stored device per unique address and only frees on
-// clearResults(); random advertiser addresses rotate constantly, so without
-// this the heap is exhausted in under a minute. stop() first so the NimBLE
-// host task cannot race the clear. The few-ms gap every cycle is harmless.
-static void ble_maintain() {
-  static uint32_t last = 0;
-  if (!s_scan || millis() - last < 5000) return;
-  last = millis();
-  s_scan->stop();
-  s_scan->clearResults();
-  s_scan->start(0, nullptr, false);
+  s_scan->setDuplicateFilter(0);
+  s_scan->setMaxResults(0);  // callbacks only — nothing stored, nothing leaks
+  s_scan->setInterval(50);   // ms
+  s_scan->setWindow(25);     // ms — leave air time for WiFi coex
+#if CONFIG_BT_NIMBLE_EXT_ADV
+  s_ble_ext = true;          // scanning 1M + coded PHY (SCAN_ALL default)
+#endif
+  return s_scan->start(0 /* forever */, false, true);
 }
 
 // ------------------------------------------------------------- ODID decoding
@@ -381,6 +395,8 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
        "\"rssi\":%d", SRC_NAMES[e->src], e->mac[0], e->mac[1], e->mac[2],
        e->mac[3], e->mac[4], e->mac[5], e->rssi);
   if (e->chan) jput(",\"ch\":%u", e->chan);
+  if (e->src == SRC_BLE && e->phy)
+    jput(",\"phy\":\"%s\"", e->phy == 3 ? "coded" : (e->phy == 2 ? "2m" : "1m"));
 
   if (u->has_basic[0] || u->has_basic[1]) {
     jput(",\"basic_id\":[");
@@ -416,11 +432,14 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
 
 static void emit_heartbeat() {
   Serial.printf("{\"type\":\"hb\",\"up\":%lu,\"wifi_frames\":%lu,\"ble_advs\":%lu,"
-                "\"rid\":%lu,\"dropped\":%lu,\"ch\":%u,\"ble\":%s,\"ble_ext\":%s,"
+                "\"rid\":%lu,\"rid_w\":%lu,\"rid_n\":%lu,\"rid_b\":%lu,"
+                "\"pfail\":%lu,\"dropped\":%lu,\"ch\":%u,\"ble\":%s,\"ble_ext\":%s,"
                 "\"heap\":%lu}\n",
                 (unsigned long)millis(),
                 (unsigned long)s_cnt_wifi_frames, (unsigned long)s_cnt_ble_advs,
-                (unsigned long)s_cnt_rid, (unsigned long)s_cnt_dropped,
+                (unsigned long)s_cnt_rid, (unsigned long)s_cnt_rid_wifi,
+                (unsigned long)s_cnt_rid_nan, (unsigned long)s_cnt_rid_ble,
+                (unsigned long)s_cnt_pfail, (unsigned long)s_cnt_dropped,
                 s_cur_chan, s_ble_ok ? "true" : "false",
                 s_ble_ext ? "true" : "false",
                 (unsigned long)ESP.getFreeHeap());
@@ -473,7 +492,7 @@ static void inject_test_pack() {
   wr_i32(m + 20, 238000000);  // system timestamp
 
   const uint8_t mac[6] = {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x01};
-  enqueue_rid(SRC_WIFI_BEACON, mac, -42, s_cur_chan, d, sizeof(d));
+  enqueue_rid(SRC_WIFI_BEACON, mac, -42, s_cur_chan, 0, d, sizeof(d));
 }
 
 // -------------------------------------------------------------------- sketch
@@ -486,6 +505,7 @@ void setup() {
   s_q = xQueueCreate(12, sizeof(RidEvt));
   s_ble_ok = ble_start_scanner();  // bring up BT before promiscuous WiFi
   wifi_start_sniffer();
+  s_cur_chan = HOP[0].chan;
 
   Serial.printf("{\"type\":\"boot\",\"fw\":\"%s\",\"ver\":\"%s\",\"ble\":%s,"
                 "\"ble_ext\":%s}\n",
@@ -498,10 +518,10 @@ void loop() {
   static size_t hop_idx = 0;
   uint32_t now = millis();
 
-  if (now - last_hop >= HOP_DWELL_MS) {
+  if (now - last_hop >= HOP[hop_idx].dwell_ms) {
     last_hop = now;
-    hop_idx = (hop_idx + 1) % sizeof(HOP);
-    s_cur_chan = HOP[hop_idx];
+    hop_idx = (hop_idx + 1) % HOP_N;
+    s_cur_chan = HOP[hop_idx].chan;
     esp_wifi_set_channel(s_cur_chan, WIFI_SECOND_CHAN_NONE);
   }
 
@@ -515,6 +535,8 @@ void loop() {
     if (decode_payload(e.data, e.len, &u)) {
       s_cnt_rid++;
       emit_rid(&e, &u);
+    } else {
+      s_cnt_pfail++;
     }
   }
 
@@ -522,6 +544,5 @@ void loop() {
     last_hb = now;
     emit_heartbeat();
   }
-  ble_maintain();
   delay(5);
 }

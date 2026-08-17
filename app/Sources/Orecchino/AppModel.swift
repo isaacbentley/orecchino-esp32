@@ -30,14 +30,23 @@ struct DroneTrack: Identifiable {
     var msgCount: Int = 0
     var colorIndex: Int = 0
     var isDemo: Bool = false
+    var phy: String?
+    /// Which ODID message types have been received (evidence string).
+    var seenBasic = false, seenLoc = false, seenSelf = false
+    var seenSys = false, seenOp = false
 
     var title: String {
         if let u = uasId, !u.isEmpty { return u }
         return macs.sorted().first ?? id
     }
-    var color: Color { Self.palette[colorIndex % Self.palette.count] }
-    static let palette: [Color] = [.cyan, .orange, .green, .pink, .yellow,
-                                   .purple, .mint, .red, .blue, .indigo]
+    var color: Color { Theme.tracks[colorIndex % Theme.tracks.count] }
+
+    /// "BL·Y·" — uppercase letter per message type actually decoded
+    /// (Basic, Location, Self ID, sYstem, Operator), dot when absent.
+    var evidence: String {
+        String([seenBasic ? "B" : "·", seenLoc ? "L" : "·", seenSelf ? "S" : "·",
+                seenSys ? "Y" : "·", seenOp ? "O" : "·"])
+    }
 
     var operatorDistance: Double? {
         guard let c = coordinate, let o = operatorCoord else { return nil }
@@ -76,14 +85,22 @@ final class AppModel {
             }
         }
     }
-    /// Bumped on every position update; the map observes it to re-fit.
+    /// Shared clock for ages / recency bars / staleness, ticked at 2 Hz so
+    /// every time-derived value in the UI refreshes together.
+    var now = Date()
+    /// Bumped whenever a drone/operator position changes; the map's
+    /// follow-all logic refits on it.
     var updateTick = 0
+    let tfr = TFRService()
+    var showTFR = true
+    var selectedTFR: String?
 
     @ObservationIgnored private var macIndex: [String: String] = [:]
     @ObservationIgnored private var nextColor = 0
     @ObservationIgnored let serial = SerialManager()
     @ObservationIgnored private let demo = DemoFeed()
     @ObservationIgnored private var expiryTimer: Timer?
+    @ObservationIgnored private var clockTimer: Timer?
     @ObservationIgnored private let decoder = JSONDecoder()
 
     /// Tracks older than this are dropped from the list entirely.
@@ -110,6 +127,12 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.expireOld() }
             }
         }
+        clockTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.now = Date() }
+            }
+        }
+        tfr.start()
     }
 
     var trackList: [DroneTrack] {
@@ -159,7 +182,16 @@ final class AppModel {
         let existingKey = macIndex[mac]
         let key = uasKey ?? existingKey ?? "mac:\(mac)"
         if let ek = existingKey, ek != key, let old = tracks.removeValue(forKey: ek) {
-            if tracks[key] == nil {
+            if var dst = tracks[key] {
+                // The MAC-keyed track turned out to be this UAS: merge, don't drop.
+                dst.macs.formUnion(old.macs)
+                dst.sources.formUnion(old.sources)
+                dst.trail = old.trail + dst.trail
+                if dst.trail.count > 600 { dst.trail.removeFirst(dst.trail.count - 600) }
+                dst.firstSeen = min(dst.firstSeen, old.firstSeen)
+                dst.msgCount += old.msgCount
+                tracks[key] = dst
+            } else {
                 var moved = old
                 moved.id = key
                 tracks[key] = moved
@@ -179,16 +211,20 @@ final class AppModel {
         if let s = msg.src { t.sources.insert(s) }
         if let r = msg.rssi { t.rssi = r }
         if let c = msg.ch { t.channel = c }
+        if let p = msg.phy { t.phy = p }
         if let b = msg.basic_id?.first {
             if let u = uasId { t.uasId = u }
             t.idType = b.id_type
             t.uaType = b.ua_type
+            t.seenBasic = true
         }
         if let l = msg.loc {
             t.status = l.status
+            t.seenLoc = true
             if Self.validCoord(l.lat, l.lon) {
                 let c = CLLocationCoordinate2D(latitude: l.lat, longitude: l.lon)
                 t.coordinate = c
+                updateTick &+= 1
                 if t.trail.last.map({ Self.moved($0, c) }) ?? true {
                     t.trail.append(c)
                     if t.trail.count > 600 { t.trail.removeFirst(t.trail.count - 600) }
@@ -201,17 +237,23 @@ final class AppModel {
             t.vspeed = l.vspeed
             t.heading = (l.dir >= 0 && l.dir <= 360) ? l.dir : nil
         }
-        if let s = msg.self_id { t.selfDesc = s.desc }
+        if let s = msg.self_id {
+            t.selfDesc = s.desc
+            t.seenSelf = true
+        }
         if let s = msg.system {
             if Self.validCoord(s.op_lat, s.op_lon) {
                 t.operatorCoord = CLLocationCoordinate2D(latitude: s.op_lat,
                                                          longitude: s.op_lon)
             }
             t.operatorAlt = s.op_alt > -999 ? s.op_alt : nil
+            t.seenSys = true
         }
-        if let o = msg.op_id, !o.id.isEmpty { t.operatorId = o.id }
+        if let o = msg.op_id, !o.id.isEmpty {
+            t.operatorId = o.id
+            t.seenOp = true
+        }
         tracks[key] = t
-        updateTick &+= 1
     }
 
     private func expireOld() {
