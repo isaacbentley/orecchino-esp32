@@ -27,6 +27,7 @@ void display_force_redraw() {}
 #include <PNGdec.h>
 #include <Arduino_GFX_Library.h>
 #include "IndicatorBus.h"
+#include "spectrum.h"
 #include <Adafruit_GFX.h>  // for its Fonts/ (GFXfont layout is shared)
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -76,6 +77,8 @@ static double s_lat = HOME_LAT, s_lon = HOME_LON;
 static int    s_z = 12;
 
 // interaction / view state
+#define SPEC_HOLD_MS 10000  // button hold that unlocks the spectrum easter egg
+static bool     s_spec_mode = false;
 static bool     s_list_mode = false;
 static char     s_sel_uas[41] = "";
 static uint8_t  s_sel_mac[6] = {0};
@@ -821,6 +824,8 @@ void display_render(const Track* tracks, int n, const DisplayStats& st,
   s_prev_ms = now;
   s_st = st;
 
+  if (s_spec_mode) return;  // spectrum easter egg owns the screen
+
   // Redraw signature: positions/selection/camera/mode — NOT the hop channel
   // or raw counters, which used to force a repaint every few hundred ms.
   uint32_t sig = (s_list_mode ? 1 : 0) ^ (s_auto ? 2 : 0) ^ (s_z << 2) ^
@@ -851,6 +856,7 @@ void display_force_redraw() { s_dirty = 1; }
 
 void display_sync_status(uint32_t files_done) {
   if (!s_gfx) return;
+  s_spec_mode = false;  // a tile push takes the screen back
   static uint32_t last = 0;
   uint32_t now = millis();
   if (now - last < 500) return;
@@ -875,15 +881,36 @@ void display_sync_status(uint32_t files_done) {
 void display_tick(uint32_t now) {
   if (!s_gfx) return;
 
-  static bool btn_was = false;
+  // Side button: short press acts on release (toggle map/list, or leave the
+  // spectrum view); a 10 s hold fires the spectrum easter egg while held.
+  static bool     btn_was = false;
+  static uint32_t btn_down_ms = 0;
+  static bool     hold_fired = false;
   bool btn = digitalRead(BTN_PIN) == LOW;
   if (btn && !btn_was) {
-    s_list_mode = !s_list_mode;
+    btn_down_ms = now;
+    hold_fired = false;
+  }
+  if (btn && !hold_fired && now - btn_down_ms >= SPEC_HOLD_MS) {
+    hold_fired = true;
+    s_spec_mode = true;
+    spectrum_reset(now);
+  }
+  if (!btn && btn_was && !hold_fired) {
+    if (s_spec_mode) {
+      s_spec_mode = false;
+    } else {
+      s_list_mode = !s_list_mode;
+    }
     s_dirty = 1;
     render_frame();
   }
   btn_was = btn;
 
+  if (s_spec_mode) {
+    spectrum_tick(s_cv, now);
+    return;
+  }
   if (s_tr) touch_tick(now);
 }
 

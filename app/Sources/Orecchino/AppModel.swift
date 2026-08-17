@@ -39,6 +39,11 @@ struct DroneTrack: Identifiable {
         if let u = uasId, !u.isEmpty { return u }
         return macs.sorted().first ?? id
     }
+    /// CTA-2063-A manufacturer decode, for serial-number IDs only.
+    var manufacturer: String? {
+        guard idType == 1, let u = uasId else { return nil }
+        return MfrLookup.manufacturer(serial: u)
+    }
     var color: Color { Theme.tracks[colorIndex % Theme.tracks.count] }
 
     /// "BL·Y·" — uppercase letter per message type actually decoded

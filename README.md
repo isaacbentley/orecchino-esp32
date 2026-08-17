@@ -6,10 +6,17 @@ Open Drone ID broadcasts and streams them as JSON over USB; the app plots
 drones and their operators live on a dark MapKit map, orecchiette-style.
 
 ```
- [drone]  ~~WiFi beacon / NAN / BLE~~>  [XIAO ESP32-C3]  --USB JSON-->  [Orecchino.app]
+ [drone]  ~~WiFi beacon / NAN / BLE~~>  [receiver]  --USB JSON-->  [Orecchino.app]
 ```
 
 Receive-only on every path: nothing is transmitted on either radio.
+
+Two receiver targets share one radio core and serial contract: a **XIAO
+ESP32-C3** dongle, and a **SenseCAP Indicator** that doubles as a standalone
+touch console with an offline map:
+
+![Device console and app UI](docs/screens.png)
+*Simulated frames rendered from the actual UI code and map tiles.*
 
 ## Firmware — `firmware/orecchino_fw`
 
@@ -138,3 +145,11 @@ open app/build/Orecchino.app
 Anything speaking this schema over a serial port works as a source — the SDR
 pipeline in [orecchiette](https://github.com/isaacbentley/orecchiette) could
 feed it just as well as the ESP32.
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE). Third-party components and data
+sources are inventoried in [THIRD_PARTY.md](THIRD_PARTY.md); all are
+GPL-compatible (Apache-2.0, MIT, BSD, and GNU FreeFont with the
+font-embedding exception). Map tiles are fetched by the user and are not
+distributed with this repository.

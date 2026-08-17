@@ -22,9 +22,11 @@
 #include "sdkconfig.h"
 #include "esp_wifi.h"
 #include <NimBLEDevice.h>
+#include "tracker.h"
 
 #define FW_NAME    "orecchino"
-#define FW_VERSION "0.3.0"
+#define FW_VERSION "0.4.0"
+#define FW_BOARD   "xiao-esp32c3"
 
 // ---------------------------------------------------------------- event queue
 
@@ -41,6 +43,16 @@ typedef struct {
   uint8_t len;
   uint8_t data[232];
 } RidEvt;
+
+// TFR polygons pushed by the host app (defined up here so the hoisted
+// prototypes see the type).
+#define TFR_MAX     16
+#define TFR_PTS_MAX 24
+struct TfrPoly {
+  uint8_t n;
+  float   lat[TFR_PTS_MAX], lon[TFR_PTS_MAX];
+  char    id[16];
+};
 
 // Decoded state for one UAS, filled from whichever messages were received.
 // Defined up here so the Arduino preprocessor's hoisted prototypes see it.
@@ -84,6 +96,7 @@ static volatile uint32_t s_cnt_rid_nan     = 0;  // "why no NAN?" is the
 static volatile uint32_t s_cnt_rid_ble     = 0;  // first field question
 static volatile uint32_t s_cnt_pfail       = 0;  // matched but failed decode
 static volatile uint32_t s_cnt_dropped     = 0;
+static uint32_t          s_seen_count      = 0;  // unique drones since boot
 static volatile uint8_t  s_cur_chan        = 6;
 static bool s_ble_ok  = false;
 static bool s_ble_ext = false;
@@ -433,16 +446,68 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
 static void emit_heartbeat() {
   Serial.printf("{\"type\":\"hb\",\"up\":%lu,\"wifi_frames\":%lu,\"ble_advs\":%lu,"
                 "\"rid\":%lu,\"rid_w\":%lu,\"rid_n\":%lu,\"rid_b\":%lu,"
-                "\"pfail\":%lu,\"dropped\":%lu,\"ch\":%u,\"ble\":%s,\"ble_ext\":%s,"
-                "\"heap\":%lu}\n",
+                "\"pfail\":%lu,\"dropped\":%lu,\"seen\":%lu,\"ch\":%u,"
+                "\"ble\":%s,\"ble_ext\":%s,\"heap\":%lu}\n",
                 (unsigned long)millis(),
                 (unsigned long)s_cnt_wifi_frames, (unsigned long)s_cnt_ble_advs,
                 (unsigned long)s_cnt_rid, (unsigned long)s_cnt_rid_wifi,
                 (unsigned long)s_cnt_rid_nan, (unsigned long)s_cnt_rid_ble,
                 (unsigned long)s_cnt_pfail, (unsigned long)s_cnt_dropped,
-                s_cur_chan, s_ble_ok ? "true" : "false",
-                s_ble_ext ? "true" : "false",
+                (unsigned long)s_seen_count, s_cur_chan,
+                s_ble_ok ? "true" : "false", s_ble_ext ? "true" : "false",
                 (unsigned long)ESP.getFreeHeap());
+}
+
+// ---------------------------------------------- host context (home + TFRs)
+// Same line protocol as the SenseCAP target, so the desktop app can treat
+// any orecchino receiver identically.
+
+static bool   s_home_set = false;
+static double s_home_lat = 0, s_home_lon = 0;
+static TfrPoly s_tfrs[TFR_MAX];
+static uint8_t s_tfr_n = 0;
+
+static bool poly_contains(const TfrPoly* p, double lat, double lon) {
+  bool in = false;
+  for (int i = 0, j = p->n - 1; i < p->n; j = i++) {
+    if (((p->lat[i] > lat) != (p->lat[j] > lat)) &&
+        (lon < (double)(p->lon[j] - p->lon[i]) * (lat - p->lat[i]) /
+                       (double)(p->lat[j] - p->lat[i]) + p->lon[i]))
+      in = !in;
+  }
+  return in;
+}
+
+static bool tfr_lookup(double lat, double lon, char* id, size_t idsz) {
+  for (int i = 0; i < s_tfr_n; i++) {
+    if (poly_contains(&s_tfrs[i], lat, lon)) {
+      strncpy(id, s_tfrs[i].id, idsz - 1);
+      id[idsz - 1] = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool json_field_str(const char* line, const char* key, char* out, size_t n) {
+  char pat[24];
+  snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+  const char* p = strstr(line, pat);
+  if (!p) return false;
+  p += strlen(pat);
+  size_t o = 0;
+  while (*p && *p != '"' && o + 1 < n) out[o++] = *p++;
+  out[o] = 0;
+  return *p == '"';
+}
+
+static bool json_field_dbl(const char* line, const char* key, double* out) {
+  char pat[24];
+  snprintf(pat, sizeof(pat), "\"%s\":", key);
+  const char* p = strstr(line, pat);
+  if (!p) return false;
+  *out = strtod(p + strlen(pat), nullptr);
+  return true;
 }
 
 // ----------------------------------------------------------------- self-test
@@ -495,6 +560,118 @@ static void inject_test_pack() {
   enqueue_rid(SRC_WIFI_BEACON, mac, -42, s_cur_chan, 0, d, sizeof(d));
 }
 
+// ------------------------------------------------------ track ingest + host
+
+static void tracker_ingest(const RidEvt* e, const OdidUas* u, uint32_t now) {
+  const char* uas = (u->has_basic[0] && u->uas_id[0][0]) ? u->uas_id[0] : nullptr;
+  bool created = false;
+  Track* t = tracker_upsert(e->mac, uas, now, &created);
+  if (created) s_seen_count++;
+  t->rssi = e->rssi;
+  if (e->rssi > t->peak_rssi) t->peak_rssi = e->rssi;
+  t->src_mask |= (uint8_t)(1u << e->src);
+  if (u->has_loc) {
+    t->status = u->status;
+    if (u->lat != 0 || u->lon != 0) {
+      t->has_pos = true;
+      t->lat = u->lat;
+      t->lon = u->lon;
+    }
+    if (u->height > -999) {
+      t->height = u->height;
+      if (isnan(t->max_height) || u->height > t->max_height)
+        t->max_height = u->height;
+    }
+    if (u->speed >= 0) t->speed = u->speed;
+    if (u->dir >= 0 && u->dir <= 360) t->heading = u->dir;
+    if (t->has_pos) {
+      t->in_tfr = tfr_lookup(t->lat, t->lon, t->tfr_id, sizeof(t->tfr_id));
+      if (t->in_tfr) t->tfr_ever = true;
+    }
+  }
+}
+
+static void tracker_expire_emit(uint32_t now) {
+  for (int i = 0; i < TRK_MAX; i++) {
+    Track* t = &g_tracks[i];
+    if (!t->used || now - t->last_ms <= TRK_EXPIRE_MS) continue;
+    char mh[12] = "null";
+    if (!isnan(t->max_height)) snprintf(mh, sizeof(mh), "%d", (int)t->max_height);
+    Serial.printf("{\"type\":\"track_end\",\"uas\":\"%s\","
+                  "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+                  "\"first_ms\":%lu,\"last_ms\":%lu,\"peak_rssi\":%d,"
+                  "\"max_height\":%s,\"tfr\":%s}\n",
+                  t->uas, t->mac[0], t->mac[1], t->mac[2], t->mac[3],
+                  t->mac[4], t->mac[5], (unsigned long)t->first_ms,
+                  (unsigned long)t->last_ms, t->peak_rssi, mh,
+                  t->tfr_ever ? "true" : "false");
+    t->used = false;
+  }
+}
+
+static void handle_host_line(char* line, uint32_t now) {
+  if (!strcmp(line, "t")) {  // dev harness: inject a synthetic pack
+    inject_test_pack();
+    return;
+  }
+  char cmd[16];
+  if (!json_field_str(line, "cmd", cmd, sizeof(cmd))) return;
+  if (!strcmp(cmd, "set_home")) {
+    if (json_field_dbl(line, "lat", &s_home_lat) &&
+        json_field_dbl(line, "lon", &s_home_lon))
+      s_home_set = true;
+  } else if (!strcmp(cmd, "tfr_clear")) {
+    s_tfr_n = 0;
+  } else if (!strcmp(cmd, "tfr_add")) {
+    if (s_tfr_n >= TFR_MAX) return;
+    TfrPoly* poly = &s_tfrs[s_tfr_n];
+    poly->n = 0;
+    json_field_str(line, "id", poly->id, sizeof(poly->id));
+    const char* q = strstr(line, "\"pts\":[");
+    if (!q) return;
+    q += 7;
+    while (poly->n < TFR_PTS_MAX) {
+      q = strchr(q, '[');
+      if (!q) break;
+      q++;
+      char* end;
+      double la = strtod(q, &end);
+      if (end == q) break;
+      q = strchr(end, ',');
+      if (!q) break;
+      q++;
+      double lo = strtod(q, &end);
+      if (end == q) break;
+      poly->lat[poly->n] = (float)la;
+      poly->lon[poly->n] = (float)lo;
+      poly->n++;
+      q = strchr(end, ']');
+      if (!q) break;
+      q++;
+    }
+    if (poly->n >= 3) s_tfr_n++;
+  }
+}
+
+static void poll_host_serial(uint32_t now) {
+  static char buf[1600];
+  static int len = 0;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (len > 0) {
+        buf[len] = 0;
+        handle_host_line(buf, now);
+        len = 0;
+      }
+    } else if (len < (int)sizeof(buf) - 1) {
+      buf[len++] = c;
+    } else {
+      len = 0;  // oversized line: drop
+    }
+  }
+}
+
 // -------------------------------------------------------------------- sketch
 
 void setup() {
@@ -507,9 +684,9 @@ void setup() {
   wifi_start_sniffer();
   s_cur_chan = HOP[0].chan;
 
-  Serial.printf("{\"type\":\"boot\",\"fw\":\"%s\",\"ver\":\"%s\",\"ble\":%s,"
-                "\"ble_ext\":%s}\n",
-                FW_NAME, FW_VERSION, s_ble_ok ? "true" : "false",
+  Serial.printf("{\"type\":\"boot\",\"fw\":\"%s\",\"ver\":\"%s\",\"board\":\"%s\","
+                "\"ble\":%s,\"ble_ext\":%s}\n",
+                FW_NAME, FW_VERSION, FW_BOARD, s_ble_ok ? "true" : "false",
                 s_ble_ext ? "true" : "false");
 }
 
@@ -525,9 +702,7 @@ void loop() {
     esp_wifi_set_channel(s_cur_chan, WIFI_SECOND_CHAN_NONE);
   }
 
-  while (Serial.available()) {
-    if (Serial.read() == 't') inject_test_pack();
-  }
+  poll_host_serial(now);
 
   RidEvt e;
   while (xQueueReceive(s_q, &e, 0) == pdTRUE) {
@@ -535,9 +710,16 @@ void loop() {
     if (decode_payload(e.data, e.len, &u)) {
       s_cnt_rid++;
       emit_rid(&e, &u);
+      tracker_ingest(&e, &u, now);
     } else {
       s_cnt_pfail++;
     }
+  }
+
+  static uint32_t last_expire = 0;
+  if (now - last_expire >= 5000) {
+    last_expire = now;
+    tracker_expire_emit(now);
   }
 
   if (now - last_hb >= 2000) {

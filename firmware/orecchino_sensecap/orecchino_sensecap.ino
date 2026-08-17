@@ -31,7 +31,7 @@
 #include "display.h"
 
 #define FW_NAME    "orecchino"
-#define FW_VERSION "0.3.0"
+#define FW_VERSION "0.4.0"
 #define FW_BOARD   "sensecap-indicator"
 
 // ---------------------------------------------------------------- event queue
@@ -451,15 +451,15 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
 static void emit_heartbeat() {
   Serial.printf("{\"type\":\"hb\",\"up\":%lu,\"wifi_frames\":%lu,\"ble_advs\":%lu,"
                 "\"rid\":%lu,\"rid_w\":%lu,\"rid_n\":%lu,\"rid_b\":%lu,"
-                "\"pfail\":%lu,\"dropped\":%lu,\"ch\":%u,\"ble\":%s,\"ble_ext\":%s,"
-                "\"heap\":%lu}\n",
+                "\"pfail\":%lu,\"dropped\":%lu,\"seen\":%lu,\"ch\":%u,"
+                "\"ble\":%s,\"ble_ext\":%s,\"heap\":%lu}\n",
                 (unsigned long)millis(),
                 (unsigned long)s_cnt_wifi_frames, (unsigned long)s_cnt_ble_advs,
                 (unsigned long)s_cnt_rid, (unsigned long)s_cnt_rid_wifi,
                 (unsigned long)s_cnt_rid_nan, (unsigned long)s_cnt_rid_ble,
                 (unsigned long)s_cnt_pfail, (unsigned long)s_cnt_dropped,
-                s_cur_chan, s_ble_ok ? "true" : "false",
-                s_ble_ext ? "true" : "false",
+                (unsigned long)g_seen_count, s_cur_chan,
+                s_ble_ok ? "true" : "false", s_ble_ext ? "true" : "false",
                 (unsigned long)ESP.getFreeHeap());
 }
 

@@ -23,7 +23,8 @@ struct DisplayStats {
 bool display_begin();
 void display_render(const Track* tracks, int max_tracks, const DisplayStats& st,
                     uint32_t now);
-/// Call every loop pass: polls touch (pan/pinch/tap) and the side button.
+/// Call every loop pass: polls touch (pan/pinch/tap) and the side button
+/// (short press toggles map/list; a 10 s hold opens the spectrum view).
 void display_tick(uint32_t now);
 /// Current map view center (for storage eviction scoring). False if the
 /// display is disabled.

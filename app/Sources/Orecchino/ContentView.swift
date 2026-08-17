@@ -173,6 +173,11 @@ struct DroneRow: View {
                 // Recent-activity micro-bar: decays to zero over 3 s.
                 RecencyBar(fraction: max(0, 1 - age / 3), color: track.color)
                 HStack(spacing: 6) {
+                    if let m = track.manufacturer {
+                        Text(m)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(track.color)
+                    }
                     ForEach(track.sources.sorted(), id: \.self) { s in
                         SourceBadge(text: s.uppercased(), color: track.color)
                     }
@@ -439,6 +444,8 @@ struct DroneDetailCard: View {
 
             KVSection(title: "Identity") {
                 KVRow(name: "UAS ID", value: track.uasId)
+                KVRow(name: "Mfr", value: track.manufacturer,
+                      help: "CTA-2063-A manufacturer code decode (local table)")
                 KVRow(name: "ID type", value: track.idType.map { RidNames.idType($0) })
                 KVRow(name: "Evidence", value: track.evidence,
                       help: "B basic · L location · S self-ID · Y system · O operator")
