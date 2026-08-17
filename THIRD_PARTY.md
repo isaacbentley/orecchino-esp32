@@ -31,6 +31,14 @@ conversions of **GNU FreeFont**, licensed GPLv3 **with the font-embedding
 exception** — embedding them in a program does not impose the GPL on the
 program. Compatible with either a GPL or permissive license for this repo.
 
+## Test vectors
+
+`tests/vectors/` contains reference captures and the Lua dissector from
+[opendroneid/wireshark-dissector](https://github.com/opendroneid/wireshark-dissector)
+(Apache-2.0), used as the independent ground truth for the decoder tests —
+the golden values in `tests/odid_test.c` were cross-checked against that
+dissector's output (one Lua 5.4 compatibility fix applied locally).
+
 ## Data
 
 - **Map tiles are not distributed in this repo.** `tools/fetch_tiles.py`

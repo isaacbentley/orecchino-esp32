@@ -56,7 +56,7 @@ final class TileSync {
         return base.appendingPathComponent("Orecchino/tiles", isDirectory: true)
     }
 
-    static func deg2tile(lat: Double, lon: Double, z: Int) -> (x: Int, y: Int) {
+    nonisolated static func deg2tile(lat: Double, lon: Double, z: Int) -> (x: Int, y: Int) {
         let n = Double(1 << z)
         let x = Int((lon + 180) / 360 * n)
         let rad = lat * .pi / 180
@@ -249,7 +249,7 @@ final class TileSync {
         armTimeout()
     }
 
-    static func crc32(_ data: Data) -> UInt32 {
+    nonisolated static func crc32(_ data: Data) -> UInt32 {
         var table = [UInt32](repeating: 0, count: 256)
         for i in 0..<256 {
             var c = UInt32(i)

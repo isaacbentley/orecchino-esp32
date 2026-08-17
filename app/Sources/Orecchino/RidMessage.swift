@@ -52,7 +52,7 @@ struct Loc: Decodable {
     var height: Double
     var height_ref: Int
     var speed: Double
-    var vspeed: Double
+    var vspeed: Double?   // omitted when the broadcast marks it unknown
     var dir: Double
     var ts: Double
 }

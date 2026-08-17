@@ -758,6 +758,39 @@ static void touch_tick(uint32_t now) {
   }
 }
 
+// Spectrum view wants taps only (zoom in on the trace, zoom-out control):
+// a stripped-down poll that shares tp_points but none of touch_tick's
+// pan/pinch state.
+static void spectrum_touch_tick(uint32_t now) {
+  static uint32_t last_poll = 0;
+  if (now - last_poll < 30) return;
+  last_poll = now;
+
+  static bool down = false, moved = false;
+  static int sx = 0, sy = 0;
+  static uint32_t down_ms = 0;
+
+  int x0, y0, x1, y1;
+  int n = tp_points(&x0, &y0, &x1, &y1);
+  if (n < 0) return;
+  if (n >= 1) {
+    if (!down) {
+      down = true;
+      moved = false;
+      sx = x0;
+      sy = y0;
+      down_ms = now;
+    } else if (abs(x0 - sx) > 12 || abs(y0 - sy) > 12) {
+      moved = true;
+    }
+    return;
+  }
+  if (down) {
+    down = false;
+    if (!moved && now - down_ms < 400) spectrum_tap(sx, sy);
+  }
+}
+
 // -------------------------------------------------------------- public API
 
 bool display_begin() {
@@ -856,7 +889,10 @@ void display_force_redraw() { s_dirty = 1; }
 
 void display_sync_status(uint32_t files_done) {
   if (!s_gfx) return;
-  s_spec_mode = false;  // a tile push takes the screen back
+  if (s_spec_mode) {
+    s_spec_mode = false;  // a tile push takes the screen back
+    spectrum_stop();
+  }
   static uint32_t last = 0;
   uint32_t now = millis();
   if (now - last < 500) return;
@@ -899,6 +935,7 @@ void display_tick(uint32_t now) {
   if (!btn && btn_was && !hold_fired) {
     if (s_spec_mode) {
       s_spec_mode = false;
+      spectrum_stop();
     } else {
       s_list_mode = !s_list_mode;
     }
@@ -908,6 +945,7 @@ void display_tick(uint32_t now) {
   btn_was = btn;
 
   if (s_spec_mode) {
+    spectrum_touch_tick(now);
     spectrum_tick(s_cv, now);
     return;
   }

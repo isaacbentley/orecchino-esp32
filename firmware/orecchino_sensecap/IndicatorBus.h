@@ -14,8 +14,15 @@
 #define IND_I2C_SCL   40
 #define IND_SPI_SCK   41
 #define IND_SPI_MOSI  48
+#define IND_SPI_MISO  47   // driven by the SX1262 only; LCD init is write-only
 
+// SX1262 control lines (wiring per Seeed BSP / Meshtastic variant): all on
+// the IO expander, so BUSY polls cost an I2C read (~0.1 ms) — fine for the
+// RSSI sweep, useless for real-time IRQ work.
 #define IND_EXP_RADIO_NSS  PCA95x5::Port::P00
+#define IND_EXP_RADIO_RST  PCA95x5::Port::P01
+#define IND_EXP_RADIO_BUSY PCA95x5::Port::P02
+#define IND_EXP_RADIO_DIO1 PCA95x5::Port::P03
 #define IND_EXP_LCD_CS     PCA95x5::Port::P04
 #define IND_EXP_LCD_RST    PCA95x5::Port::P05
 #define IND_EXP_TP_RST     PCA95x5::Port::P07

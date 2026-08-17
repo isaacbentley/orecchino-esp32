@@ -3,7 +3,7 @@
 A little ear for drone Remote ID. Orecchino pairs a **Seeed Studio XIAO
 ESP32-C3** sniffer with a **native macOS app**: the board hears ASTM F3411 /
 Open Drone ID broadcasts and streams them as JSON over USB; the app plots
-drones and their operators live on a dark MapKit map, orecchiette-style.
+drones and their operators live on a dark MapKit map.
 
 ```
  [drone]  ~~WiFi beacon / NAN / BLE~~>  [receiver]  --USB JSON-->  [Orecchino.app]
@@ -142,9 +142,23 @@ open app/build/Orecchino.app
  "op_id":{"id_type":0,"id":"FIN87astrdge12k8"}}
 ```
 
-Anything speaking this schema over a serial port works as a source — the SDR
-pipeline in [orecchiette](https://github.com/isaacbentley/orecchiette) could
-feed it just as well as the ESP32.
+Anything speaking this schema over a serial port works as a source — an SDR
+pipeline could feed the app just as well as the ESP32 receivers.
+
+## Testing
+
+```bash
+tests/run_tests.sh
+```
+
+The ASTM F3411 decoder is shared between both firmware targets
+(`firmware/common/odid_decode.h`) and unit-tested host-side against golden
+vectors from the official OpenDroneID Wireshark dissector's sample
+captures — real over-the-air frames, every field cross-checked against the
+reference dissector (which caught a real bug: the vertical-speed invalid
+marker, raw 126, now decodes as unknown instead of +63 m/s). App tests
+cover the serial JSON schema, CRC32 (pinned against the firmware's
+esp_rom_crc32), tile math, and the manufacturer decode.
 
 ## License
 
