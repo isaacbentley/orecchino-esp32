@@ -72,47 +72,49 @@ typedef struct {
   uint8_t     mac[6];       // WiFi SA / BLE advertising address
 } TxPath;
 
+// UAS IDs must be <= 20 characters: the ODID Basic ID field is 20
+// bytes and the encoder truncates silently.
 static const TxPath PATHS[P_COUNT] = {
   // --- transports, all v2 message packs
-  { "ORECCHINO-TEST-WIFI",  "TEST path=WIFI-BEACON", "TEST-OP-WIFI",
+  { "ORECCHINO-TX-WIFI",  "TEST path=WIFI-BEACON", "TEST-OP-WIFI",
     C_BEACON, F_PACK, 2, nullptr, false,
     0.0,   60.0,  {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x01} },
-  { "ORECCHINO-TEST-NAN",   "TEST path=WIFI-NAN",    "TEST-OP-NAN",
+  { "ORECCHINO-TX-NAN",   "TEST path=WIFI-NAN",    "TEST-OP-NAN",
     C_NAN, F_PACK, 2, nullptr, false,
     40.0,  75.0,  {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x02} },
-  { "ORECCHINO-TEST-BLE5",  "TEST path=BLE5-1M",     "TEST-OP-BLE5",
+  { "ORECCHINO-TX-BLE5",  "TEST path=BLE5-1M",     "TEST-OP-BLE5",
     C_BLE_EXT, F_PACK, 2, nullptr, false,
     80.0,  90.0,  {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x03} },
-  { "ORECCHINO-TEST-BLELR", "TEST path=BLE5-CODED",  "TEST-OP-BLELR",
+  { "ORECCHINO-TX-BLELR", "TEST path=BLE5-CODED",  "TEST-OP-BLELR",
     C_BLE_CODED, F_PACK, 2, nullptr, false,
     120.0, 105.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x04} },
-  { "ORECCHINO-TEST-BLE4",  "TEST path=BLE4-LEGACY", "TEST-OP-BLE4",
+  { "ORECCHINO-TX-BLE4",  "TEST path=BLE4-LEGACY", "TEST-OP-BLE4",
     C_BLE_LEGACY, F_SINGLE, 2, nullptr, false,
     160.0, 120.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x05} },
 
   // --- format variants on the WiFi beacon
   // F3411-19 (protocol version 0): receivers that hardcode v2 miss this.
-  { "ORECCHINO-TEST-V0",    "TEST fmt=F3411-19-v0",  "TEST-OP-V0",
+  { "ORECCHINO-TX-V0",    "TEST fmt=F3411-19-v0",  "TEST-OP-V0",
     C_BEACON, F_PACK, 0, nullptr, false,
     200.0, 135.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x06} },
   // One 25-byte message per frame instead of a pack — receivers that only
   // parse message packs miss this.
-  { "ORECCHINO-TEST-SINGLE","TEST fmt=SINGLE-MSG",   "TEST-OP-SINGLE",
+  { "ORECCHINO-TX-SINGLE","TEST fmt=SINGLE-MSG",   "TEST-OP-SINGLE",
     C_BEACON, F_SINGLE, 2, nullptr, false,
     240.0, 150.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x07} },
   // Two Basic IDs: serial plus CAA registration.
-  { "ORECCHINO-TEST-DUAL",  "TEST fmt=DUAL-BASIC-ID","TEST-OP-DUAL",
+  { "ORECCHINO-TX-DUAL",  "TEST fmt=DUAL-BASIC-ID","TEST-OP-DUAL",
     C_BEACON, F_PACK, 2, "CAA-REG-TEST-0001", false,
     280.0, 165.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x08} },
   // Paginated Authentication messages in the pack — the message most
   // transmitters skip and most receivers have never been fed.
-  { "ORECCHINO-TEST-AUTH",  "TEST fmt=AUTH-SIGNED",  "TEST-OP-AUTH",
+  { "ORECCHINO-TX-AUTH",  "TEST fmt=AUTH-SIGNED",  "TEST-OP-AUTH",
     C_BEACON, F_PACK, 2, nullptr, true,
     280.0, 180.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x09} },
   // Same, but the signature is deliberately corrupted — a receiver that
   // verifies signatures should reject this one and accept the other. If it
   // shows both as equally valid, it is not really checking.
-  { "ORECCHINO-TEST-AUTHBAD", "TEST fmt=AUTH-BADSIG","TEST-OP-AUTHBAD",
+  { "ORECCHINO-TX-AUTHBAD", "TEST fmt=AUTH-BADSIG","TEST-OP-AUTHBAD",
     C_BEACON, F_PACK, 2, nullptr, true,
     320.0, 195.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x0A} },
 };

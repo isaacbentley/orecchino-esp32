@@ -222,8 +222,12 @@ static bool ble_start_scanner() {
   s_scan->setActiveScan(false);
   s_scan->setDuplicateFilter(0);
   s_scan->setMaxResults(0);  // callbacks only — nothing stored, nothing leaks
-  s_scan->setInterval(50);   // ms
-  s_scan->setWindow(25);     // ms — leave air time for WiFi coex
+  // Both radios share one 2.4 GHz front end. A 50% BLE duty cycle starved
+  // the WiFi paths — bench-measured 4 beacon matches against 234 BLE in the
+  // same window — so BLE now listens 30 ms in every 100 and WiFi gets the
+  // rest. BLE advertising repeats often enough that 30% still catches it.
+  s_scan->setInterval(100);  // ms
+  s_scan->setWindow(30);     // ms
 #if CONFIG_BT_NIMBLE_EXT_ADV
   s_ble_ext = true;          // scanning 1M + coded PHY (SCAN_ALL default)
 #endif
@@ -423,6 +427,9 @@ static void tracker_ingest(const RidEvt* e, const OdidUas* u, uint32_t now) {
   t->rssi = e->rssi;
   if (e->rssi > t->peak_rssi) t->peak_rssi = e->rssi;
   t->src_mask |= (uint8_t)(1u << e->src);
+  // Only overwrite when this frame actually carried auth: pages can be
+  // spread across frames, and a plain Location must not erase a verdict.
+  if (u->has_auth) t->auth_state = (uint8_t)odid_verify_auth(u);
   if (u->has_loc) {
     t->status = u->status;
     if (u->lat != 0 || u->lon != 0) {

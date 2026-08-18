@@ -19,6 +19,9 @@ struct Track {
   float    height;      // m AGL, NAN when unknown
   float    speed;       // m/s, NAN when unknown
   float    heading;     // deg true, NAN when unknown
+  // Authentication verification, mirroring OdidAuthState:
+  // 0 none, 1 partial, 2 unknown key, 3 ID signature valid, 4 invalid.
+  uint8_t  auth_state;
   bool     in_tfr;      // position inside a pushed TFR polygon
   char     tfr_id[16];
   uint32_t first_ms, last_ms;
@@ -34,3 +37,15 @@ Track* tracker_upsert(const uint8_t* mac, const char* uas, uint32_t now,
                       bool* created);
 void tracker_expire(uint32_t now);
 int tracker_count();
+
+/// Short badge for an authentication state. "ID" is deliberate: the
+/// signature covers the drone's identity, never its reported position.
+static inline const char* track_auth_badge(uint8_t st) {
+  switch (st) {
+    case 3:  return "ID*";   // valid   (drawn with a tick glyph)
+    case 4:  return "ID!";   // invalid
+    case 1:  return "ID.";   // pages incomplete
+    case 2:  return "ID?";   // key not trusted
+    default: return "";
+  }
+}

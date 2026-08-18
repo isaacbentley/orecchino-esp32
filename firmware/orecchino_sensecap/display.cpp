@@ -340,6 +340,38 @@ static void draw_footer() {
 struct Btn { int x, y; const char* glyph; };
 static const Btn BTNS[] = { {432, 330, "+"}, {432, 374, "-"}, {432, 418, "o"} };
 
+// Authentication badge: a signed ID reads "ID" with a tick, a bad
+// signature "ID" with a cross in danger red. A bad signature is a
+// security event, so it gets the loudest colour on the screen.
+static void draw_auth_badge(uint8_t st, int x, int y, bool stale) {
+  if (st == 0) return;                       // no auth: draw nothing
+  uint16_t col = stale ? C_MUTED
+               : (st == 3 ? RGB565(0x5E, 0xCB, 0x7A)
+               : (st == 4 ? C_DANGER
+               : (st == 2 ? RGB565(0xE0, 0xA8, 0x3A) : C_MUTED)));
+  s_cv->fillRoundRect(x, y, 34, 15, 4, C_BAR);
+  s_cv->drawRoundRect(x, y, 34, 15, 4, col);
+  s_cv->setTextSize(1);
+  s_cv->setTextColor(col, C_BAR);
+  s_cv->setCursor(x + 4, y + 4);
+  s_cv->print("ID");
+  int gx = x + 20, gy = y + 7;
+  if (st == 3) {                             // tick
+    s_cv->drawLine(gx, gy, gx + 3, gy + 4, col);
+    s_cv->drawLine(gx + 3, gy + 4, gx + 9, gy - 5, col);
+    s_cv->drawLine(gx, gy + 1, gx + 3, gy + 5, col);
+    s_cv->drawLine(gx + 3, gy + 5, gx + 9, gy - 4, col);
+  } else if (st == 4) {                      // cross
+    s_cv->drawLine(gx, gy - 4, gx + 8, gy + 4, col);
+    s_cv->drawLine(gx + 8, gy - 4, gx, gy + 4, col);
+    s_cv->drawLine(gx + 1, gy - 4, gx + 9, gy + 4, col);
+    s_cv->drawLine(gx + 9, gy - 4, gx + 1, gy + 4, col);
+  } else {                                   // partial / untrusted key
+    s_cv->setCursor(gx, y + 4);
+    s_cv->print(st == 2 ? "?" : "..");
+  }
+}
+
 static void draw_buttons() {
   for (int i = 0; i < 3; i++) {
     bool hot = (i == 2 && s_auto);
@@ -404,6 +436,16 @@ static void draw_detail_card(const Track* t) {
            t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5],
            (unsigned long)((s_now_ms - t->last_ms) / 1000));
   s_cv->print(b);
+  if (t->auth_state) {
+    s_cv->setCursor(20, y0 + 86);
+    uint16_t ac = t->auth_state == 3 ? RGB565(0x5E, 0xCB, 0x7A)
+                : t->auth_state == 4 ? C_DANGER : C_MUTED;
+    s_cv->setTextColor(ac, C_BAR);
+    s_cv->print(t->auth_state == 3 ? "ID signature valid (not position)"
+              : t->auth_state == 4 ? "ID SIGNATURE INVALID"
+              : t->auth_state == 2 ? "signed, key not trusted"
+                                   : "signature pages incomplete");
+  }
   s_cv->setCursor(20, y0 + 100);
   if (g_home_set && t->has_pos) {
     char r[12];
@@ -547,7 +589,8 @@ static void render_list() {
     s_lrows[s_nlrows++] = { y, y + CARD_H, i };
 
     bool stale = s_now_ms - t->last_ms > ACTIVE_MS;
-    bool danger = (t->status == 3 || t->in_tfr) && !stale;
+    bool danger = (t->status == 3 || t->in_tfr || t->auth_state == 4)
+                  && !stale;
     uint16_t col = stale ? C_MUTED
                  : (danger ? C_DANGER : TRACK_COLORS[i % N_TRACK_COLORS]);
     uint16_t edge = danger ? C_DANGER : RGB565(0x1C, 0x22, 0x2C);
@@ -561,7 +604,11 @@ static void render_list() {
     s_cv->setTextColor(stale ? C_MUTED : C_TEXT);
     s_cv->setCursor(24, y + 24);
     s_cv->print(t->uas[0] ? t->uas : "(no id)");
+    int16_t bx, by; uint16_t bw, bh;
+    s_cv->getTextBounds(t->uas[0] ? t->uas : "(no id)", 24, y + 24, &bx, &by,
+                        &bw, &bh);
     s_cv->setFont(nullptr);
+    draw_auth_badge(t->auth_state, 24 + bw + 8, y + 12, stale);
 
     // RSSI meter, right-aligned
     double st = rssi01(t->rssi);
