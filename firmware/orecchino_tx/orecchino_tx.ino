@@ -184,7 +184,21 @@ static int build_payload(int pid, uint8_t* out, uint32_t now) {
     if (pid == P_AUTHBAD) sig[0] ^= 0xFF;      // break it on purpose
     int count = out[2];
     int pages = odid_auth_pages((int)sizeof(sig));
-    for (int pg = 0; pg < pages && count < ODID_PACK_MAX_MESSAGES; pg++) {
+    // All pages or none: page 0 advertises LastPageIndex, so a truncated
+    // set promises pages that never arrive and can never verify.
+    if (count + pages > ODID_PACK_MAX_MESSAGES) {
+      // A path configured with both caa_id and with_auth lands here —
+      // say so, in keeping with this tool never failing silently.
+      static uint32_t last_note = 0;
+      if (now - last_note > 5000) {
+        last_note = now;
+        Serial.printf("{\"type\":\"tx_err\",\"path\":\"%s\","
+                      "\"msg\":\"pack full, auth pages skipped\"}\n",
+                      p->uas_id);
+      }
+      return n;
+    }
+    for (int pg = 0; pg < pages; pg++) {
       odid_build_auth_page(out + 3 + count * ODID_MSG_SIZE, &s,
                            1 /* UAS ID signature */, pg, sig,
                            (int)sizeof(sig), ts);
@@ -295,20 +309,37 @@ static int build_nan_sync_beacon(uint8_t counter) {
   memset(f + i, 0, 8); i += 8;                     // timestamp
   f[i++] = 0x00; f[i++] = 0x02;                    // beacon interval 512 TU
   f[i++] = 0x00; f[i++] = 0x00;                    // capability
-  f[i++] = 0xDD; f[i++] = 0x22;                    // vendor IE, len 0x22
+  f[i++] = 0xDD;                                   // vendor IE
+  int ie_len_at = i++;                             // length patched below
   f[i++] = 0x50; f[i++] = 0x6F; f[i++] = 0x9A;     // WFA OUI
   f[i++] = 0x13;                                   // NAN
-  f[i++] = 0x00; f[i++] = 0x02; f[i++] = 0x00;     // master indication attr
+  // Master indication attribute
+  f[i++] = 0x00;
+  f[i++] = 0x02; f[i++] = 0x00;                    // length 2
   f[i++] = 0xFE;                                   // master preference
   f[i++] = 0xEA;                                   // random factor
-  f[i++] = 0x01; f[i++] = 0x0D; f[i++] = 0x00;     // cluster attr
+  // Cluster attribute: 6 B cluster ID, 8 B anchor master rank, 1 B hop
+  // count, 4 B anchor master beacon transmission time. Length is written
+  // from the bytes actually emitted so the two can never disagree.
+  f[i++] = 0x01;
+  int cl_len_at = i;
+  i += 2;                                          // length patched below
+  int cl_start = i;
   memcpy(f + i, CLUSTER_ID, 6); i += 6;
   f[i++] = 0xFE; f[i++] = 0xEA;                    // anchor master rank
-  f[i++] = 0x00; f[i++] = 0x00; f[i++] = 0x00;     // hop count / beacon tx
-  f[i++] = counter;
-  f[i++] = 0x02; f[i++] = 0x06; f[i++] = 0x00;     // service ID list attr
+  for (int k = 0; k < 6; k++) f[i++] = 0x00;       // (rank is 8 bytes)
+  f[i++] = 0x00;                                   // hop count
+  f[i++] = counter;                                // AMBTT
+  f[i++] = 0x00; f[i++] = 0x00; f[i++] = 0x00;
+  int cl_len = i - cl_start;
+  f[cl_len_at]     = (uint8_t)(cl_len & 0xFF);
+  f[cl_len_at + 1] = (uint8_t)(cl_len >> 8);
+  // Service ID list attribute
+  f[i++] = 0x02;
+  f[i++] = 0x06; f[i++] = 0x00;                    // length 6
   f[i++] = 0x88; f[i++] = 0x69; f[i++] = 0x19;     // org.opendroneid.remoteid
   f[i++] = 0x9D; f[i++] = 0x92; f[i++] = 0x09;
+  f[ie_len_at] = (uint8_t)(i - ie_len_at - 1);     // IE length = bytes after it
   return i;
 }
 
@@ -522,7 +553,7 @@ void loop() {
   static int rr = 0;
   if (s_running) {
     static const uint16_t PATH_MS[P_COUNT] = {
-      BEACON_MS, NAN_MS, BLE_MS, BLE_MS + 60, BLE_MS + 120,
+      BEACON_MS, NAN_MS, BLE_MS, 2000, 2000,
       450, 450, 450, 450, 450,
     };
     uint8_t payload[240];
