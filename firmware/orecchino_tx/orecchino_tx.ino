@@ -154,14 +154,19 @@ static int build_beacon(const uint8_t* pack, int pack_len, uint8_t counter) {
 // [message counter][ODID pack] — the layout the receivers parse.
 static int build_nan(const uint8_t* pack, int pack_len, uint8_t counter) {
   const TxPath* p = &PATHS[P_NAN];
-  static const uint8_t NAN_CLUSTER[6] = {0x50, 0x6F, 0x9A, 0x01, 0x00, 0x00};
+  // Destination is the NAN SDF *multicast* address — 0x51, not 0x50. The
+  // unicast form is filtered out by receiving MAC hardware even in
+  // promiscuous mode. BSSID is the NAN cluster ID. Both verified against
+  // opendroneid/wireshark-dissector's odid_wifi_sample.pcap.
+  static const uint8_t NAN_DA[6]      = {0x51, 0x6F, 0x9A, 0x01, 0x00, 0x00};
+  static const uint8_t NAN_CLUSTER[6] = {0x50, 0x6F, 0x9A, 0x01, 0x01, 0x79};
   // SHA-256("org.opendroneid.remoteid")[0..5]
   static const uint8_t SVC_ID[6] = {0x88, 0x69, 0x19, 0x9D, 0x92, 0x09};
   uint8_t* f = s_frame;
   int i = 0;
   f[i++] = 0xD0; f[i++] = 0x00;                    // action frame
   f[i++] = 0x00; f[i++] = 0x00;                    // duration
-  memcpy(f + i, NAN_CLUSTER, 6); i += 6;           // DA = NAN cluster
+  memcpy(f + i, NAN_DA, 6); i += 6;                // DA = SDF multicast
   memcpy(f + i, p->mac, 6); i += 6;                // SA
   memcpy(f + i, NAN_CLUSTER, 6); i += 6;           // BSSID = cluster ID
   f[i++] = 0x00; f[i++] = 0x00;                    // seq
@@ -186,7 +191,9 @@ static int build_nan(const uint8_t* pack, int pack_len, uint8_t counter) {
 }
 
 static void tx_wifi_frame(int pid, int len) {
-  if (len > 0 && esp_wifi_80211_tx(WIFI_IF_STA, s_frame, len, false) == ESP_OK)
+  // en_sys_seq: let the driver assign sequence numbers. Repeating seq 0
+  // from one SA invites 802.11 duplicate filtering on the receiver.
+  if (len > 0 && esp_wifi_80211_tx(WIFI_IF_STA, s_frame, len, true) == ESP_OK)
     s_tx[pid]++;
 }
 
