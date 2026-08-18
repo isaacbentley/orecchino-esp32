@@ -49,6 +49,11 @@ typedef struct {
   // Authentication (message type 2). Pages may arrive together in a pack or
   // spread across frames, so the assembled state carries a bitmap of which
   // pages have been seen; a signature can only be checked once complete.
+  // The signature covers the Basic ID message as it appeared on the wire,
+  // so keep those bytes verbatim.
+  bool     has_basic_raw;
+  uint8_t  basic_raw[25];
+
   bool     has_auth;
   uint8_t  auth_type;
   uint8_t  auth_last_page;
@@ -116,6 +121,10 @@ static inline void odid_decode_msg(const uint8_t* m, OdidUas* u) {
       } else {
         odid_copy_text(u->uas_id[slot], sizeof(u->uas_id[slot]), m + 2, 20);
       }
+      if (slot == 0) {
+        memcpy(u->basic_raw, m, 25);
+        u->has_basic_raw = true;
+      }
       break;
     }
     case 0x1: {  // Location / Vector
@@ -177,7 +186,11 @@ static inline void odid_decode_msg(const uint8_t* m, OdidUas* u) {
       u->has_auth = true;
       u->auth_type = m[1] >> 4;
       if (page == 0) {
-        u->auth_last_page = m[2];
+        // LastPageIndex arrives straight off the air. The page field is 4
+        // bits, so 15 is the highest page that can ever be addressed —
+        // clamp, or odid_auth_complete() shifts past the width of its
+        // operand on a crafted frame.
+        u->auth_last_page = m[2] > 15 ? 15 : m[2];
         u->auth_len = m[3];
         u->auth_ts = odid_rd_u32(m + 4);
         int n = u->auth_len < 17 ? u->auth_len : 17;

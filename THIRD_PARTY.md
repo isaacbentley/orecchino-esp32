@@ -15,7 +15,7 @@ Compiled into or referenced by this project. Audited 2026-08-17.
 
 ## Vendored / derived code
 
-- `firmware/orecchino_tx/monocypher.{h,cpp}` — [Monocypher](https://monocypher.org)
+- `firmware/libraries/Monocypher/` — [Monocypher](https://monocypher.org)
   3.1.2 (BSD-2-Clause OR CC0-1.0), vendored unmodified. Ed25519 signing for
   the test beacon's Authentication messages.
 - `firmware/orecchino_sensecap/IndicatorBus.{h,cpp}` — written for this

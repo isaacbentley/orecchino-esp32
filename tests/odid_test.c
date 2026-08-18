@@ -229,6 +229,24 @@ static void test_pack_bounds(void) {
   d[5] = 'X';
   CHECK(odid_decode_payload(d, 3 + 25, &u), "bounds: count clamp decodes");
   CHECK_S(u.uas_id[0], "X", "bounds: clamped pack content");
+
+  // LastPageIndex is attacker-controlled: anything past the 4-bit page
+  // range must be clamped, or odid_auth_complete() shifts by >= the width
+  // of its operand. Pair it with a Basic ID so the pack decodes at all.
+  memset(d, 0, sizeof(d));
+  d[0] = 0xF2;
+  d[1] = 25;
+  d[2] = 2;
+  d[3] = 0x02;                 // Basic ID, serial
+  d[4] = 0x12;
+  d[5] = 'Y';
+  d[3 + 25] = 0x22;            // Auth, page 0
+  d[3 + 25 + 1] = 0x10;        // auth type 1, page 0
+  d[3 + 25 + 2] = 0xFF;        // LastPageIndex: hostile
+  d[3 + 25 + 3] = 64;          // total length
+  CHECK(odid_decode_payload(d, 3 + 50, &u), "auth: hostile page index decodes");
+  CHECK(u.auth_last_page <= 15, "auth: LastPageIndex clamped to 4 bits");
+  CHECK(!odid_auth_complete(&u), "auth: one page of many is not complete");
 }
 
 static void test_dual_basic_id(void) {

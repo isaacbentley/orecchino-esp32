@@ -14,6 +14,7 @@ struct RidMessage: Decodable {
     var self_id: SelfId? = nil
     var system: SystemMsg? = nil
     var op_id: OpId? = nil
+    var auth: AuthInfo? = nil
 
     // tile-sync replies (fs_f / fs_ls_done / ack / fs_ok / fs_err / fs_info)
     var q: Int? = nil
@@ -71,6 +72,15 @@ struct SystemMsg: Decodable {
     var ts: Int
 }
 
+/// Authentication (ODID message type 2) as reported by the receiver.
+/// `state` is one of id_valid / invalid / partial / unknown_key / none.
+struct AuthInfo: Decodable {
+    var type: Int
+    var len: Int
+    var pages: Int
+    var state: String
+}
+
 struct OpId: Decodable {
     var id_type: Int
     var id: String
@@ -93,6 +103,19 @@ enum RidNames {
         guard let i, i >= 0, i < idTypes.count else { return "?" }
         return idTypes[i]
     }
+    /// Human label for an authentication state, phrased so it cannot be
+    /// read as "this drone is where it says it is".
+    static func authLabel(_ s: String?) -> String? {
+        switch s {
+        case "id_valid":    return "ID signature valid"
+        case "invalid":     return "ID signature INVALID"
+        case "partial":     return "pages incomplete"
+        case "unknown_key": return "signed, key not trusted"
+        case "none", nil:   return nil
+        default:            return s
+        }
+    }
+
     static func status(_ i: Int?) -> String {
         guard let i, i >= 0, i < statuses.count else { return "Unknown" }
         return statuses[i]

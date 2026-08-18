@@ -11,6 +11,6 @@ FQBN="esp32:esp32:esp32s3:FlashMode=qio,FlashSize=8M,PSRAM=opi,CPUFreq=240,Uploa
 
 pkill -9 -x Orecchino 2>/dev/null || true
 sleep 1
-arduino-cli compile --jobs 2 -b "$FQBN" firmware/orecchino_sensecap
+arduino-cli compile --jobs 2 --libraries firmware/libraries -b "$FQBN" firmware/orecchino_sensecap
 arduino-cli upload -b "$FQBN" -p "$PORT" firmware/orecchino_sensecap
 echo "Flashed. Reopen the app with: open app/build/Orecchino.app"

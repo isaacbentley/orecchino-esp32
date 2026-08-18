@@ -23,6 +23,7 @@
 #include "esp_wifi.h"
 #include <NimBLEDevice.h>
 #include "../common/odid_decode.h"
+#include "../common/odid_verify.h"
 #include "tracker.h"
 
 #define FW_NAME    "orecchino"
@@ -285,6 +286,12 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
   }
   if (u->has_op)
     jput(",\"op_id\":{\"id_type\":%u,\"id\":\"%s\"}", u->op_id_type, u->op_id);
+  if (u->has_auth) {
+    OdidAuthState st = odid_verify_auth(u);
+    jput(",\"auth\":{\"type\":%u,\"len\":%u,\"pages\":%u,\"state\":\"%s\"}",
+         u->auth_type, u->auth_len, u->auth_last_page + 1,
+         odid_auth_state_name(st));
+  }
   jput("}");
   Serial.println(s_jb);
 }

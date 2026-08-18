@@ -31,6 +31,7 @@ struct DroneTrack: Identifiable {
     var colorIndex: Int = 0
     var isDemo: Bool = false
     var phy: String?
+    var authState: String?
     /// Which ODID message types have been received (evidence string).
     var seenBasic = false, seenLoc = false, seenSelf = false
     var seenSys = false, seenOp = false
@@ -284,6 +285,7 @@ final class AppModel {
             t.operatorAlt = s.op_alt > -999 ? s.op_alt : nil
             t.seenSys = true
         }
+        if let a = msg.auth { t.authState = a.state }
         if let o = msg.op_id, !o.id.isEmpty {
             t.operatorId = o.id
             t.seenOp = true

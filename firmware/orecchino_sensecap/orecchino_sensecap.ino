@@ -28,6 +28,7 @@
 #include "mbedtls/base64.h"
 #include "esp_rom_crc.h"
 #include "../common/odid_decode.h"
+#include "../common/odid_verify.h"
 #include "tracker.h"
 #include "display.h"
 #include "spectrum.h"
@@ -297,6 +298,12 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
   }
   if (u->has_op)
     jput(",\"op_id\":{\"id_type\":%u,\"id\":\"%s\"}", u->op_id_type, u->op_id);
+  if (u->has_auth) {
+    OdidAuthState st = odid_verify_auth(u);
+    jput(",\"auth\":{\"type\":%u,\"len\":%u,\"pages\":%u,\"state\":\"%s\"}",
+         u->auth_type, u->auth_len, u->auth_last_page + 1,
+         odid_auth_state_name(st));
+  }
   jput("}");
   Serial.println(s_jb);
 }

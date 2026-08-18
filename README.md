@@ -126,6 +126,13 @@ Each decoded broadcast is one JSON object per line:
 Any device that speaks this format over a serial port can feed the app —
 an SDR pipeline works just as well as the ESP32 receivers.
 
+When a drone sends signed Authentication messages, the receiver adds an
+`"auth"` field with a `state` of `id_valid`, `invalid`, `partial`,
+`unknown_key`, or `none`. Read `id_valid` narrowly: it means the drone's
+**ID** was signed by a key the receiver trusts. The position is not
+signed, and old signatures are not rejected, so a valid state is never a
+reason to trust where a drone claims to be.
+
 ## Test beacon — `firmware/orecchino_tx`
 
 A **test transmitter** for bench-checking a receiver without waiting for a

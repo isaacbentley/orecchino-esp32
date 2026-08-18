@@ -178,6 +178,9 @@ struct DroneRow: View {
                     if track.phy == "coded" {
                         SourceBadge(text: "LR", color: Theme.accent)
                     }
+                    if let a = track.authState, a != "none" {
+                        AuthBadge(state: a)
+                    }
                     Text("\(track.rssi) dBm")
                         .font(.caption2).foregroundStyle(Theme.muted)
                     Text(RidNames.status(track.status))
@@ -198,6 +201,29 @@ struct DroneRow: View {
         }
         .opacity(isStale ? 0.55 : 1.0)
         .padding(.vertical, 2)
+    }
+}
+
+/// Authentication state. Deliberately says "ID" rather than a bare tick:
+/// the signature covers the identity, never the reported position.
+struct AuthBadge: View {
+    let state: String
+    var body: some View {
+        let (text, color): (String, Color) = switch state {
+        case "id_valid":    ("ID✓", Theme.ok)
+        case "invalid":     ("ID✗", Theme.danger)
+        case "partial":     ("ID…", Theme.muted)
+        case "unknown_key": ("ID?", Theme.warn)
+        default:            ("", Theme.muted)
+        }
+        if !text.isEmpty {
+            Text(text)
+                .font(.system(size: 9, weight: .bold))
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(color.opacity(0.22), in: Capsule())
+                .foregroundStyle(color)
+                .help("Authentication: \(state)")
+        }
     }
 }
 
@@ -449,6 +475,12 @@ struct DroneDetailCard: View {
                 KVRow(name: "Mfr", value: track.manufacturer,
                       help: "CTA-2063-A manufacturer code decode (local table)")
                 KVRow(name: "ID type", value: track.idType.map { RidNames.idType($0) })
+                KVRow(name: "Auth", value: RidNames.authLabel(track.authState),
+                      ink: track.authState == "invalid" ? Theme.danger
+                         : track.authState == "id_valid" ? Theme.ok : nil,
+                      help: "Signed Authentication messages. id_valid means the "
+                          + "drone's ID was signed by a trusted key — the "
+                          + "position is not signed.")
                 KVRow(name: "Evidence", value: track.evidence,
                       help: "B basic · L location · S self-ID · Y system · O operator")
                 KVRow(name: "MAC", value: track.macs.sorted().joined(separator: " "))
