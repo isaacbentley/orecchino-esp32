@@ -126,6 +126,42 @@ Each decoded broadcast is one JSON object per line:
 Any device that speaks this format over a serial port can feed the app —
 an SDR pipeline works just as well as the ESP32 receivers.
 
+## Test beacon — `firmware/orecchino_tx`
+
+A **test transmitter** for bench-checking a receiver without waiting for a
+real drone overhead. Flashed to a spare XIAO ESP32-C3, it flies a synthetic
+aircraft in a circle around a configurable home point and broadcasts it on
+both paths a receiver decodes — WiFi beacon vendor IE on channel 6, and BLE
+service data `0xFFFA` (BT5 extended when available, else BT4 legacy rotating
+one message per advertisement).
+
+**Each path transmits its own identity**, so a receiver shows them as
+separate contacts and it's obvious which path is getting through:
+
+| Path | UAS ID | Height |
+| --- | --- | --- |
+| WiFi beacon | `ORECCHINO-TEST-WIFI` | 60 m |
+| Bluetooth LE | `ORECCHINO-TEST-BLE5` (or `-BLE4`) | 90 m |
+
+The orbits are phase-opposite so the two markers never overlap, and Self ID
+and operator ID carry the path name too.
+
+> This is test equipment, **not a compliant Remote ID transmitter**. The IDs
+> are obviously synthetic by design so a stray capture can't be mistaken for
+> a real aircraft. Mind local rules on what you transmit.
+
+```bash
+arduino-cli compile --jobs 2 -b esp32:esp32:XIAO_ESP32C3:PartitionScheme=huge_app firmware/orecchino_tx
+arduino-cli upload  -b esp32:esp32:XIAO_ESP32C3:PartitionScheme=huge_app -p /dev/cu.usbmodemXXXX firmware/orecchino_tx
+```
+
+Serial control (115200, one command per line): `s` status, `go`/`stop`,
+`e` toggle emergency status (exercises the alert path and the SenseCAP's
+TFR/emergency banner), `h <lat> <lon>` move the home point, `r <metres>`
+orbit radius. Status lines report per-path transmit counters and live
+position. The encoder lives in `firmware/common/odid_build.h` and is
+round-trip tested against the decoder in the suite below.
+
 ## Testing
 
 ```bash

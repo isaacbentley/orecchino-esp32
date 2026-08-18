@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "../firmware/common/odid_build.h"
 #include "../firmware/common/odid_decode.h"
 
 static int g_fail = 0, g_pass = 0;
@@ -250,8 +251,72 @@ static void test_dual_basic_id(void) {
   CHECK(u.id_type[1] == 2, "dual: slot 1 type");
 }
 
+// The encoder (used by the TX test beacon) must produce exactly what the
+// decoder — itself pinned to the reference Wireshark dissector — reads back.
+static void test_tx_roundtrip(void) {
+  OdidTxState s;
+  memset(&s, 0, sizeof(s));
+  s.uas_id = "ORECCHINO-TEST-0001";
+  s.ua_type = 2;
+  s.status = 2;
+  s.lat = 37.803900;
+  s.lon = -122.464000;
+  s.alt_geo_m = 100.0f;
+  s.height_m = 60.0f;
+  s.speed_ms = 8.25f;
+  s.vspeed_ms = 1.5f;
+  s.dir_deg = 275.0f;
+  s.ts_s = 1234.5f;
+  s.self_desc = "orecchino TX self-test";
+  s.op_lat = 37.803000;
+  s.op_lon = -122.465000;
+  s.op_alt_m = 15.0f;
+  s.op_id = "TEST-OP-0001";
+
+  uint8_t pack[256];
+  int n = odid_build_pack(pack, &s, 238000000u);
+  CHECK(n == 128, "tx: pack length");
+
+  OdidUas u;
+  CHECK(odid_decode_payload(pack, n, &u), "tx: decodes");
+  CHECK_S(u.uas_id[0], "ORECCHINO-TEST-0001", "tx: uas id");
+  CHECK(u.id_type[0] == 1, "tx: id type serial");
+  CHECK(u.ua_type[0] == 2, "tx: ua type");
+  CHECK(u.status == 2, "tx: status airborne");
+  CHECK_F(u.lat, 37.803900, 5e-7, "tx: latitude");
+  CHECK_F(u.lon, -122.464000, 5e-7, "tx: longitude");
+  CHECK_F(u.alt_geo, 100.0f, 0.5, "tx: geo altitude");
+  CHECK_F(u.height, 60.0f, 0.5, "tx: height");
+  CHECK_F(u.speed, 8.25f, 0.25, "tx: speed");
+  CHECK_F(u.vspeed, 1.5f, 0.5, "tx: vertical speed");
+  CHECK_F(u.dir, 275.0f, 1.0, "tx: direction (E/W segment)");
+  CHECK_F(u.ts, 1234.5f, 0.1, "tx: timestamp");
+  CHECK_S(u.self_desc, "orecchino TX self-test", "tx: self description");
+  CHECK_F(u.op_lat, 37.803000, 5e-7, "tx: operator latitude");
+  CHECK_F(u.op_lon, -122.465000, 5e-7, "tx: operator longitude");
+  CHECK_F(u.op_alt, 15.0f, 0.5, "tx: operator altitude");
+  CHECK_S(u.op_id, "TEST-OP-0001", "tx: operator id");
+  CHECK(u.sys_ts == 238000000u, "tx: system timestamp");
+
+  // Unknown vertical speed must ride as the 126 marker and read back unknown.
+  s.vspeed_ms = NAN;
+  odid_build_pack(pack, &s, 0);
+  CHECK(odid_decode_payload(pack, n, &u), "tx: decodes with unknown vspeed");
+  CHECK_F(u.vspeed, -999.0f, 0.001, "tx: unknown vspeed marker survives");
+
+  // Fast flight crosses into the 0.75 m/s multiplier band.
+  s.vspeed_ms = 0.0f;
+  s.speed_ms = 90.0f;
+  s.dir_deg = 45.0f;
+  odid_build_pack(pack, &s, 0);
+  odid_decode_payload(pack, n, &u);
+  CHECK_F(u.speed, 90.0f, 0.75, "tx: high-speed multiplier band");
+  CHECK_F(u.dir, 45.0f, 1.0, "tx: east direction segment");
+}
+
 int main(void) {
   test_golden_pack();
+  test_tx_roundtrip();
   test_location_scales();
   test_basic_id_utm_uuid();
   test_text_sanitization();
