@@ -257,6 +257,7 @@ static void test_tx_roundtrip(void) {
   OdidTxState s;
   memset(&s, 0, sizeof(s));
   s.uas_id = "ORECCHINO-TEST-0001";
+  s.proto_ver = 2;
   s.ua_type = 2;
   s.status = 2;
   s.lat = 37.803900;
@@ -314,9 +315,122 @@ static void test_tx_roundtrip(void) {
   CHECK_F(u.dir, 45.0f, 1.0, "tx: east direction segment");
 }
 
+// Authentication pagination: page 0 carries LastPageIndex (not a count),
+// the TOTAL length, a timestamp and 17 data bytes; later pages carry 23.
+// Layout per opendroneid-core-c's opendroneid.h.
+static void test_auth_pages(void) {
+  OdidTxState s;
+  memset(&s, 0, sizeof(s));
+  s.proto_ver = 2;
+
+  uint8_t data[64];
+  for (int i = 0; i < 64; i++) data[i] = (uint8_t)i;
+
+  CHECK(odid_auth_pages(17) == 1, "auth: 17 bytes is one page");
+  CHECK(odid_auth_pages(18) == 2, "auth: 18 bytes spills to two");
+  CHECK(odid_auth_pages(63) == 3, "auth: 63 bytes fills three pages");
+  CHECK(odid_auth_pages(64) == 4, "auth: 64 bytes spills to four");
+  CHECK(odid_auth_pages(17 + 15 * 23) == 16, "auth: 16 pages max");
+
+  uint8_t m[25];
+  odid_build_auth_page(m, &s, 1, 0, data, 64, 0x11223344);
+  CHECK((m[0] >> 4) == 2, "auth: message type 2");
+  CHECK((m[0] & 0x0F) == 2, "auth: protocol version");
+  CHECK((m[1] >> 4) == 1, "auth: auth type in the high nibble");
+  CHECK((m[1] & 0x0F) == 0, "auth: page number in the low nibble");
+  CHECK(m[2] == 3, "auth: page 0 carries LastPageIndex, not a count");
+  CHECK(m[3] == 64, "auth: page 0 carries the total length");
+  CHECK(odid_rd_u32(m + 4) == 0x11223344, "auth: page 0 timestamp");
+  CHECK(memcmp(m + 8, data, 17) == 0, "auth: page 0 holds 17 bytes");
+
+  odid_build_auth_page(m, &s, 1, 1, data, 64, 0);
+  CHECK((m[1] & 0x0F) == 1, "auth: page 1 number");
+  CHECK(memcmp(m + 2, data + 17, 23) == 0, "auth: page 1 holds 17..39");
+
+  odid_build_auth_page(m, &s, 1, 2, data, 64, 0);
+  CHECK(memcmp(m + 2, data + 40, 23) == 0, "auth: page 2 holds 40..62");
+
+  odid_build_auth_page(m, &s, 1, 3, data, 64, 0);
+  CHECK(m[2] == data[63], "auth: page 3 holds the final byte");
+  CHECK(m[3] == 0, "auth: page 3 zero-pads past the data");
+
+  // Length is a uint8 on the wire, so it saturates instead of wrapping.
+  odid_build_auth_page(m, &s, 1, 0, data, 300, 0);
+  CHECK(m[3] == 255, "auth: length clamps at 255");
+}
+
+// The System timestamp field is F3411-22a (v2) only.
+static void test_version_gating(void) {
+  OdidTxState s;
+  memset(&s, 0, sizeof(s));
+  s.uas_id = "VERSION-TEST";
+  s.self_desc = "v";
+  s.op_id = "OP";
+  uint8_t pack[256];
+  OdidUas u;
+
+  s.proto_ver = 2;
+  int n = odid_build_pack(pack, &s, 238000000u);
+  CHECK((pack[0] & 0x0F) == 2, "version: pack header carries v2");
+  CHECK(odid_decode_payload(pack, n, &u), "version: v2 decodes");
+  CHECK(u.sys_ts == 238000000u, "version: v2 keeps the system timestamp");
+
+  s.proto_ver = 0;
+  n = odid_build_pack(pack, &s, 238000000u);
+  CHECK((pack[0] & 0x0F) == 0, "version: pack header carries v0");
+  CHECK((pack[3] & 0x0F) == 0, "version: messages carry v0 too");
+  CHECK(odid_decode_payload(pack, n, &u), "version: v0 decodes");
+  CHECK(u.sys_ts == 0, "version: v0 omits the v2-only system timestamp");
+  CHECK_S(u.uas_id[0], "VERSION-TEST", "version: v0 identity intact");
+}
+
+// A CAA registration lands in the second Basic ID slot, and a pack never
+// exceeds nine messages.
+static void test_dual_basic_and_pack_limit(void) {
+  OdidTxState s;
+  memset(&s, 0, sizeof(s));
+  s.proto_ver = 2;
+  s.uas_id = "SERIAL-1";
+  s.caa_id = "CAA-REG-1";
+  s.self_desc = "d";
+  s.op_id = "OP";
+
+  uint8_t pack[256];
+  int n = odid_build_pack(pack, &s, 0);
+  CHECK(pack[2] == 6, "dual: pack holds six messages");
+  CHECK(pack[2] <= ODID_PACK_MAX_MESSAGES, "dual: within the nine limit");
+
+  OdidUas u;
+  CHECK(odid_decode_payload(pack, n, &u), "dual: decodes");
+  CHECK(u.has_basic[0] && u.has_basic[1], "dual: both Basic ID slots filled");
+  CHECK(u.id_type[0] == 1 && u.id_type[1] == 2, "dual: serial then CAA");
+  CHECK_S(u.uas_id[1], "CAA-REG-1", "dual: registration in slot 1");
+}
+
+// Single-message mode rotates through the five message types.
+static void test_single_message_rotation(void) {
+  OdidTxState s;
+  memset(&s, 0, sizeof(s));
+  s.proto_ver = 2;
+  s.uas_id = "ROTATE-1";
+  s.self_desc = "r";
+  s.op_id = "OP-R";
+  uint8_t m[25];
+  const uint8_t want[5] = {0, 1, 3, 4, 5};
+  for (int i = 0; i < 5; i++) {
+    int n = odid_build_single(m, &s, 0, i);
+    CHECK(n == ODID_MSG_SIZE, "single: one message");
+    CHECK((m[0] >> 4) == want[i], "single: rotation order");
+  }
+}
+
 int main(void) {
   test_golden_pack();
   test_tx_roundtrip();
+  test_auth_pages();
+  test_version_gating();
+  test_dual_basic_and_pack_limit();
+  test_single_message_rotation();
   test_location_scales();
   test_basic_id_utm_uuid();
   test_text_sanitization();

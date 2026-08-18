@@ -14,10 +14,13 @@
 #include <string.h>
 
 #define ODID_MSG_SIZE 25
+#define ODID_PACK_MAX_MESSAGES 9   // a pack may never carry more
 
 // Live state a beacon transmits; mirrors the fields the receivers show.
 typedef struct {
   const char* uas_id;      // serial number (CTA-2063-A style)
+  const char* caa_id;      // optional second Basic ID (CAA registration)
+  uint8_t     proto_ver;   // 0/1 = F3411-19, 2 = F3411-22
   uint8_t     ua_type;     // 2 = multirotor
   uint8_t     status;      // 0 undeclared, 1 ground, 2 airborne, 3 emergency
   double      lat, lon;
@@ -68,16 +71,68 @@ static inline void odid_put_text(uint8_t* p, const char* s, size_t n) {
 
 // --- individual messages (25 B each, protocol version 2) -------------------
 
+// Header byte: message type in the high nibble, protocol version in the low.
+static inline uint8_t odid_hdr(uint8_t type, const OdidTxState* s) {
+  return (uint8_t)((type << 4) | (s->proto_ver & 0x0F));
+}
+
 static inline void odid_build_basic_id(uint8_t* m, const OdidTxState* s) {
   memset(m, 0, ODID_MSG_SIZE);
-  m[0] = 0x02;                                   // Basic ID, v2
+  m[0] = odid_hdr(0, s);
   m[1] = (uint8_t)((1 << 4) | (s->ua_type & 0x0F));  // ID type 1 = serial
   odid_put_text(m + 2, s->uas_id, 20);
 }
 
+// Second Basic ID carrying a CAA registration number (ID type 2). The spec
+// allows two Basic IDs — one serial, one registration — and receivers are
+// supposed to keep both.
+static inline void odid_build_basic_id_caa(uint8_t* m, const OdidTxState* s) {
+  memset(m, 0, ODID_MSG_SIZE);
+  m[0] = odid_hdr(0, s);
+  m[1] = (uint8_t)((2 << 4) | (s->ua_type & 0x0F));  // ID type 2 = CAA reg
+  odid_put_text(m + 2, s->caa_id ? s->caa_id : "", 20);
+}
+
+// Authentication message (type 2), paginated. Page 0 carries the page
+// count, total length and timestamp, then 17 bytes of data; pages 1..15
+// carry 23 bytes each. Most transmitters skip Auth entirely, so this is
+// the message that finds out whether a receiver handles it — or chokes.
+#define ODID_AUTH_PAGE0_DATA 17
+#define ODID_AUTH_PAGEN_DATA 23
+
+static inline int odid_auth_pages(int data_len) {
+  if (data_len <= ODID_AUTH_PAGE0_DATA) return 1;
+  return 1 + (data_len - ODID_AUTH_PAGE0_DATA + ODID_AUTH_PAGEN_DATA - 1) /
+                 ODID_AUTH_PAGEN_DATA;
+}
+
+static inline void odid_build_auth_page(uint8_t* m, const OdidTxState* s,
+                                        uint8_t auth_type, int page,
+                                        const uint8_t* data, int data_len,
+                                        uint32_t timestamp) {
+  memset(m, 0, ODID_MSG_SIZE);
+  m[0] = odid_hdr(2, s);
+  m[1] = (uint8_t)(((auth_type & 0x0F) << 4) | (page & 0x0F));
+  if (page == 0) {
+    // Byte 2 is LastPageIndex — the index of the final page, not the count.
+    // Byte 3 is the TOTAL auth length across all pages, and it is a uint8,
+    // so 255 is the real ceiling even though 16 pages could hold 362.
+    m[2] = (uint8_t)(odid_auth_pages(data_len) - 1);
+    m[3] = (uint8_t)(data_len > 255 ? 255 : data_len);
+    odid_put_u32(m + 4, timestamp);
+    int n = data_len < ODID_AUTH_PAGE0_DATA ? data_len : ODID_AUTH_PAGE0_DATA;
+    if (data && n > 0) memcpy(m + 8, data, n);
+  } else {
+    int off = ODID_AUTH_PAGE0_DATA + (page - 1) * ODID_AUTH_PAGEN_DATA;
+    int n = data_len - off;
+    if (n > ODID_AUTH_PAGEN_DATA) n = ODID_AUTH_PAGEN_DATA;
+    if (data && n > 0) memcpy(m + 2, data + off, n);
+  }
+}
+
 static inline void odid_build_location(uint8_t* m, const OdidTxState* s) {
   memset(m, 0, ODID_MSG_SIZE);
-  m[0] = 0x12;  // Location/Vector, v2
+  m[0] = odid_hdr(1, s);
 
   float dir = s->dir_deg;
   while (dir < 0) dir += 360.0f;
@@ -116,7 +171,7 @@ static inline void odid_build_location(uint8_t* m, const OdidTxState* s) {
 
 static inline void odid_build_self_id(uint8_t* m, const OdidTxState* s) {
   memset(m, 0, ODID_MSG_SIZE);
-  m[0] = 0x32;  // Self ID, v2
+  m[0] = odid_hdr(3, s);
   m[1] = 0;     // text description
   odid_put_text(m + 2, s->self_desc, 23);
 }
@@ -124,7 +179,7 @@ static inline void odid_build_self_id(uint8_t* m, const OdidTxState* s) {
 static inline void odid_build_system(uint8_t* m, const OdidTxState* s,
                                      uint32_t sys_ts) {
   memset(m, 0, ODID_MSG_SIZE);
-  m[0] = 0x42;  // System, v2
+  m[0] = odid_hdr(4, s);
   m[1] = 0x01;  // classification none, operator location = takeoff/dynamic
   odid_put_i32(m + 2, (int32_t)(s->op_lat * 1e7));
   odid_put_i32(m + 6, (int32_t)(s->op_lon * 1e7));
@@ -134,12 +189,14 @@ static inline void odid_build_system(uint8_t* m, const OdidTxState* s,
   odid_put_u16(m + 15, 0);   // floor unknown
   m[17] = 0;                 // EU category/class undeclared
   odid_put_u16(m + 18, odid_enc_alt(s->op_alt_m));
-  odid_put_u32(m + 20, sys_ts);
+  // The System timestamp field only exists in F3411-22a (protocol v2);
+  // under v0/v1 those bytes are reserved and must stay zero.
+  odid_put_u32(m + 20, s->proto_ver >= 2 ? sys_ts : 0);
 }
 
 static inline void odid_build_operator_id(uint8_t* m, const OdidTxState* s) {
   memset(m, 0, ODID_MSG_SIZE);
-  m[0] = 0x52;  // Operator ID, v2
+  m[0] = odid_hdr(5, s);
   m[1] = 0;     // operator ID type
   odid_put_text(m + 2, s->op_id, 20);
 }
@@ -148,13 +205,31 @@ static inline void odid_build_operator_id(uint8_t* m, const OdidTxState* s) {
 /// Writes 3 + 5*25 = 128 bytes; returns the length.
 static inline int odid_build_pack(uint8_t* out, const OdidTxState* s,
                                   uint32_t sys_ts) {
-  out[0] = 0xF2;            // Message Pack, v2
+  int n = 0;
   out[1] = ODID_MSG_SIZE;
-  out[2] = 5;
-  odid_build_basic_id(out + 3 + 0 * ODID_MSG_SIZE, s);
-  odid_build_location(out + 3 + 1 * ODID_MSG_SIZE, s);
-  odid_build_self_id(out + 3 + 2 * ODID_MSG_SIZE, s);
-  odid_build_system(out + 3 + 3 * ODID_MSG_SIZE, s, sys_ts);
-  odid_build_operator_id(out + 3 + 4 * ODID_MSG_SIZE, s);
-  return 3 + 5 * ODID_MSG_SIZE;
+  odid_build_basic_id(out + 3 + (n++) * ODID_MSG_SIZE, s);
+  if (s->caa_id && s->caa_id[0])
+    odid_build_basic_id_caa(out + 3 + (n++) * ODID_MSG_SIZE, s);
+  odid_build_location(out + 3 + (n++) * ODID_MSG_SIZE, s);
+  odid_build_self_id(out + 3 + (n++) * ODID_MSG_SIZE, s);
+  odid_build_system(out + 3 + (n++) * ODID_MSG_SIZE, s, sys_ts);
+  odid_build_operator_id(out + 3 + (n++) * ODID_MSG_SIZE, s);
+  out[0] = odid_hdr(0xF, s);
+  out[2] = (uint8_t)n;
+  return 3 + n * ODID_MSG_SIZE;
+}
+
+/// Build one message of the rotating single-message sequence (for the
+/// receivers that only ever see one message per advertisement).
+/// Returns 25; `idx` selects Basic/Location/SelfID/System/OperatorID.
+static inline int odid_build_single(uint8_t* out, const OdidTxState* s,
+                                    uint32_t sys_ts, int idx) {
+  switch (idx % 5) {
+    case 0: odid_build_basic_id(out, s); break;
+    case 1: odid_build_location(out, s); break;
+    case 2: odid_build_self_id(out, s); break;
+    case 3: odid_build_system(out, s, sys_ts); break;
+    default: odid_build_operator_id(out, s); break;
+  }
+  return ODID_MSG_SIZE;
 }

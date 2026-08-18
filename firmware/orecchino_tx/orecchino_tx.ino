@@ -32,6 +32,7 @@
 #include <NimBLEDevice.h>
 #include "esp_wifi.h"
 #include "../common/odid_build.h"
+#include "odid_auth.h"
 
 #define TX_NAME      "orecchino-tx"
 #define TX_VERSION   "0.2.0"
@@ -43,28 +44,77 @@
 
 // ---------------------------------------------------------------- paths
 
-enum TxPathId { P_WIFI = 0, P_NAN, P_BLE5, P_BLELR, P_BLE4, P_COUNT };
+// Five transports plus four format variants. Every variant is its own
+// aircraft, so a receiver's contact list is a capability report: whatever
+// is missing names the thing that receiver cannot decode. The format
+// variants all ride the WiFi beacon, the most reliable transport, so the
+// format is the only thing under test.
+enum TxPathId {
+  P_WIFI = 0, P_NAN, P_BLE5, P_BLELR, P_BLE4,   // transports
+  P_V0, P_SINGLE, P_DUAL, P_AUTH, P_AUTHBAD,    // formats (WiFi beacon)
+  P_COUNT
+};
+
+enum TxCarrier { C_BEACON = 0, C_NAN, C_BLE_EXT, C_BLE_CODED, C_BLE_LEGACY };
+enum TxFormat  { F_PACK = 0, F_SINGLE };
 
 typedef struct {
   const char* uas_id;
   const char* self_desc;
   const char* op_id;
+  uint8_t     carrier;      // TxCarrier
+  uint8_t     format;       // TxFormat
+  uint8_t     proto_ver;    // 0 = F3411-19, 2 = F3411-22
+  const char* caa_id;       // non-null adds a second Basic ID
+  bool        with_auth;    // append paginated Authentication messages
   double      bearing_deg;  // where this aircraft's orbit centre sits
   double      alt_m;
   uint8_t     mac[6];       // WiFi SA / BLE advertising address
 } TxPath;
 
 static const TxPath PATHS[P_COUNT] = {
+  // --- transports, all v2 message packs
   { "ORECCHINO-TEST-WIFI",  "TEST path=WIFI-BEACON", "TEST-OP-WIFI",
-    0.0,   60.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x01} },
+    C_BEACON, F_PACK, 2, nullptr, false,
+    0.0,   60.0,  {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x01} },
   { "ORECCHINO-TEST-NAN",   "TEST path=WIFI-NAN",    "TEST-OP-NAN",
-    72.0,  75.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x02} },
+    C_NAN, F_PACK, 2, nullptr, false,
+    40.0,  75.0,  {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x02} },
   { "ORECCHINO-TEST-BLE5",  "TEST path=BLE5-1M",     "TEST-OP-BLE5",
-    144.0, 90.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x03} },
+    C_BLE_EXT, F_PACK, 2, nullptr, false,
+    80.0,  90.0,  {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x03} },
   { "ORECCHINO-TEST-BLELR", "TEST path=BLE5-CODED",  "TEST-OP-BLELR",
-    216.0, 105.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x04} },
+    C_BLE_CODED, F_PACK, 2, nullptr, false,
+    120.0, 105.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x04} },
   { "ORECCHINO-TEST-BLE4",  "TEST path=BLE4-LEGACY", "TEST-OP-BLE4",
-    288.0, 120.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x05} },
+    C_BLE_LEGACY, F_SINGLE, 2, nullptr, false,
+    160.0, 120.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x05} },
+
+  // --- format variants on the WiFi beacon
+  // F3411-19 (protocol version 0): receivers that hardcode v2 miss this.
+  { "ORECCHINO-TEST-V0",    "TEST fmt=F3411-19-v0",  "TEST-OP-V0",
+    C_BEACON, F_PACK, 0, nullptr, false,
+    200.0, 135.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x06} },
+  // One 25-byte message per frame instead of a pack — receivers that only
+  // parse message packs miss this.
+  { "ORECCHINO-TEST-SINGLE","TEST fmt=SINGLE-MSG",   "TEST-OP-SINGLE",
+    C_BEACON, F_SINGLE, 2, nullptr, false,
+    240.0, 150.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x07} },
+  // Two Basic IDs: serial plus CAA registration.
+  { "ORECCHINO-TEST-DUAL",  "TEST fmt=DUAL-BASIC-ID","TEST-OP-DUAL",
+    C_BEACON, F_PACK, 2, "CAA-REG-TEST-0001", false,
+    280.0, 165.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x08} },
+  // Paginated Authentication messages in the pack — the message most
+  // transmitters skip and most receivers have never been fed.
+  { "ORECCHINO-TEST-AUTH",  "TEST fmt=AUTH-SIGNED",  "TEST-OP-AUTH",
+    C_BEACON, F_PACK, 2, nullptr, true,
+    280.0, 180.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x09} },
+  // Same, but the signature is deliberately corrupted — a receiver that
+  // verifies signatures should reject this one and accept the other. If it
+  // shows both as equally valid, it is not really checking.
+  { "ORECCHINO-TEST-AUTHBAD", "TEST fmt=AUTH-BADSIG","TEST-OP-AUTHBAD",
+    C_BEACON, F_PACK, 2, nullptr, true,
+    320.0, 195.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x0A} },
 };
 
 // Flight sim defaults: Crissy Field.
@@ -110,10 +160,40 @@ static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
   s->op_id     = p->op_id;
 }
 
-static int build_for(int pid, uint8_t* pack, uint32_t now) {
+// The Authentication variants carry a real Ed25519 signature over the
+// Basic ID message plus the page-0 timestamp, made with a published test
+// key (see odid_auth.h). AUTHBAD corrupts it on purpose.
+
+// Build the ODID payload this path transmits: a message pack, optionally
+// with Authentication pages appended, or a single rotating message.
+static int build_payload(int pid, uint8_t* out, uint32_t now) {
+  const TxPath* p = &PATHS[pid];
   OdidTxState s;
   current_state(&s, now, pid);
-  return odid_build_pack(pack, &s, now / 1000);
+
+  if (p->format == F_SINGLE) {
+    // Rotate through the message types, one per transmission.
+    return odid_build_single(out, &s, now / 1000, (int)(now / 400));
+  }
+
+  int n = odid_build_pack(out, &s, now / 1000);
+  if (p->with_auth) {
+    uint32_t ts = now / 1000;
+    uint8_t sig[64];
+    odid_auth_sign(sig, out + 3, ts);          // out+3 is the Basic ID msg
+    if (pid == P_AUTHBAD) sig[0] ^= 0xFF;      // break it on purpose
+    int count = out[2];
+    int pages = odid_auth_pages((int)sizeof(sig));
+    for (int pg = 0; pg < pages && count < ODID_PACK_MAX_MESSAGES; pg++) {
+      odid_build_auth_page(out + 3 + count * ODID_MSG_SIZE, &s,
+                           1 /* UAS ID signature */, pg, sig,
+                           (int)sizeof(sig), ts);
+      count++;
+    }
+    out[2] = (uint8_t)count;
+    n = 3 + count * ODID_MSG_SIZE;
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------- WiFi TX
@@ -195,6 +275,43 @@ static int build_nan(const uint8_t* pack, int pack_len, uint8_t counter) {
 // (en_sys_seq) also lets it rewrite header fields — including the source
 // address, which would collapse our per-path identities onto one MAC. So
 // we number the frames ourselves and hand the driver an untouched header.
+// NAN synchronisation beacon. The reference transmitter emits this
+// alongside the service discovery frame so receivers can find and track the
+// NAN cluster; ESP32 projects that send only the action frame produce
+// traffic some receivers never latch onto. Constants from
+// opendroneid-core-c wifi.c: cluster ID 50:6F:9A:01:00:FF, WFA OUI with
+// NAN OUI type 0x13, master preference 0xFE, random factor 0xEA.
+static int build_nan_sync_beacon(uint8_t counter) {
+  static const uint8_t CLUSTER_ID[6] = {0x50, 0x6F, 0x9A, 0x01, 0x00, 0xFF};
+  const TxPath* p = &PATHS[P_NAN];
+  uint8_t* f = s_frame;
+  int i = 0;
+  f[i++] = 0x80; f[i++] = 0x00;                    // beacon
+  f[i++] = 0x00; f[i++] = 0x00;                    // duration
+  for (int k = 0; k < 6; k++) f[i++] = 0xFF;       // DA broadcast
+  memcpy(f + i, p->mac, 6); i += 6;                // SA
+  memcpy(f + i, CLUSTER_ID, 6); i += 6;            // BSSID = cluster ID
+  f[i++] = 0x00; f[i++] = 0x00;                    // seq
+  memset(f + i, 0, 8); i += 8;                     // timestamp
+  f[i++] = 0x00; f[i++] = 0x02;                    // beacon interval 512 TU
+  f[i++] = 0x00; f[i++] = 0x00;                    // capability
+  f[i++] = 0xDD; f[i++] = 0x22;                    // vendor IE, len 0x22
+  f[i++] = 0x50; f[i++] = 0x6F; f[i++] = 0x9A;     // WFA OUI
+  f[i++] = 0x13;                                   // NAN
+  f[i++] = 0x00; f[i++] = 0x02; f[i++] = 0x00;     // master indication attr
+  f[i++] = 0xFE;                                   // master preference
+  f[i++] = 0xEA;                                   // random factor
+  f[i++] = 0x01; f[i++] = 0x0D; f[i++] = 0x00;     // cluster attr
+  memcpy(f + i, CLUSTER_ID, 6); i += 6;
+  f[i++] = 0xFE; f[i++] = 0xEA;                    // anchor master rank
+  f[i++] = 0x00; f[i++] = 0x00; f[i++] = 0x00;     // hop count / beacon tx
+  f[i++] = counter;
+  f[i++] = 0x02; f[i++] = 0x06; f[i++] = 0x00;     // service ID list attr
+  f[i++] = 0x88; f[i++] = 0x69; f[i++] = 0x19;     // org.opendroneid.remoteid
+  f[i++] = 0x9D; f[i++] = 0x92; f[i++] = 0x09;
+  return i;
+}
+
 static void tx_wifi_frame(int pid, int len) {
   if (len <= 0) return;
   static uint16_t seq[P_COUNT] = {0};
@@ -238,9 +355,10 @@ static int build_ble_ad(uint8_t* out, const uint8_t* odid, int odid_len,
   return 2 + payload;
 }
 
-static void tx_ble(int slot, const uint8_t* pack, int pack_len, uint32_t now) {
-  const int pid = INST_PATH[slot];
-  const uint8_t inst = INST[slot];
+static void tx_ble(int pid, const uint8_t* payload, int payload_len,
+                   uint32_t now) {
+  // Set 0 belongs to the 1M flavour; coded and legacy share set 1.
+  const uint8_t inst = (pid == P_BLE5) ? 0 : 1;
   const TxPath* p = &PATHS[pid];
   uint8_t ad[6 + 160];
   int ad_len;
@@ -258,16 +376,10 @@ static void tx_ble(int slot, const uint8_t* pack, int pack_len, uint32_t now) {
   bda[0] |= 0xC0;
   adv.setAddress(NimBLEAddress(bda, BLE_ADDR_RANDOM));
 
-  if (pid == P_BLE4) {
-    // Legacy advertising: 31-byte cap, so rotate one 25-byte message per
-    // advertisement — exactly what BT4-only transmitters do.
-    adv.setLegacyAdvertising(true);
-    int rot = (int)((now / BLE_MS) % 5);
-    ad_len = build_ble_ad(ad, pack + 3 + rot * ODID_MSG_SIZE, ODID_MSG_SIZE,
-                          s_counter[pid]);
-  } else {
-    ad_len = build_ble_ad(ad, pack, pack_len, s_counter[pid]);
-  }
+  // Legacy advertising caps the payload at 31 bytes: 6 of ODID overhead
+  // leaves exactly one 25-byte message, never a pack.
+  if (pid == P_BLE4) adv.setLegacyAdvertising(true);
+  ad_len = build_ble_ad(ad, payload, payload_len, s_counter[pid]);
   adv.setData(ad, ad_len);
 
   s_adv->stop(inst);
@@ -373,11 +485,29 @@ void setup() {
   esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
   ble_begin();
+  odid_auth_init();
+
+  // Self-test: sign and verify before claiming to transmit signatures, and
+  // publish the public key so a receiver can check us independently.
+  uint8_t probe[ODID_MSG_SIZE], sig[64];
+  OdidTxState st;
+  current_state(&st, 0, P_AUTH);
+  odid_build_basic_id(probe, &st);
+  odid_auth_sign(sig, probe, 12345);
+  bool sig_ok = odid_auth_verify(sig, probe, 12345);
+  sig[3] ^= 0xFF;
+  bool rej_ok = !odid_auth_verify(sig, probe, 12345);
+
+  char pub_hex[65];
+  for (int i = 0; i < 32; i++) sprintf(pub_hex + i * 2, "%02x", g_auth_pub[i]);
+  pub_hex[64] = 0;
 
   Serial.printf("{\"type\":\"tx_boot\",\"fw\":\"%s\",\"ver\":\"%s\","
-                "\"paths\":%d,\"note\":\"TEST BEACON - not a compliant "
-                "Remote ID transmitter\"}\n",
-                TX_NAME, TX_VERSION, P_COUNT);
+                "\"paths\":%d,\"selftest\":{\"sign\":%s,\"reject\":%s},"
+                "\"auth_pubkey\":\"%s\",\"note\":\"TEST BEACON - not a "
+                "compliant Remote ID transmitter\"}\n",
+                TX_NAME, TX_VERSION, P_COUNT,
+                sig_ok ? "true" : "false", rej_ok ? "true" : "false", pub_hex);
   print_status();
 }
 
@@ -385,28 +515,39 @@ void loop() {
   uint32_t now = millis();
   poll_serial();
 
-  static uint32_t last_bcn = 0, last_nan = 0, last_ble[3] = {0, 0, 0};
+  // One aircraft per loop pass, round-robin, so the shared 2.4 GHz front
+  // end is never asked to serve two paths at once. Location must go out at
+  // 1 Hz; everything here is comfortably faster.
+  static uint32_t last_tx_ms[P_COUNT] = {0};
+  static int rr = 0;
   if (s_running) {
-    uint8_t pack[160];
+    static const uint16_t PATH_MS[P_COUNT] = {
+      BEACON_MS, NAN_MS, BLE_MS, BLE_MS + 60, BLE_MS + 120,
+      450, 450, 450, 450, 450,
+    };
+    uint8_t payload[240];
+    for (int k = 0; k < P_COUNT; k++) {
+      int pid = (rr + k) % P_COUNT;
+      if (now - last_tx_ms[pid] < PATH_MS[pid]) continue;
+      last_tx_ms[pid] = now;
+      rr = (pid + 1) % P_COUNT;
 
-    if (now - last_bcn >= BEACON_MS) {
-      last_bcn = now;
-      int n = build_for(P_WIFI, pack, now);
-      tx_wifi_frame(P_WIFI, build_beacon(pack, n, s_counter[P_WIFI]++));
-    }
-    if (now - last_nan >= NAN_MS) {
-      last_nan = now;
-      int n = build_for(P_NAN, pack, now);
-      tx_wifi_frame(P_NAN, build_nan(pack, n, s_counter[P_NAN]++));
-    }
-    // Stagger the BLE instances so their radio slots don't collide.
-    for (int slot = 0; slot < 3; slot++) {
-      if (now - last_ble[slot] >= BLE_MS + slot * 60) {
-        last_ble[slot] = now;
-        int n = build_for(INST_PATH[slot], pack, now);
-        tx_ble(slot, pack, n, now);
-        break;   // one instance per loop pass
+      int n = build_payload(pid, payload, now);
+      switch (PATHS[pid].carrier) {
+        case C_BEACON:
+          tx_wifi_frame(pid, build_beacon(payload, n, s_counter[pid]++));
+          break;
+        case C_NAN:
+          // The reference transmitter emits a sync beacon alongside the
+          // action frame; receivers that track NAN clusters need it.
+          tx_wifi_frame(pid, build_nan_sync_beacon(s_counter[pid]));
+          tx_wifi_frame(pid, build_nan(payload, n, s_counter[pid]++));
+          break;
+        default:
+          tx_ble(pid, payload, n, now);
+          break;
       }
+      break;  // one path per pass
     }
   }
 
