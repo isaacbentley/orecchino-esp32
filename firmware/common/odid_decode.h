@@ -11,6 +11,10 @@
 #include <stdio.h>
 #include <string.h>
 
+// Page 0 holds 17 auth bytes, pages 1..15 hold 23 each; the wire Length
+// field is a uint8, so 255 is the practical ceiling.
+#define ODID_AUTH_MAX_BYTES 255
+
 // Decoded state for one UAS, filled from whichever messages were received.
 typedef struct {
   bool    has_basic[2];
@@ -41,7 +45,25 @@ typedef struct {
   bool    has_op;
   uint8_t op_id_type;
   char    op_id[21];
+
+  // Authentication (message type 2). Pages may arrive together in a pack or
+  // spread across frames, so the assembled state carries a bitmap of which
+  // pages have been seen; a signature can only be checked once complete.
+  bool     has_auth;
+  uint8_t  auth_type;
+  uint8_t  auth_last_page;
+  uint8_t  auth_len;          // total bytes claimed by page 0
+  uint32_t auth_ts;
+  uint16_t auth_pages_seen;   // bit N set = page N received
+  uint8_t  auth_data[ODID_AUTH_MAX_BYTES];
 } OdidUas;
+
+/// True once every page from 0..auth_last_page has arrived.
+static inline bool odid_auth_complete(const OdidUas* u) {
+  if (!u->has_auth || !(u->auth_pages_seen & 1)) return false;
+  uint16_t want = (uint16_t)((1u << (u->auth_last_page + 1)) - 1);
+  return (u->auth_pages_seen & want) == want;
+}
 
 static inline int16_t odid_rd_i16(const uint8_t* p) {
   return (int16_t)(p[0] | (p[1] << 8));
@@ -150,8 +172,27 @@ static inline void odid_decode_msg(const uint8_t* m, OdidUas* u) {
       odid_copy_text(u->op_id, sizeof(u->op_id), m + 2, 20);
       break;
     }
+    case 0x2: {  // Authentication
+      uint8_t page = m[1] & 0x0F;
+      u->has_auth = true;
+      u->auth_type = m[1] >> 4;
+      if (page == 0) {
+        u->auth_last_page = m[2];
+        u->auth_len = m[3];
+        u->auth_ts = odid_rd_u32(m + 4);
+        int n = u->auth_len < 17 ? u->auth_len : 17;
+        memcpy(u->auth_data, m + 8, n);
+      } else if (page <= 15) {
+        int off = 17 + (page - 1) * 23;
+        int n = 23;
+        if (off + n > ODID_AUTH_MAX_BYTES) n = ODID_AUTH_MAX_BYTES - off;
+        if (n > 0) memcpy(u->auth_data + off, m + 2, n);
+      }
+      u->auth_pages_seen |= (uint16_t)(1u << page);
+      break;
+    }
     default:
-      break;  // 0x2 Auth and unknown types: ignored
+      break;  // unknown message types are ignored
   }
 }
 
