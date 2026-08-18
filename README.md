@@ -135,16 +135,27 @@ both paths a receiver decodes — WiFi beacon vendor IE on channel 6, and BLE
 service data `0xFFFA` (BT5 extended when available, else BT4 legacy rotating
 one message per advertisement).
 
-**Each path transmits its own identity**, so a receiver shows them as
-separate contacts and it's obvious which path is getting through:
+**Each transmit path flies its own aircraft with its own identity**, so a
+receiver's contact list doubles as a path checklist — a missing contact
+names the path that isn't getting through:
 
-| Path | UAS ID | Height |
+| UAS ID | Path | Height |
 | --- | --- | --- |
-| WiFi beacon | `ORECCHINO-TEST-WIFI` | 60 m |
-| Bluetooth LE | `ORECCHINO-TEST-BLE5` (or `-BLE4`) | 90 m |
+| `ORECCHINO-TEST-WIFI` | WiFi beacon, vendor IE, channel 6 | 60 m |
+| `ORECCHINO-TEST-NAN` | WiFi NAN service discovery frame | 75 m |
+| `ORECCHINO-TEST-BLE5` | BLE 5 extended advertising, 1M PHY | 90 m |
+| `ORECCHINO-TEST-BLELR` | BLE 5 extended, coded PHY (long range) | 105 m |
+| `ORECCHINO-TEST-BLE4` | BLE 4 legacy, one message per advertisement | 120 m |
 
-The orbits are phase-opposite so the two markers never overlap, and Self ID
-and operator ID carry the path name too.
+The five orbit centres sit on a 200 m (~⅛ mile) ring around the home point
+at 72° intervals, each at its own altitude, so the markers are clearly
+separated on a map. Self ID and operator ID carry the path name too, and
+each aircraft transmits from its own MAC / BLE address.
+
+The ESP32-C3's BLE controller only grants two advertising sets, so the
+three BLE flavours time-share them (1M keeps one set; coded and legacy
+alternate on the other). Per-path transmit counters in the serial status
+make a dead path obvious, and failures are reported rather than swallowed.
 
 > This is test equipment, **not a compliant Remote ID transmitter**. The IDs
 > are obviously synthetic by design so a stray capture can't be mistaken for
