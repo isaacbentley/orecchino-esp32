@@ -19,7 +19,13 @@ Track* tracker_upsert(const uint8_t* mac, const char* uas, uint32_t now,
     if (memcmp(t->mac, mac, 6) == 0) by_mac = t;
     if (!oldest || t->last_ms < oldest->last_ms) oldest = t;
   }
-  Track* t = by_uas ? by_uas : by_mac;
+  // Identity wins over hardware address. Falling back to the MAC is only
+  // safe when there is no identity conflict — otherwise two aircraft that
+  // share a MAC (randomised addresses, a spoofer, or one transmitter
+  // sending several UAS IDs) collapse into a single contact whose ID
+  // flip-flops, hiding one of them entirely.
+  Track* t = by_uas;
+  if (!t && by_mac && (!uas || !uas[0] || !by_mac->uas[0])) t = by_mac;
   if (!t) {
     t = free_slot ? free_slot : oldest;   // LRU eviction, never slot 0 forever
     memset(t, 0, sizeof(*t));

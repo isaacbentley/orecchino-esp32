@@ -190,10 +190,18 @@ static int build_nan(const uint8_t* pack, int pack_len, uint8_t counter) {
   return i;
 }
 
+// Sequence numbers matter twice over: repeating seq 0 from one address
+// invites 802.11 duplicate filtering, but letting the driver assign them
+// (en_sys_seq) also lets it rewrite header fields — including the source
+// address, which would collapse our per-path identities onto one MAC. So
+// we number the frames ourselves and hand the driver an untouched header.
 static void tx_wifi_frame(int pid, int len) {
-  // en_sys_seq: let the driver assign sequence numbers. Repeating seq 0
-  // from one SA invites 802.11 duplicate filtering on the receiver.
-  if (len > 0 && esp_wifi_80211_tx(WIFI_IF_STA, s_frame, len, true) == ESP_OK)
+  if (len <= 0) return;
+  static uint16_t seq[P_COUNT] = {0};
+  uint16_t s = (uint16_t)(++seq[pid] & 0x0FFF);
+  s_frame[22] = (uint8_t)(s << 4);          // seq ctrl: frag 0, seq low
+  s_frame[23] = (uint8_t)(s >> 4);          // seq high
+  if (esp_wifi_80211_tx(WIFI_IF_STA, s_frame, len, false) == ESP_OK)
     s_tx[pid]++;
 }
 
