@@ -8,6 +8,7 @@
 // spectrum view. USB still speaks the
 // JSON line protocol.
 #include <Arduino.h>
+#include <Preferences.h>
 #define FW_BOARD "lilygo-t5-epaper-s3-pro"
 #define ORECCHINO_BOARD_HOOKS
 #include "../common/rx_core.h"
