@@ -85,7 +85,45 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
     return true;
   }
 
-  // 1. JSON VCOM commands:
+  // 1. JSON Backlight & VCOM commands:
+  if (!strcmp(cmd, "set_bl") || !strcmp(cmd, "bl")) {
+    char m[16] = {0};
+    if (json_field_str(line, "mode", m, sizeof(m))) {
+      if (!strcmp(m, "on")) periph_bl_set_mode(BL_ON);
+      else if (!strcmp(m, "off")) periph_bl_set_mode(BL_OFF);
+      else periph_bl_set_mode(BL_AUTO);
+    }
+    double duty = 0;
+    if (json_field_dbl(line, "duty", &duty) || json_field_dbl(line, "level", &duty)) {
+      if (duty > 0 && duty <= 1.0) duty *= 255.0;
+      if (duty >= 0 && duty <= 255) periph_bl_set_duty((uint8_t)duty);
+    }
+    Serial.printf("{\"type\":\"backlight\",\"mode\":\"%s\",\"active\":%s,\"duty\":%u,\"sundown\":%s,\"sun_elev\":%.1f}\n",
+                  periph_bl_get_mode() == BL_AUTO ? "auto" : periph_bl_get_mode() == BL_ON ? "on" : "off",
+                  periph_bl_is_active() ? "true" : "false", (unsigned)periph_bl_get_duty(),
+                  periph_is_after_sundown() ? "true" : "false", periph_sun_elevation());
+    return true;
+  }
+  if (!strcmp(cmd, "get_bl")) {
+    Serial.printf("{\"type\":\"backlight\",\"mode\":\"%s\",\"active\":%s,\"duty\":%u,\"sundown\":%s,\"sun_elev\":%.1f}\n",
+                  periph_bl_get_mode() == BL_AUTO ? "auto" : periph_bl_get_mode() == BL_ON ? "on" : "off",
+                  periph_bl_is_active() ? "true" : "false", (unsigned)periph_bl_get_duty(),
+                  periph_is_after_sundown() ? "true" : "false", periph_sun_elevation());
+    return true;
+  }
+  if (!strcmp(cmd, "set_time") || !strcmp(cmd, "time")) {
+    double u = 0;
+    if (json_field_dbl(line, "utc", &u)) {
+      time_t epoch = (time_t)u;
+      struct tm t;
+      gmtime_r(&epoch, &t);
+      periph_set_utc_time(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+      Serial.printf("{\"type\":\"time\",\"utc\":%lu,\"set\":true}\n", (unsigned long)epoch);
+      return true;
+    }
+  }
+
+  // JSON VCOM commands:
   //    {"cmd":"set_vcom","vcom":1560}
   //    {"cmd":"vcom","vcom":-1.56}
   //    {"cmd":"get_vcom"}
@@ -113,6 +151,23 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
   if (line) {
     const char* p = line;
     while (*p == ' ') p++;
+    if (!strncmp(p, "bl", 2) || !strncmp(p, "backlight", 9)) {
+      p += (!strncmp(p, "backlight", 9) ? 9 : 2);
+      while (*p == ' ') p++;
+      if (!strncmp(p, "on", 2)) periph_bl_set_mode(BL_ON);
+      else if (!strncmp(p, "off", 3)) periph_bl_set_mode(BL_OFF);
+      else if (!strncmp(p, "auto", 4)) periph_bl_set_mode(BL_AUTO);
+      else if (*p >= '0' && *p <= '9') {
+        int v = atoi(p);
+        if (strchr(p, '%')) v = (v * 255) / 100;
+        if (v >= 0 && v <= 255) periph_bl_set_duty((uint8_t)v);
+      }
+      Serial.printf("{\"type\":\"backlight\",\"mode\":\"%s\",\"active\":%s,\"duty\":%u,\"sundown\":%s,\"sun_elev\":%.1f}\n",
+                    periph_bl_get_mode() == BL_AUTO ? "auto" : periph_bl_get_mode() == BL_ON ? "on" : "off",
+                    periph_bl_is_active() ? "true" : "false", (unsigned)periph_bl_get_duty(),
+                    periph_is_after_sundown() ? "true" : "false", periph_sun_elevation());
+      return true;
+    }
     if (!strncmp(p, "mode", 4)) {
       p += 4;
       while (*p == ' ') p++;
@@ -190,10 +245,25 @@ void loop() {
     // Check serial for mode switch or reboot
     while (Serial.available()) {
       int c = Serial.peek();
-      if (c == '{' || c == 'm' || c == 'r') {
+      if (c == '{' || c == 'm' || c == 'r' || c == 'b') {
         String s = Serial.readStringUntil('\n');
         s.trim();
-        if (s == "mode rx") {
+        if (s.startsWith("bl") || s.startsWith("backlight")) {
+          const char* p = s.c_str() + (s.startsWith("backlight") ? 9 : 2);
+          while (*p == ' ') p++;
+          if (!strncmp(p, "on", 2)) periph_bl_set_mode(BL_ON);
+          else if (!strncmp(p, "off", 3)) periph_bl_set_mode(BL_OFF);
+          else if (!strncmp(p, "auto", 4)) periph_bl_set_mode(BL_AUTO);
+          else if (*p >= '0' && *p <= '9') {
+            int v = atoi(p);
+            if (strchr(p, '%')) v = (v * 255) / 100;
+            if (v >= 0 && v <= 255) periph_bl_set_duty((uint8_t)v);
+          }
+          Serial.printf("{\"type\":\"backlight\",\"mode\":\"%s\",\"active\":%s,\"duty\":%u,\"sundown\":%s,\"sun_elev\":%.1f}\n",
+                        periph_bl_get_mode() == BL_AUTO ? "auto" : periph_bl_get_mode() == BL_ON ? "on" : "off",
+                        periph_bl_is_active() ? "true" : "false", (unsigned)periph_bl_get_duty(),
+                        periph_is_after_sundown() ? "true" : "false", periph_sun_elevation());
+        } else if (s == "mode rx") {
           Serial.println("{\"type\":\"mode\",\"mode\":\"rx\",\"switching\":true}");
           board_switch_mode(UI_MODE_RX);
         } else if (s == "mode tx" || s == "mode") {
