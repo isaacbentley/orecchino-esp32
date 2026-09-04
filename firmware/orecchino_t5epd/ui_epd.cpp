@@ -5,6 +5,7 @@
 #include "../common/ui_common.h"
 #include <epdiy.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <PNGdec.h>
 #include <Adafruit_GFX.h>  // for its Fonts/ (GFXfont layout is shared)
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -589,7 +590,10 @@ static void refresh(bool force_full) {
   // E-Paper Best Practice: Full DC-balanced GC16 refresh on view changes,
   // alert state transitions, or periodically every 12 partial cycles / 3 minutes
   // to eliminate residual charge and ghosting.
-  bool full = force_full || s_partials >= 12 || (s_now - s_last_full > 180000UL);
+  // In spectrum mode, suppress rapid 12-cycle GC16 flashes to protect the panel and avoid
+  // jarring visual disruptions; full wipes occur on view entry and exit.
+  bool full = force_full || (!s_spec && (s_partials >= 12 || (s_now - s_last_full > 180000UL)))
+                         || (s_spec && (s_now - s_last_full > 300000UL));
   epd_poweron();
   epd_hl_update_screen(&s_hl, full ? MODE_GC16 : MODE_GL16, TEMP_C);
   epd_poweroff();
@@ -677,12 +681,44 @@ static void draw_spectrum() {
   refresh(false);
 }
 
+#define DEFAULT_VCOM 1560
+static uint16_t s_vcom = DEFAULT_VCOM;
+
+uint16_t ui_get_vcom() {
+  Preferences p;
+  p.begin("orecchino", true);
+  uint16_t val = p.getUShort("vcom", DEFAULT_VCOM);
+  p.end();
+  return val;
+}
+
+bool ui_set_vcom(uint16_t vcom) {
+  // Panel VCOM voltage bounds: -0.5V to -3.0V (500 to 3000 mV)
+  if (vcom < 500 || vcom > 3000) return false;
+  Preferences p;
+  p.begin("orecchino", false);
+  p.putUShort("vcom", vcom);
+  p.end();
+  s_vcom = vcom;
+  if (s_ok) {
+    epd_set_vcom(s_vcom);
+    if (s_spec) {
+      draw_spectrum();
+      refresh(true);
+    } else {
+      draw_board(true);
+    }
+  }
+  return true;
+}
+
 bool ui_begin() {
   pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
   // The 1 K LUT trades a little refresh time for ~60 KB of internal RAM,
   // which the radio stacks need more than the panel does.
   epd_init(&epd_board_v7, &ED047TC1, EPD_LUT_1K);
-  epd_set_vcom(1560);
+  s_vcom = ui_get_vcom();
+  epd_set_vcom(s_vcom);
   s_hl = epd_hl_init(EPD_BUILTIN_WAVEFORM);
   epd_set_rotation(EPD_ROT_LANDSCAPE);
   s_fb = epd_hl_get_framebuffer(&s_hl);
@@ -807,9 +843,11 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   }
   if (s_cam_manual && now - s_cam_manual_ms > 120000) { s_cam_manual = false; s_sig_prev = 0; }
 
+  static uint32_t s_spec_start = 0;
   if (hold) {
     s_spec = !s_spec;
     if (s_spec) {
+      s_spec_start = now;
       memset((void*)s_wsum, 0, sizeof(s_wsum)); memset((void*)s_wcnt, 0, sizeof(s_wcnt));
       for (int i = 0; i < N_BIN; i++) { s_swp[i] = -127; s_pk[i] = -127; }
       s_sx_ok = sx1262_sweep_begin();
@@ -829,7 +867,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     if (s_sx_ok) sx1262_sweep_chunk(s_swp, N_BIN, &s_cursor, 32);
     for (int i = 0; i < N_BIN; i++) s_pk[i] = s_swp[i] > s_pk[i] ? s_swp[i] : s_pk[i] - 0.02f;
     static uint32_t last = 0;
-    if (now - last >= 1500) { last = now; draw_spectrum(); }
+    // Refresh budget: 1.5 s for the first 2 minutes, then drop to 5.0 s to protect the panel
+    uint32_t spec_interval = (now - s_spec_start < 120000UL) ? 1500 : 5000;
+    if (now - last >= spec_interval) { last = now; draw_spectrum(); }
     return;
   }
 

@@ -18,8 +18,74 @@
 
 void rx_hook_wifi_frame(uint8_t chan, int8_t rssi) { ui_feed_wifi(chan, rssi); }
 bool rx_hook_paused() { return ui_spectrum_active(); }
+static bool parse_vcom_val(const char* str, uint16_t* out) {
+  if (!str) return false;
+  while (*str && (*str == ' ' || *str == '=' || *str == ':')) str++;
+  if (!*str) return false;
+  char* end = nullptr;
+  double val = fabs(strtod(str, &end));
+  if (end == str) return false;
+  if (val >= 0.4 && val <= 3.5) {
+    *out = (uint16_t)round(val * 1000.0);
+    return true;
+  }
+  if (val >= 400.0 && val <= 3500.0) {
+    *out = (uint16_t)round(val);
+    return true;
+  }
+  return false;
+}
+
 bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
   if (!strcmp(cmd, "reboot")) { ESP.restart(); return true; }
+
+  // 1. JSON VCOM commands:
+  //    {"cmd":"set_vcom","vcom":1560}
+  //    {"cmd":"vcom","vcom":-1.56}
+  //    {"cmd":"get_vcom"}
+  if (!strcmp(cmd, "set_vcom") || !strcmp(cmd, "vcom")) {
+    double d = 0;
+    if (json_field_dbl(line, "vcom", &d) || json_field_dbl(line, "val", &d)) {
+      char s[24]; snprintf(s, sizeof(s), "%f", d);
+      uint16_t v = 0;
+      if (parse_vcom_val(s, &v) && ui_set_vcom(v)) {
+        Serial.printf("{\"type\":\"vcom\",\"vcom\":%u,\"voltage\":\"-%.2fV\",\"saved\":true}\n", (unsigned)v, v / 1000.0);
+      } else {
+        Serial.printf("{\"type\":\"error\",\"msg\":\"invalid vcom (must be 500..3000 mV)\"}\n");
+      }
+      return true;
+    }
+    Serial.printf("{\"type\":\"vcom\",\"vcom\":%u,\"voltage\":\"-%.2fV\"}\n", (unsigned)ui_get_vcom(), ui_get_vcom() / 1000.0);
+    return true;
+  }
+  if (!strcmp(cmd, "get_vcom")) {
+    Serial.printf("{\"type\":\"vcom\",\"vcom\":%u,\"voltage\":\"-%.2fV\"}\n", (unsigned)ui_get_vcom(), ui_get_vcom() / 1000.0);
+    return true;
+  }
+
+  // 2. Plain text serial CLI commands:
+  //    "vcom" -> query
+  //    "vcom 1560", "vcom -1.56", "vcom=1560", "set_vcom 1560" -> set & save
+  if (line) {
+    const char* p = line;
+    while (*p == ' ') p++;
+    if (!strncmp(p, "vcom", 4) || !strncmp(p, "set_vcom", 8)) {
+      p += (!strncmp(p, "set_vcom", 8) ? 8 : 4);
+      while (*p && (*p == ' ' || *p == '=' || *p == ':')) p++;
+      if (*p) {
+        uint16_t v = 0;
+        if (parse_vcom_val(p, &v) && ui_set_vcom(v)) {
+          Serial.printf("{\"type\":\"vcom\",\"vcom\":%u,\"voltage\":\"-%.2fV\",\"saved\":true}\n", (unsigned)v, v / 1000.0);
+        } else {
+          Serial.printf("{\"type\":\"error\",\"msg\":\"invalid vcom: expected 500..3000 mV (e.g. 1560 or -1.56)\"}\n");
+        }
+      } else {
+        Serial.printf("{\"type\":\"vcom\",\"vcom\":%u,\"voltage\":\"-%.2fV\"}\n", (unsigned)ui_get_vcom(), ui_get_vcom() / 1000.0);
+      }
+      return true;
+    }
+  }
+
   return tile_store_host_line(cmd, line, now);
 }
 void rx_hook_track(Track*, bool, bool) {}
@@ -37,9 +103,12 @@ void setup() {
   tile_store_begin(ui_map_center);
   periph_touch_reset();
   bool disp = ui_begin();
-  Serial.printf("[ORECCHINO] E-Paper display init %s\n", disp ? "OK" : "FAILED (continuing headless)");
+  uint16_t vcom = ui_get_vcom();
+  Serial.printf("[ORECCHINO] E-Paper display init %s (VCOM: %u mV / -%.2fV)\n", disp ? "OK" : "FAILED", (unsigned)vcom, vcom / 1000.0);
   periph_begin();   // after epdiy owns the I2C bus
-  rx_begin(disp ? ",\"display\":true" : ",\"display\":false");
+  char extra[64];
+  snprintf(extra, sizeof(extra), ",\"display\":%s,\"vcom\":%u", disp ? "true" : "false", (unsigned)vcom);
+  rx_begin(extra);
 }
 
 void loop() {

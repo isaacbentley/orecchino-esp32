@@ -515,8 +515,11 @@ static void handle_host_line(char* line, uint32_t now) {
     inject_test_pack();
     return;
   }
-  char cmd[16];
-  if (!json_field_str(line, "cmd", cmd, sizeof(cmd))) return;
+  char cmd[16] = {0};
+  if (!json_field_str(line, "cmd", cmd, sizeof(cmd))) {
+    if (rx_hook_host_line("", line, now)) return;
+    return;
+  }
   if (rx_hook_host_line(cmd, line, now)) return;
   if (!strcmp(cmd, "set_home")) {
     if (json_field_dbl(line, "lat", &g_home_lat) &&

@@ -25,3 +25,5 @@ bool ui_map_center(double* lat, double* lon);
 bool ui_spectrum_active();
 void ui_feed_wifi(uint8_t chan, int8_t rssi);
 void ui_set_wifi_channel(uint8_t chan);
+uint16_t ui_get_vcom();
+bool     ui_set_vcom(uint16_t vcom);
