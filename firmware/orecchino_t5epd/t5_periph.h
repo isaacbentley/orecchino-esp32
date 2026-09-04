@@ -26,6 +26,7 @@ bool periph_home_key();
 void periph_touch_range(int* max_x, int* max_y);
 const char* periph_touch_kind();   // "gt911", "gt6972p", "none"
 int  periph_batt_pct();            // -1 when no gauge
+bool periph_gps_detected();        // true when valid NMEA sentences received on UART1
 bool periph_gps_fix();
 int  periph_gps_sats();
 

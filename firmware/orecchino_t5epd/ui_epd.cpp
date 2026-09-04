@@ -126,7 +126,7 @@ static uint32_t signature() {
   }
   mix(s_n); mix(s_sel); mix(g_seen_count / 100); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
   mix(s_map); mix(s_map_touched); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
-  mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
+  mix(periph_gps_detected()); mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
   return h;
 }
 
@@ -176,6 +176,7 @@ static void draw_header(const UiSummary& sm, const char* title) {
   text_r(&FreeSansBold12pt7b, b, xr, 44, s_ble_ok ? mut : fg); xr -= text_w(&FreeSansBold12pt7b, b) + 24;
   if (s_batt >= 0) { snprintf(b, sizeof(b), "%d%%", s_batt); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 24; }
   if (periph_gps_fix()) snprintf(b, sizeof(b), "GPS %d", periph_gps_sats());
+  else if (periph_gps_detected()) snprintf(b, sizeof(b), "GPS SEARCH");
   else snprintf(b, sizeof(b), g_home_set ? "APP POS" : "NO POS");
   text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 24;
   if (g_seen_count) { snprintf(b, sizeof(b), "%lu seen", (unsigned long)g_seen_count); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); }
@@ -202,12 +203,20 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
 
 static void draw_table() {
   const int y0 = 80;
-  // column heads
   const GFXfont* f9 = &FreeSansBold9pt7b;
-  struct Col { const char* l; int x; } COLS[] = {
-    {"ID", 26}, {"RSSI", 200}, {"HGT", 280}, {"SPD", 345}, {"RANGE", 405}, {"BRG", 465}, {"AUTH", 510}
-  };
-  for (auto& c : COLS) text(f9, c.l, c.x, y0 + 16, BLACK);
+  bool has_gps = periph_gps_detected();
+  struct Col { const char* l; int x; };
+  if (has_gps) {
+    Col cols[] = {
+      {"ID", 26}, {"RSSI", 200}, {"HGT", 280}, {"SPD", 345}, {"RANGE", 405}, {"BRG", 465}, {"AUTH", 510}
+    };
+    for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
+  } else {
+    Col cols[] = {
+      {"ID", 26}, {"RSSI", 205}, {"HGT", 285}, {"SPD", 355}, {"RANGE", 425}, {"AUTH", 505}
+    };
+    for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
+  }
   rect(TABLE_X, y0 + 22, TABLE_W, 2, BLACK);
   rect(565, 76, 1, 416, LIGHT);  // vertical divider between table and right board
 
@@ -251,27 +260,35 @@ static void draw_table() {
     }
 
     // rssi bar
-    int bx = 200, bw = 50;
+    int bx = has_gps ? 200 : 205, bw = 50;
     box(bx, y + 6, bw, 8, ink);
     rect(bx, y + 6, (int)(bw * ui_rssi01(t->rssi)), 8, ink);
     snprintf(b, sizeof(b), "%d", t->rssi); text(f9, b, bx, y + 34, ink);
 
-    if (!isnan(t->height)) { snprintf(b, sizeof(b), "%dm", (int)t->height); text(f9, b, 280, y + 20, ink); }
-    if (!isnan(t->speed))  { snprintf(b, sizeof(b), "%.0f", t->speed);       text(f9, b, 345, y + 20, ink); }
+    int hgt_x = has_gps ? 280 : 285;
+    if (!isnan(t->height)) { snprintf(b, sizeof(b), "%dm", (int)t->height); text(f9, b, hgt_x, y + 20, ink); }
+
+    int spd_x = has_gps ? 345 : 355;
+    if (!isnan(t->speed))  { snprintf(b, sizeof(b), "%.0f", t->speed);       text(f9, b, spd_x, y + 20, ink); }
+
+    int rng_x = has_gps ? 405 : 425;
     if (g_home_set && t->has_pos) {
       char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
-      text(f9, r, 405, y + 20, ink);
-      snprintf(b, sizeof(b), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
-      text(f9, b, 465, y + 20, ink);
+      text(f9, r, rng_x, y + 20, ink);
+      if (has_gps) {
+        snprintf(b, sizeof(b), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
+        text(f9, b, 465, y + 20, ink);
+      }
     }
     if (t->auth_state) {
       const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
                     : t->auth_state == 2 ? "?" : "...";       // column is headed AUTH
+      int auth_x = has_gps ? 510 : 505;
       if (!sel && t->auth_state == 4) {
-        rect(506, y + 4, 34, 18, BLACK);
-        text(f9, a, 510, y + 17, WHITE);
+        rect(auth_x - 4, y + 4, 34, 18, BLACK);
+        text(f9, a, auth_x, y + 17, WHITE);
       } else {
-        text(f9, a, 510, y + 20, ink);
+        text(f9, a, auth_x, y + 20, ink);
       }
     }
   }

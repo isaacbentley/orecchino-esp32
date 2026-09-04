@@ -259,6 +259,21 @@ static int s_gps_baud_i = 0;
 static uint32_t s_gps_last_sentence = 0, s_gps_baud_since = 0;
 static char s_nmea[120];
 static int s_nmea_n = 0;
+static bool s_gps_detected = false;
+
+static bool nmea_valid(const char* s) {
+  if (!s || s[0] != '$' || strlen(s) < 9) return false;
+  const char* star = strchr(s, '*');
+  if (star && star[1] && star[2]) {
+    uint8_t csum = 0;
+    for (const char* p = s + 1; p < star; p++) csum ^= (uint8_t)*p;
+    char hex[3];
+    snprintf(hex, sizeof(hex), "%02X", csum);
+    return (toupper(star[1]) == hex[0] && toupper(star[2]) == hex[1]);
+  }
+  return (strncmp(s + 3, "GGA", 3) == 0 || strncmp(s + 3, "RMC", 3) == 0 ||
+          strncmp(s + 3, "GSA", 3) == 0 || strncmp(s + 3, "GSV", 3) == 0);
+}
 
 static double nmea_coord(const char* f, const char* hemi) {
   if (!f[0]) return NAN;
@@ -270,8 +285,9 @@ static double nmea_coord(const char* f, const char* hemi) {
   return d;
 }
 static void nmea_line(const char* s, uint32_t now) {
+  if (!nmea_valid(s)) return;
   s_gps_last_sentence = now;
-  if (strlen(s) < 6 || s[0] != '$') return;
+  s_gps_detected = true;
   if (strncmp(s + 3, "GGA", 3) != 0) return;
   char f[15][16] = {{0}};
   int fi = 0, fc = 0;
@@ -289,6 +305,7 @@ static void nmea_line(const char* s, uint32_t now) {
     }
   }
 }
+bool periph_gps_detected() { return s_gps_detected && (millis() - s_gps_last_sentence < 15000); }
 bool periph_gps_fix() { return s_gps_fix; }
 int  periph_gps_sats() { return s_gps_sats; }
 
@@ -312,8 +329,9 @@ void periph_tick(uint32_t now) {
     } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) s_nmea[s_nmea_n++] = c;
     else s_nmea_n = 0;
   }
-  // No sentence for 4 s on this baud: try the next one.
-  if (now - s_gps_last_sentence > 4000 && now - s_gps_baud_since > 4000) {
+  // If no GPS detected, hunt baud rate every 4 s; if detected, only hunt after 10 s silence.
+  uint32_t hunt_interval = periph_gps_detected() ? 10000 : 4000;
+  if (now - s_gps_last_sentence > hunt_interval && now - s_gps_baud_since > hunt_interval) {
     s_gps_baud_i = (s_gps_baud_i + 1) % 3;
     Serial1.updateBaudRate(GPS_BAUDS[s_gps_baud_i]);
     s_gps_baud_since = now;
@@ -324,5 +342,10 @@ void periph_tick(uint32_t now) {
     last_rep = now;
     Serial.printf("{\"type\":\"gps\",\"fix\":true,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f}\n",
                   s_gps_sats, g_home_lat, g_home_lon);
+  }
+  static bool s_rep_detected = false;
+  if (periph_gps_detected() && !s_rep_detected) {
+    s_rep_detected = true;
+    Serial.printf("{\"type\":\"periph\",\"gps\":true,\"baud\":%u}\n", (unsigned)GPS_BAUDS[s_gps_baud_i]);
   }
 }
