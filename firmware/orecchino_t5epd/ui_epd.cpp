@@ -361,6 +361,7 @@ static void draw_table() {
         text(f9, a, auth_x, y + 20, ink);
       }
     }
+  }
   if (!s_n) {
     int tw_scan = text_w(&FreeSansBold18pt7b, "SCANNING");
     text(&FreeSansBold18pt7b, "SCANNING", TABLE_X + (TABLE_W - tw_scan) / 2, y0 + 180, BLACK);
