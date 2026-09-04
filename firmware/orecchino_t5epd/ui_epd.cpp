@@ -145,11 +145,12 @@ static uint32_t signature() {
   mix(s_n); mix(s_sel); mix(g_seen_count / 100); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
   mix(s_map); mix(s_map_touched); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
   mix(periph_gps_detected()); mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
+  mix(periph_bl_is_active());
   return h;
 }
 
 static void draw_header(const UiSummary& sm, const char* title) {
-  bool loud = sm.alert != UI_QUIET;
+  bool loud = sm.alert == UI_EMERGENCY;
   rect(0, 0, W, 70, loud ? BLACK : WHITE);
   if (!loud) rect(0, 68, W, 2, BLACK);
   uint8_t fg = loud ? WHITE : BLACK, mut = loud ? LIGHT : GREY;
@@ -157,54 +158,60 @@ static void draw_header(const UiSummary& sm, const char* title) {
   if (title) snprintf(b, sizeof(b), "%s", title); else ui_headline(b, sizeof(b), &sm);
   text(&FreeSansBold18pt7b, b, TABLE_X, 48, fg);
 
-  // View Switcher Tabs (when not in spectrum)
-  if (!title && !loud) {
-    const int bx = 270, by = 12, bw = 264, bh = 46;
-    // Outer crisp 2px border around the entire segmented control
-    box(bx, by, bw, bh, BLACK);
-    box(bx + 1, by + 1, bw - 2, bh - 2, BLACK);
+  // View Switcher Tabs (when not in spectrum) - always visible
+  if (!title) {
+    const int bx = 248, by = 12, bw = 240, bh = 46;
+    uint8_t border_col = loud ? WHITE : BLACK;
+    // Outer crisp 2px border around the segmented control
+    box(bx, by, bw, bh, border_col);
+    box(bx + 1, by + 1, bw - 2, bh - 2, border_col);
     // Vertical 2px dividers between TABLE, MAP, and TX
-    rect(bx + 88 - 1, by, 2, bh, BLACK);
-    rect(bx + 176 - 1, by, 2, bh, BLACK);
+    rect(bx + 80 - 1, by, 2, bh, border_col);
+    rect(bx + 160 - 1, by, 2, bh, border_col);
 
-    // Tab 1: TABLE (bx .. bx + 88)
+    // Tab 1: TABLE (bx .. bx + 80)
     int tw_table = text_w(&FreeSansBold12pt7b, "TABLE");
-    int tx_table = bx + (88 - tw_table) / 2;
+    int tx_table = bx + (80 - tw_table) / 2;
     if (!s_map) {
-      rect(bx + 2, by + 2, 85, bh - 4, BLACK);
-      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, WHITE);
+      rect(bx + 2, by + 2, 77, bh - 4, loud ? WHITE : BLACK);
+      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, loud ? BLACK : WHITE);
     } else {
-      rect(bx + 2, by + 2, 85, bh - 4, WHITE);
-      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, BLACK);
+      rect(bx + 2, by + 2, 77, bh - 4, loud ? BLACK : WHITE);
+      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, loud ? WHITE : BLACK);
     }
 
-    // Tab 2: MAP (bx + 88 .. bx + 176)
+    // Tab 2: MAP (bx + 80 .. bx + 160)
     int tw_map = text_w(&FreeSansBold12pt7b, "MAP");
-    int tx_map = bx + 88 + 1 + (87 - tw_map) / 2;
+    int tx_map = bx + 80 + (80 - tw_map) / 2;
     if (s_map) {
-      rect(bx + 88 + 1, by + 2, 86, bh - 4, BLACK);
-      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, WHITE);
+      rect(bx + 80 + 1, by + 2, 78, bh - 4, loud ? WHITE : BLACK);
+      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, loud ? BLACK : WHITE);
     } else {
-      rect(bx + 88 + 1, by + 2, 86, bh - 4, WHITE);
-      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, BLACK);
+      rect(bx + 80 + 1, by + 2, 78, bh - 4, loud ? BLACK : WHITE);
+      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, loud ? WHITE : BLACK);
     }
 
-    // Tab 3: TX (bx + 176 .. bx + 264)
+    // Tab 3: TX (bx + 160 .. bx + 240)
     int tw_tx = text_w(&FreeSansBold12pt7b, "TX");
-    int tx_tx = bx + 176 + 1 + (87 - tw_tx) / 2;
-    rect(bx + 176 + 1, by + 2, 86, bh - 4, WHITE);
-    text(&FreeSansBold12pt7b, "TX", tx_tx, 41, BLACK);
+    int tx_tx = bx + 160 + (80 - tw_tx) / 2;
+    rect(bx + 160 + 1, by + 2, 78, bh - 4, loud ? BLACK : WHITE);
+    text(&FreeSansBold12pt7b, "TX", tx_tx, 41, loud ? WHITE : BLACK);
   }
 
   int xr = W - 20;
   snprintf(b, sizeof(b), s_ble_ok ? "RX OK" : "RX FAULT");
-  text_r(&FreeSansBold12pt7b, b, xr, 44, s_ble_ok ? mut : fg); xr -= text_w(&FreeSansBold12pt7b, b) + 24;
-  if (s_batt >= 0) { snprintf(b, sizeof(b), "%d%%", s_batt); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 24; }
+  text_r(&FreeSansBold12pt7b, b, xr, 44, s_ble_ok ? mut : fg); xr -= text_w(&FreeSansBold12pt7b, b) + 16;
+  if (s_batt >= 0) { snprintf(b, sizeof(b), "%d%%", s_batt); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 16; }
+  if (periph_bl_is_active()) {
+    snprintf(b, sizeof(b), "[BL]");
+    text_r(&FreeSansBold12pt7b, b, xr, 44, loud ? WHITE : BLACK);
+    xr -= text_w(&FreeSansBold12pt7b, b) + 16;
+  }
   if (periph_gps_fix()) snprintf(b, sizeof(b), "GPS %d", periph_gps_sats());
   else if (periph_gps_detected()) snprintf(b, sizeof(b), "GPS SEARCH");
   else snprintf(b, sizeof(b), g_home_set ? "APP POS" : "NO POS");
-  text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 24;
-  if (g_seen_count) { snprintf(b, sizeof(b), "%lu seen", (unsigned long)g_seen_count); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); }
+  text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 16;
+  if (g_seen_count) { snprintf(b, sizeof(b), "%lu seen", (unsigned long)g_seen_count); text_r(&FreeSansBold9pt7b, b, xr, 43, mut); }
 }
 
 static void draw_footer(const UiSummary& sm, const char* hint) {
@@ -234,17 +241,17 @@ static void draw_table() {
   struct Col { const char* l; int x; };
   if (has_gps) {
     Col cols[] = {
-      {"ID", 26}, {"RSSI", 226}, {"HGT", 286}, {"SPD", 346}, {"RANGE", 406}, {"BRG", 466}, {"AUTH", 512}
+      {"ID", 28}, {"RSSI", 226}, {"HGT", 286}, {"SPD", 346}, {"RANGE", 406}, {"BRG", 466}, {"AUTH", 512}
     };
     for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
   } else if (has_pos) {
     Col cols[] = {
-      {"ID", 26}, {"RSSI", 235}, {"HGT", 300}, {"SPD", 365}, {"RANGE", 430}, {"AUTH", 510}
+      {"ID", 28}, {"RSSI", 235}, {"HGT", 300}, {"SPD", 365}, {"RANGE", 430}, {"AUTH", 510}
     };
     for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
   } else {
     Col cols[] = {
-      {"ID", 26}, {"RSSI", 260}, {"HGT", 335}, {"SPD", 410}, {"AUTH", 495}
+      {"ID", 28}, {"RSSI", 260}, {"HGT", 335}, {"SPD", 410}, {"AUTH", 495}
     };
     for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
   }
@@ -404,9 +411,13 @@ static void draw_plot() {
       char b[16];
       snprintf(b, sizeof(b), "%s", uas_tail(t->uas, 8));
       int tw = text_w(&FreeSansBold9pt7b, b);
-      rect(px + 8, py - 18, tw + 6, 16, WHITE);
-      box(px + 8, py - 18, tw + 6, 16, stale ? GREY : BLACK);
-      text(&FreeSansBold9pt7b, b, px + 11, py - 6, stale ? GREY : BLACK);
+      int box_w = tw + 6;
+      int bx = px + 8;
+      if (bx + box_w > W - 8) bx = px - 8 - box_w;
+      if (bx < 568) bx = 568;
+      rect(bx, py - 18, box_w, 16, WHITE);
+      box(bx, py - 18, box_w, 16, stale ? GREY : BLACK);
+      text(&FreeSansBold9pt7b, b, bx + 3, py - 6, stale ? GREY : BLACK);
     }
   } else {
     // No operator fix: Signal Strength Ladder (no circles underneath!)
@@ -433,8 +444,10 @@ static void draw_plot() {
       y += 46;
     }
     if (!s_n) {
-      text(&FreeSansBold12pt7b, "WAITING FOR SIGNALS", PLOT_CX - 100, 260, BLACK);
-      text(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN", PLOT_CX - 130, 290, GREY);
+      int tw1 = text_w(&FreeSansBold12pt7b, "WAITING FOR SIGNALS");
+      text(&FreeSansBold12pt7b, "WAITING FOR SIGNALS", PLOT_CX - tw1 / 2, 260, BLACK);
+      int tw2 = text_w(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN");
+      text(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN", PLOT_CX - tw2 / 2, 290, GREY);
     }
   }
 }
@@ -623,9 +636,15 @@ static void draw_map() {
     }
     snprintf(b, sizeof(b), "%s", uas_tail(t->uas, 8));
     int tw = text_w(&FreeSansBold9pt7b, b);
-    rect(x + 10, y - 20, tw + 8, 18, WHITE);
-    box(x + 10, y - 20, tw + 8, 18, stale ? GREY : BLACK);
-    text(&FreeSansBold9pt7b, b, x + 14, y - 6, stale ? GREY : BLACK);
+    int box_w = tw + 8;
+    int bx = x + 10;
+    if (bx + box_w > W - 8) bx = x - 10 - box_w;
+    if (bx < 8) bx = 8;
+    int by = y - 20;
+    if (by < MAP_Y0 + 4) by = y + 10;
+    rect(bx, by, box_w, 18, WHITE);
+    box(bx, by, box_w, 18, stale ? GREY : BLACK);
+    text(&FreeSansBold9pt7b, b, bx + 4, by + 14, stale ? GREY : BLACK);
   }
 
   // scale bar: 100 px in metres at this zoom and latitude
@@ -833,15 +852,38 @@ static void draw_tx() {
       rect(cx, cy, cw, 18, path_on ? BLACK : GREY);
       text(f9, carr, cx + 6, cy + 14, WHITE);
 
-      // UAS ID
-      text(f12, txui_id(i), cx + cw + 10, y + 26, path_on ? BLACK : GREY);
+      // Packet count on right
+      char cb[20];
+      snprintf(cb, sizeof(cb), "%lu pkts", (unsigned long)txui_sent(i));
+      int cnt_w = text_w(f9, cb);
+
+      // UAS ID with pixel-width truncation to prevent collision with packet counter
+      int id_x = cx + cw + 10;
+      int max_id_w = (x0 + card_w - 14 - cnt_w - 10) - id_x;
+      if (max_id_w < 50) max_id_w = 50;
+
+      char id_b[32];
+      const char* raw_id = txui_id(i);
+      strncpy(id_b, raw_id ? raw_id : "", sizeof(id_b) - 1);
+      id_b[sizeof(id_b) - 1] = 0;
+      if (text_w(f12, id_b) > max_id_w) {
+        int len = strlen(id_b);
+        while (len > 2) {
+          id_b[len - 1] = 0;
+          char temp[32];
+          snprintf(temp, sizeof(temp), "%s..", id_b);
+          if (text_w(f12, temp) <= max_id_w) {
+            strcpy(id_b, temp);
+            break;
+          }
+          len--;
+        }
+      }
+      text(f12, id_b, id_x, y + 26, path_on ? BLACK : GREY);
 
       // Subtitle (self desc)
       text(f9, txui_desc(i), cx, y + 46, path_on ? BLACK : GREY);
 
-      // Packet count on right
-      char cb[20];
-      snprintf(cb, sizeof(cb), "%lu pkts", (unsigned long)txui_sent(i));
       text_r(f9, cb, x0 + card_w - 12, y + 34, path_on ? BLACK : GREY);
     }
   }
@@ -898,8 +940,9 @@ static void draw_spectrum() {
   for (int c = 0; c < 13; c++) {
     float v = (s_a24[c] + 115) / 70.0f; v = v < 0 ? 0 : v > 1 ? 1 : v;
     int h = (int)(90 * v), x = 20 + c * 70;
-    rect(x, 200 - h, 56, h, BLACK);
-    char b[4]; snprintf(b, sizeof(b), "%d", c + 1); text(&FreeSansBold9pt7b, b, x + 20, 220, BLACK);
+    char b[4]; snprintf(b, sizeof(b), "%d", c + 1);
+    int tw_c = text_w(&FreeSansBold9pt7b, b);
+    text(&FreeSansBold9pt7b, b, x + (56 - tw_c) / 2, 220, BLACK);
   }
   // sub-GHz trace
   int lo = 0, hi = -127;
@@ -1179,15 +1222,22 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
 
   // ===================== RX MODE UI & INPUT =====================
   if (tap_x >= 0 && !s_spec) {
-    // Top bar view switcher tabs:
+    // Top bar view switcher tabs & backlight toggle:
     if (tap_y <= 72) {
-      if (tap_x >= 270 && tap_x < 358) {
+      if (tap_x >= 248 && tap_x < 328) {
         if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); return; }
-      } else if (tap_x >= 358 && tap_x < 446) {
+      } else if (tap_x >= 328 && tap_x < 408) {
         if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
-      } else if (tap_x >= 446 && tap_x <= 540) {
+      } else if (tap_x >= 408 && tap_x <= 495) {
         s_confirm_switch = true;
         s_target_mode = UI_MODE_TX;
+        s_sig_prev = 0;
+        draw_board(false);
+        return;
+      } else if (tap_x >= 680 && tap_x <= 780) {
+        // Tap on backlight badge toggles mode (AUTO -> ON -> OFF)
+        BlMode m = periph_bl_get_mode();
+        periph_bl_set_mode(m == BL_AUTO ? BL_ON : m == BL_ON ? BL_OFF : BL_AUTO);
         s_sig_prev = 0;
         draw_board(false);
         return;
