@@ -89,7 +89,7 @@ static void print_help() {
   Serial.println("========================================================\n");
 }
 
-static void print_status() {
+static void print_t5_status() {
   int batt = periph_batt_pct();
   int mv = periph_batt_mv();
   uint16_t yr = 0; uint8_t mo = 0, da = 0, hr = 0, mi = 0, se = 0;
@@ -124,7 +124,7 @@ static void print_status() {
 
 bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
   if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) { print_help(); return true; }
-  if (!strcmp(cmd, "status")) { print_status(); return true; }
+  if (!strcmp(cmd, "status")) { print_t5_status(); return true; }
   if (!strcmp(cmd, "reboot")) { ESP.restart(); return true; }
 
   // Mode switching commands:
@@ -218,7 +218,7 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
       return true;
     }
     if (!strcmp(p, "status")) {
-      print_status();
+      print_t5_status();
       return true;
     }
     if (!strcmp(p, "reboot")) {
