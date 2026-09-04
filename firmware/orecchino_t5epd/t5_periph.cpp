@@ -295,16 +295,19 @@ static bool rtc_write_time(uint16_t yr, uint8_t mo, uint8_t d, uint8_t h, uint8_
   return wr(s_rtc, w, 8);
 }
 
+static inline time_t utc_to_epoch(int y, int m, int d, int h, int min, int s) {
+  if (m <= 2) y--;
+  int era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = era * 146097 + (long)doe - 719468;
+  return (time_t)(days * 86400L + (long)h * 3600L + (long)min * 60L + s);
+}
+
 void periph_set_utc_time(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s) {
   if (y < 2024 || m < 1 || m > 12 || d < 1 || d > 31 || h > 23 || min > 59 || s > 59) return;
-  struct tm t = {};
-  t.tm_year = y - 1900;
-  t.tm_mon  = m - 1;
-  t.tm_mday = d;
-  t.tm_hour = h;
-  t.tm_min  = min;
-  t.tm_sec  = s;
-  time_t epoch = timegm(&t);
+  time_t epoch = utc_to_epoch((int)y, (int)m, (int)d, (int)h, (int)min, (int)s);
   if (epoch > 0) {
     struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
     settimeofday(&tv, nullptr);
