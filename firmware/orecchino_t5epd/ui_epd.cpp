@@ -18,13 +18,13 @@
 #define WHITE 0xFF
 #define GREY  0x60
 #define LIGHT 0xC8
-#define ROW_H 46
-#define ROWS  9
+#define ROW_H 44
+#define ROWS  7
 #define TABLE_X 20
-#define TABLE_W 580
-#define PLOT_CX 780
-#define PLOT_CY 270
-#define PLOT_R  150
+#define TABLE_W 540
+#define PLOT_CX 760
+#define PLOT_CY 275
+#define PLOT_R  145
 // Waveform LUT selection follows the panel temperature (TPS65185 sensor).
 #define TEMP_C  ((int)epd_ambient_temperature())
 
@@ -103,18 +103,20 @@ static void build_order() {
 
 // Content signature: anything that should move ink. Coarse on the noisy
 // fields (RSSI, position) so the panel is not refreshing on every frame.
+// Content signature: anything that should move ink. Coarse on the noisy
+// fields (RSSI, position) so the panel is not refreshing on every frame.
 static uint32_t signature() {
   uint32_t h = 2166136261u;
   auto mix = [&](uint32_t v) { h ^= v; h *= 16777619u; };
   for (int k = 0; k < s_n; k++) {
     const Track* t = &g_tracks[s_order[k]];
     for (const char* p = t->uas; *p; p++) mix((uint8_t)*p);
-    mix(t->rssi / 6); mix(isnan(t->height) ? 0xFFFF : (int)t->height / 5);
-    mix((uint32_t)(int32_t)(t->lat * 1e4)); mix((uint32_t)(int32_t)(t->lon * 1e4));
+    mix(t->rssi / 10); mix(isnan(t->height) ? 0xFFFF : (int)t->height / 10);
+    mix((uint32_t)(int32_t)(t->lat * 1e3)); mix((uint32_t)(int32_t)(t->lon * 1e3));
     mix(t->status); mix(t->auth_state); mix(t->in_tfr); mix(ui_stale(t, s_now));
   }
-  mix(s_sel); mix(g_seen_count); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
-  mix(s_map); mix((uint32_t)(int32_t)(g_home_lat * 1e4)); mix((uint32_t)(int32_t)(g_home_lon * 1e4));
+  mix(s_n); mix(s_sel); mix(g_seen_count / 10); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
+  mix(s_map); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
   mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
   return h;
 }
@@ -127,67 +129,90 @@ static void draw_header(const UiSummary& sm, const char* title) {
   char b[48];
   if (title) snprintf(b, sizeof(b), "%s", title); else ui_headline(b, sizeof(b), &sm);
   text(&FreeSansBold24pt7b, b, TABLE_X, 50, fg);
+
+  // View Switcher Tabs (when not in spectrum)
+  if (!title && !loud) {
+    if (!s_map) {
+      rect(310, 14, 88, 42, BLACK);
+      text(&FreeSansBold12pt7b, "TABLE", 320, 42, WHITE);
+      box(410, 14, 80, 42, GREY);
+      text(&FreeSansBold12pt7b, "MAP", 426, 42, GREY);
+    } else {
+      box(310, 14, 88, 42, GREY);
+      text(&FreeSansBold12pt7b, "TABLE", 320, 42, GREY);
+      rect(410, 14, 80, 42, BLACK);
+      text(&FreeSansBold12pt7b, "MAP", 426, 42, WHITE);
+    }
+  }
+
   int xr = W - 20;
   snprintf(b, sizeof(b), s_ble_ok ? "RX OK" : "RX FAULT");
-  text_r(&FreeSansBold12pt7b, b, xr, 44, s_ble_ok ? mut : fg); xr -= text_w(&FreeSansBold12pt7b, b) + 28;
-  if (s_batt >= 0) { snprintf(b, sizeof(b), "%d%%", s_batt); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 28; }
+  text_r(&FreeSansBold12pt7b, b, xr, 44, s_ble_ok ? mut : fg); xr -= text_w(&FreeSansBold12pt7b, b) + 24;
+  if (s_batt >= 0) { snprintf(b, sizeof(b), "%d%%", s_batt); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 24; }
   if (periph_gps_fix()) snprintf(b, sizeof(b), "GPS %d", periph_gps_sats());
   else snprintf(b, sizeof(b), g_home_set ? "APP POS" : "NO POS");
-  text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 28;
+  text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 24;
   if (g_seen_count) { snprintf(b, sizeof(b), "%lu seen", (unsigned long)g_seen_count); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); }
 }
 
 static void draw_footer(const UiSummary& sm, const char* hint) {
-  rect(0, 500, W, 40, WHITE);
-  rect(0, 500, W, 1, GREY);
+  rect(0, 496, W, 44, WHITE);
+  rect(0, 496, W, 1, GREY);
   char b[64];
   if (sm.newest_age_s == UINT32_MAX) snprintf(b, sizeof(b), "SCANNING");
-  else snprintf(b, sizeof(b), "LAST RX %lus", (unsigned long)sm.newest_age_s);
-  text(&FreeSansBold9pt7b, b, TABLE_X, 526, GREY);
-  text_r(&FreeSansBold9pt7b, hint, W - 20, 526, GREY);
+  else if (sm.newest_age_s < 10) snprintf(b, sizeof(b), "ACTIVE RX");
+  else if (sm.newest_age_s < 60) snprintf(b, sizeof(b), "RX <1m");
+  else snprintf(b, sizeof(b), "RX %lum ago", (unsigned long)(sm.newest_age_s / 60));
+  text(&FreeSansBold9pt7b, b, TABLE_X, 524, GREY);
+  text_r(&FreeSansBold9pt7b, hint, W - 20, 524, GREY);
 }
 
 static void draw_table() {
-  const int y0 = 84;
+  const int y0 = 80;
   // column heads
   const GFXfont* f9 = &FreeSansBold9pt7b;
-  struct Col { const char* l; int x; } COLS[] = { {"ID", 34}, {"RSSI", 270}, {"HGT", 350}, {"SPD", 410}, {"RANGE", 470}, {"BRG", 545}, {"AUTH", 590} };
-  for (auto& c : COLS) text(f9, c.l, TABLE_X + c.x - 20, y0 + 14, GREY);
-  rect(TABLE_X, y0 + 20, TABLE_W, 1, GREY);
+  struct Col { const char* l; int x; } COLS[] = {
+    {"ID", 26}, {"RSSI", 200}, {"HGT", 280}, {"SPD", 345}, {"RANGE", 405}, {"BRG", 465}, {"AUTH", 510}
+  };
+  for (auto& c : COLS) text(f9, c.l, c.x, y0 + 16, GREY);
+  rect(TABLE_X, y0 + 22, TABLE_W, 1, GREY);
+  rect(565, 76, 1, 416, LIGHT);  // vertical divider between table and right board
+
   for (int k = 0; k < ROWS && k < s_n; k++) {
     const Track* t = &g_tracks[s_order[k]];
     int y = y0 + 26 + k * ROW_H;
     bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now), sel = k == s_sel;
     uint8_t ink = stale ? GREY : BLACK;
-    if (sel) rect(TABLE_X, y, 6, ROW_H - 6, BLACK);
-    if (danger) box(TABLE_X + 10, y - 2, TABLE_W - 10, ROW_H - 2, BLACK);
+    if (sel) rect(TABLE_X, y, 4, ROW_H - 4, BLACK);
+    if (danger) box(TABLE_X + 8, y - 2, TABLE_W - 8, ROW_H - 2, BLACK);
     char b[32];
-    snprintf(b, sizeof(b), "%.18s", t->uas[0] ? t->uas : "(no id)");
-    text(&FreeSansBold12pt7b, b, TABLE_X + 14, y + 22, ink);
+    snprintf(b, sizeof(b), "%.14s", t->uas[0] ? t->uas : "(no id)");
+    text(&FreeSansBold12pt7b, b, TABLE_X + 8, y + 20, ink);
     // status / tfr tag under the id, small
-    if (t->in_tfr) text(f9, "IN TFR", TABLE_X + 14, y + 38, BLACK);
-    else if (t->status == 3) text(f9, "EMERGENCY", TABLE_X + 14, y + 38, BLACK);
+    if (t->in_tfr) text(f9, "IN TFR", TABLE_X + 8, y + 36, BLACK);
+    else if (t->status == 3) text(f9, "EMERGENCY", TABLE_X + 8, y + 36, BLACK);
     // rssi bar
-    int bx = TABLE_X + 250, bw = 60;
-    box(bx, y + 8, bw, 10, ink);
-    rect(bx, y + 8, (int)(bw * ui_rssi01(t->rssi)), 10, ink);
-    snprintf(b, sizeof(b), "%d", t->rssi); text(f9, b, bx, y + 36, ink);
-    if (!isnan(t->height)) { snprintf(b, sizeof(b), "%dm", (int)t->height); text(f9, b, TABLE_X + 330, y + 22, ink); }
-    if (!isnan(t->speed))  { snprintf(b, sizeof(b), "%.0f", t->speed);       text(f9, b, TABLE_X + 390, y + 22, ink); }
+    int bx = 200, bw = 50;
+    box(bx, y + 6, bw, 8, ink);
+    rect(bx, y + 6, (int)(bw * ui_rssi01(t->rssi)), 8, ink);
+    snprintf(b, sizeof(b), "%d", t->rssi); text(f9, b, bx, y + 34, ink);
+    if (!isnan(t->height)) { snprintf(b, sizeof(b), "%dm", (int)t->height); text(f9, b, 280, y + 20, ink); }
+    if (!isnan(t->speed))  { snprintf(b, sizeof(b), "%.0f", t->speed);       text(f9, b, 345, y + 20, ink); }
     if (g_home_set && t->has_pos) {
       char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
-      text(f9, r, TABLE_X + 450, y + 22, ink);
+      text(f9, r, 405, y + 20, ink);
       snprintf(b, sizeof(b), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
-      text(f9, b, TABLE_X + 525, y + 22, ink);
+      text(f9, b, 465, y + 20, ink);
     }
     if (t->auth_state) {
-      const char* a = track_auth_badge(t->auth_state) + 3;   // drop the "ID " prefix: the column is headed AUTH
-      if (t->auth_state == 4) { rect(TABLE_X + 566, y + 4, 34, 20, BLACK); text(f9, a, TABLE_X + 570, y + 19, WHITE); }
-      else text(f9, a, TABLE_X + 570, y + 22, ink);
+      const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
+                    : t->auth_state == 2 ? "?" : "...";       // column is headed AUTH
+      if (t->auth_state == 4) { rect(506, y + 4, 34, 18, BLACK); text(f9, a, 510, y + 17, WHITE); }
+      else text(f9, a, 510, y + 20, ink);
     }
-    rect(TABLE_X + 10, y + ROW_H - 6, TABLE_W - 10, 1, LIGHT);
+    rect(TABLE_X + 8, y + ROW_H - 4, TABLE_W - 8, 1, LIGHT);
   }
-  if (!s_n) text(&FreeSansBold18pt7b, "SCANNING", TABLE_X + 180, y0 + 200, GREY);
+  if (!s_n) text(&FreeSansBold18pt7b, "SCANNING", TABLE_X + 160, y0 + 180, GREY);
 }
 
 static double nice_scale(double m) {
@@ -197,67 +222,99 @@ static double nice_scale(double m) {
 }
 
 static void draw_plot() {
-  // rings
-  double far = 0;
-  if (g_home_set)
+  if (g_home_set) {
+    double far = 0;
     for (int k = 0; k < s_n; k++) {
       const Track* t = &g_tracks[s_order[k]];
       if (t->has_pos) { double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon); if (d > far) far = d; }
     }
-  double scale = nice_scale(far > 0 ? far * 1.1 : 500);
-  for (int i = 1; i <= 3; i++) epd_draw_circle(PLOT_CX, PLOT_CY, PLOT_R * i / 3, i == 3 ? BLACK : GREY, s_fb);
-  epd_draw_line(PLOT_CX, PLOT_CY - PLOT_R, PLOT_CX, PLOT_CY + PLOT_R, LIGHT, s_fb);
-  epd_draw_line(PLOT_CX - PLOT_R, PLOT_CY, PLOT_CX + PLOT_R, PLOT_CY, LIGHT, s_fb);
-  text(&FreeSansBold9pt7b, "N", PLOT_CX - 6, PLOT_CY - PLOT_R - 8, BLACK);
-  char b[24];
-  if (scale >= 1000) snprintf(b, sizeof(b), "%.0f km", scale / 1000); else snprintf(b, sizeof(b), "%.0f m", scale);
-  text(&FreeSansBold9pt7b, b, PLOT_CX + PLOT_R - 40, PLOT_CY + PLOT_R + 22, GREY);
-  if (!g_home_set) {
-    text(&FreeSansBold9pt7b, "NO OPERATOR FIX", PLOT_CX - 65, PLOT_CY + PLOT_R + 44, GREY);
-    text(&FreeSansBold9pt7b, "SYNC VIA APP", PLOT_CX - 50, PLOT_CY + PLOT_R + 62, GREY);
-    // signal ladder instead: strongest at the top
-    int y = PLOT_CY - PLOT_R + 20;
-    for (int k = 0; k < s_n && k < 8; k++) {
+    double scale = nice_scale(far > 0 ? far * 1.1 : 500);
+    for (int i = 1; i <= 3; i++) epd_draw_circle(PLOT_CX, PLOT_CY, PLOT_R * i / 3, i == 3 ? BLACK : GREY, s_fb);
+    epd_draw_line(PLOT_CX, PLOT_CY - PLOT_R, PLOT_CX, PLOT_CY + PLOT_R, LIGHT, s_fb);
+    epd_draw_line(PLOT_CX - PLOT_R, PLOT_CY, PLOT_CX + PLOT_R, PLOT_CY, LIGHT, s_fb);
+    text(&FreeSansBold9pt7b, "N", PLOT_CX - 6, PLOT_CY - PLOT_R - 8, BLACK);
+    char b[24];
+    if (scale >= 1000) snprintf(b, sizeof(b), "%.0f km", scale / 1000); else snprintf(b, sizeof(b), "%.0f m", scale);
+    text(&FreeSansBold9pt7b, b, PLOT_CX + PLOT_R - 40, PLOT_CY + PLOT_R + 22, GREY);
+    epd_fill_circle(PLOT_CX, PLOT_CY, 4, BLACK, s_fb);
+
+    for (int k = 0; k < s_n; k++) {
       const Track* t = &g_tracks[s_order[k]];
-      int w = (int)(2 * PLOT_R * ui_rssi01(t->rssi));
-      rect(PLOT_CX - PLOT_R, y, w, 14, ui_stale(t, s_now) ? GREY : BLACK);
-      snprintf(b, sizeof(b), "%.10s %d", t->uas[0] ? t->uas : "(no id)", t->rssi);
-      text(&FreeSansBold9pt7b, b, PLOT_CX - PLOT_R, y + 30, GREY);
-      y += 36;
+      if (!t->has_pos) continue;
+      double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
+      double br = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon) * M_PI / 180;
+      int px = PLOT_CX + (int)(sin(br) * d / scale * PLOT_R);
+      int py = PLOT_CY - (int)(cos(br) * d / scale * PLOT_R);
+      bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now);
+      if (danger) epd_draw_circle(px, py, 12, BLACK, s_fb);
+      epd_fill_circle(px, py, k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
+      if (!isnan(t->heading)) {
+        double hr = t->heading * M_PI / 180;
+        epd_draw_line(px, py, px + (int)(sin(hr) * 18), py - (int)(cos(hr) * 18), BLACK, s_fb);
+      }
+      snprintf(b, sizeof(b), "%.8s", t->uas[0] ? t->uas : "?");
+      int tw = text_w(&FreeSansBold9pt7b, b);
+      rect(px + 8, py - 18, tw + 6, 16, WHITE);
+      box(px + 8, py - 18, tw + 6, 16, stale ? GREY : BLACK);
+      text(&FreeSansBold9pt7b, b, px + 11, py - 6, stale ? GREY : BLACK);
     }
-    return;
-  }
-  epd_fill_circle(PLOT_CX, PLOT_CY, 4, BLACK, s_fb);
-  for (int k = 0; k < s_n; k++) {
-    const Track* t = &g_tracks[s_order[k]];
-    if (!t->has_pos) continue;
-    double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
-    double br = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon) * M_PI / 180;
-    int px = PLOT_CX + (int)(sin(br) * d / scale * PLOT_R);
-    int py = PLOT_CY - (int)(cos(br) * d / scale * PLOT_R);
-    bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now);
-    if (danger) epd_draw_circle(px, py, 12, BLACK, s_fb);
-    epd_fill_circle(px, py, k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
-    if (!isnan(t->heading)) {
-      double hr = t->heading * M_PI / 180;
-      epd_draw_line(px, py, px + (int)(sin(hr) * 18), py - (int)(cos(hr) * 18), BLACK, s_fb);
+  } else {
+    // No operator fix: Signal Strength Ladder (no circles underneath!)
+    text(&FreeSansBold12pt7b, "PROXIMITY (RSSI)", PLOT_CX - PLOT_R, 106, BLACK);
+    text(&FreeSansBold9pt7b, "NO OPERATOR FIX  •  TAP FOR MAP", PLOT_CX - PLOT_R, 126, GREY);
+    int y = 144;
+    for (int k = 0; k < s_n && k < 7; k++) {
+      const Track* t = &g_tracks[s_order[k]];
+      bool sel = k == s_sel;
+      if (sel) rect(PLOT_CX - PLOT_R - 4, y, 4, 38, BLACK);
+      char b[32];
+      snprintf(b, sizeof(b), "%.14s", t->uas[0] ? t->uas : "(no id)");
+      text(&FreeSansBold9pt7b, b, PLOT_CX - PLOT_R + 6, y + 16, BLACK);
+      snprintf(b, sizeof(b), "%d dBm", t->rssi);
+      text_r(&FreeSansBold9pt7b, b, PLOT_CX + PLOT_R, y + 16, GREY);
+
+      int bw = PLOT_R * 2 - 6;
+      box(PLOT_CX - PLOT_R + 6, y + 22, bw, 10, GREY);
+      int fill = (int)(bw * ui_rssi01(t->rssi));
+      if (fill > 0) rect(PLOT_CX - PLOT_R + 6, y + 22, fill, 10, ui_stale(t, s_now) ? GREY : BLACK);
+      y += 46;
     }
-    snprintf(b, sizeof(b), "%.8s", t->uas[0] ? t->uas : "?");
-    text(&FreeSansBold9pt7b, b, px + 10, py - 8, stale ? GREY : BLACK);
+    if (!s_n) {
+      text(&FreeSansBold12pt7b, "WAITING FOR SIGNALS", PLOT_CX - 100, 260, GREY);
+      text(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN", PLOT_CX - 130, 290, GREY);
+    }
   }
 }
 
 static void draw_selected_strip() {
-  // one line of detail for the selected contact, under the table
   if (!s_n) return;
   const Track* t = &g_tracks[s_order[s_sel]];
-  char b[120];
-  snprintf(b, sizeof(b), "%s  %s  %s  src %s%s%s  msgs %u  %lus ago",
-           t->uas[0] ? t->uas : "(no id)", ui_status_name(t->status),
-           t->auth_state ? ui_auth_text(t->auth_state) : "",
-           (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
-           (t->src_mask & 4) ? "B" : "", t->msgs, (unsigned long)((s_now - t->last_ms) / 1000));
-  text(&FreeSansBold9pt7b, b, TABLE_X, 492, GREY);
+  rect(TABLE_X, 426, TABLE_W, 62, WHITE);
+  box(TABLE_X, 426, TABLE_W, 62, GREY);
+  char b[64];
+  // Line 1: UAS ID + Status + Auth
+  snprintf(b, sizeof(b), "%.16s  %s", t->uas[0] ? t->uas : "(no id)", ui_status_name(t->status));
+  text(&FreeSansBold12pt7b, b, TABLE_X + 12, 448, BLACK);
+  if (t->auth_state) {
+    const char* a = track_auth_badge(t->auth_state);
+    text_r(&FreeSansBold9pt7b, a, TABLE_X + TABLE_W - 12, 448, t->auth_state == 4 ? BLACK : GREY);
+  }
+  // Line 2: MAC / protocol / msgs / age / dist / brg
+  uint32_t age_s = (s_now - t->last_ms) / 1000;
+  char age_buf[16];
+  if (age_s < 10) snprintf(age_buf, sizeof(age_buf), "now");
+  else if (age_s < 60) snprintf(age_buf, sizeof(age_buf), "%lus", (unsigned long)age_s);
+  else snprintf(age_buf, sizeof(age_buf), "%lum", (unsigned long)(age_s / 60));
+
+  char dist_buf[24] = "";
+  if (g_home_set && t->has_pos) {
+    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+    snprintf(dist_buf, sizeof(dist_buf), "  %s %03d°", r, (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
+  }
+  snprintf(b, sizeof(b), "%s%s%s  %u msgs  %s%s",
+           (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
+           t->msgs, age_buf, dist_buf);
+  text(&FreeSansBold9pt7b, b, TABLE_X + 12, 474, GREY);
 }
 
 
@@ -348,40 +405,83 @@ static int pngDrawCb(PNGDRAW* d) {
 }
 
 static void draw_map() {
-  UiSummary sm; ui_summarize(&sm, s_now);
   map_camera();
   // tiles covering the window
   double left = s_cam_wx - W / 2.0, top = s_cam_wy - MAP_H / 2.0;
   long tx0 = (long)floor(left / 256), ty0 = (long)floor(top / 256);
   long tx1 = (long)floor((left + W) / 256), ty1 = (long)floor((top + MAP_H) / 256);
   long tmax = (1L << s_cam_z) - 1;
-  int missing = 0;
+  int tiles_drawn = 0;
   for (long ty = ty0; ty <= ty1; ty++) {
     for (long tx = tx0; tx <= tx1; tx++) {
       s_blit_x = (int)(tx * 256 - left);
       s_blit_y = MAP_Y0 + (int)(ty * 256 - top);
-      bool ok = false;
       if (tx >= 0 && ty >= 0 && tx <= tmax && ty <= tmax) {
         char path[48];
         snprintf(path, sizeof(path), "/tiles/%d/%ld/%ld.png", s_cam_z, tx, ty);
         if (s_png.open(path, pngOpenCb, pngCloseCb, pngReadCb, pngSeekCb, pngDrawCb) == PNG_SUCCESS) {
           if (s_png.getWidth() <= 256) {
             s_png.decode(nullptr, 0);
-            ok = true;
+            tiles_drawn++;
           }
           s_png.close();
         }
       }
-      if (!ok) missing++;
     }
   }
+
+  // If raster tiles are missing, draw a crisp tactical navigation basemap grid:
+  if (!tiles_drawn) {
+    // 1. Light coordinate grid lines
+    for (int gx = 64; gx < W; gx += 128) {
+      epd_draw_line(gx, MAP_Y0, gx, MAP_Y0 + MAP_H, LIGHT, s_fb);
+    }
+    for (int gy = MAP_Y0 + 64; gy < MAP_Y0 + MAP_H; gy += 100) {
+      epd_draw_line(0, gy, W, gy, LIGHT, s_fb);
+    }
+    // 2. Concentric range rings from center of viewport
+    int cx = MAP_CX, cy = MAP_CY;
+    epd_draw_circle(cx, cy, 80, LIGHT, s_fb);
+    epd_draw_circle(cx, cy, 160, LIGHT, s_fb);
+    epd_draw_circle(cx, cy, 240, LIGHT, s_fb);
+    epd_draw_line(cx - 240, cy, cx + 240, cy, GREY, s_fb);
+    epd_draw_line(cx, cy - 180, cx, cy + 180, GREY, s_fb);
+    text(&FreeSansBold9pt7b, "N", cx - 5, cy - 190, BLACK);
+    text(&FreeSansBold9pt7b, "S", cx - 4, cy + 200, GREY);
+    text(&FreeSansBold9pt7b, "W", cx - 258, cy + 4, GREY);
+    text(&FreeSansBold9pt7b, "E", cx + 246, cy + 4, GREY);
+
+    // Pill badge: Tactical basemap
+    rect(20, MAP_Y0 + 8, 250, 26, WHITE);
+    box(20, MAP_Y0 + 8, 250, 26, GREY);
+    text(&FreeSansBold9pt7b, "TACTICAL GRID (NO TILES)", 30, MAP_Y0 + 26, GREY);
+
+    if (!s_n && !g_home_set) {
+      rect(cx - 160, cy - 28, 320, 56, WHITE);
+      box(cx - 160, cy - 28, 320, 56, BLACK);
+      text(&FreeSansBold12pt7b, "TACTICAL MAP ACTIVE", cx - 110, cy - 4, BLACK);
+      text(&FreeSansBold9pt7b, "Sync CARTO tiles via Orecchino app", cx - 120, cy + 18, GREY);
+    }
+  } else {
+    // Raster tiles present
+    rect(20, MAP_Y0 + 8, 120, 26, WHITE);
+    box(20, MAP_Y0 + 8, 120, 26, GREY);
+    char b[32]; snprintf(b, sizeof(b), "MAP  Z%d", s_cam_z);
+    text(&FreeSansBold9pt7b, b, 30, MAP_Y0 + 26, BLACK);
+  }
+
   // overlay: home, contacts, scale, north
   if (g_home_set) {
     double wx, wy; world_px(g_home_lat, g_home_lon, s_cam_z, &wx, &wy);
     int x = (int)(wx - left), y = MAP_Y0 + (int)(wy - top);
-    epd_fill_circle(x, y, 5, BLACK, s_fb);
-    epd_draw_circle(x, y, 10, BLACK, s_fb);
+    if (x >= 0 && x < W && y >= MAP_Y0 && y < MAP_Y0 + MAP_H) {
+      epd_fill_circle(x, y, 5, BLACK, s_fb);
+      epd_draw_circle(x, y, 10, BLACK, s_fb);
+      rect(x + 12, y - 12, 48, 16, WHITE);
+      text(&FreeSansBold9pt7b, "HOME", x + 14, y, BLACK);
+    }
   }
+
   char b[32];
   for (int k = 0; k < s_n; k++) {
     const Track* t = &g_tracks[s_order[k]];
@@ -390,7 +490,6 @@ static void draw_map() {
     int x = (int)(wx - left), y = MAP_Y0 + (int)(wy - top);
     if (x < 0 || x >= W || y < MAP_Y0 || y >= MAP_Y0 + MAP_H) continue;
     bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now);
-    // white halo so the marker reads over street ink
     epd_fill_circle(x, y, danger ? 15 : 11, WHITE, s_fb);
     if (danger) epd_draw_circle(x, y, 13, BLACK, s_fb);
     epd_fill_circle(x, y, k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
@@ -400,24 +499,32 @@ static void draw_map() {
     }
     snprintf(b, sizeof(b), "%.10s", t->uas[0] ? t->uas : "?");
     int tw = text_w(&FreeSansBold9pt7b, b);
-    rect(x + 10, y - 20, tw + 6, 18, WHITE);
-    text(&FreeSansBold9pt7b, b, x + 13, y - 6, stale ? GREY : BLACK);
+    rect(x + 10, y - 20, tw + 8, 18, WHITE);
+    box(x + 10, y - 20, tw + 8, 18, stale ? GREY : BLACK);
+    text(&FreeSansBold9pt7b, b, x + 14, y - 6, stale ? GREY : BLACK);
   }
+
   // scale bar: 100 px in metres at this zoom and latitude
   double clat, clon; px_world(s_cam_wx, s_cam_wy, s_cam_z, &clat, &clon);
   double m_per_px = 156543.03 * cos(clat * M_PI / 180) / (double)(1L << s_cam_z);
   double bar_m = m_per_px * 100;
   if (bar_m >= 1000) snprintf(b, sizeof(b), "%.1f km", bar_m / 1000); else snprintf(b, sizeof(b), "%d m", (int)bar_m);
-  rect(20, MAP_Y0 + MAP_H - 30, 100 + 60, 24, WHITE);
-  rect(24, MAP_Y0 + MAP_H - 14, 100, 3, BLACK);
-  text(&FreeSansBold9pt7b, b, 130, MAP_Y0 + MAP_H - 12, BLACK);
-  rect(W - 44, MAP_Y0 + 8, 30, 30, WHITE);
-  text(&FreeSansBold12pt7b, "N", W - 38, MAP_Y0 + 30, BLACK);
+  rect(20, MAP_Y0 + MAP_H - 32, 160, 26, WHITE);
+  box(20, MAP_Y0 + MAP_H - 32, 160, 26, GREY);
+  rect(28, MAP_Y0 + MAP_H - 16, 80, 4, BLACK);
+  text(&FreeSansBold9pt7b, b, 114, MAP_Y0 + MAP_H - 14, BLACK);
+
+  // Compass Rose top-right
+  rect(W - 48, MAP_Y0 + 8, 36, 36, WHITE);
+  box(W - 48, MAP_Y0 + 8, 36, 36, GREY);
+  text(&FreeSansBold12pt7b, "N", W - 38, MAP_Y0 + 32, BLACK);
+
   // touch zoom boxes, right edge
   for (int i = 0; i < 2; i++) {
-    int by = MAP_Y0 + 60 + i * 56;
-    rect(W - 56, by, 48, 48, WHITE); box(W - 56, by, 48, 48, BLACK);
-    text(&FreeSansBold18pt7b, i ? "-" : "+", W - 40, by + 34, BLACK);
+    int by = MAP_Y0 + 56 + i * 54;
+    rect(W - 54, by, 44, 44, WHITE);
+    box(W - 54, by, 44, 44, BLACK);
+    text(&FreeSansBold18pt7b, i ? "-" : "+", W - 40, by + 32, BLACK);
   }
   if (s_cam_manual) {
     int pw = 140, ph = 26;
@@ -426,37 +533,34 @@ static void draw_map() {
     box(px, py, pw, ph, BLACK);
     text(&FreeSansBold9pt7b, "MANUAL PAN", px + 10, py + 18, BLACK);
   }
-  epd_draw_line(W - 29, MAP_Y0 + 32, W - 29, MAP_Y0 + 38, BLACK, s_fb);
-  if (missing == (tx1 - tx0 + 1) * (ty1 - ty0 + 1)) {
-    text(&FreeSansBold12pt7b, "NO TILES • SYNC VIA APP", 320, MAP_CY, GREY);
-  }
+
+  UiSummary sm; ui_summarize(&sm, s_now);
   draw_header(sm, nullptr);
-  draw_footer(sm, "btn: table   hold: spec");
-  // images ghost badly under a fast update: always a clean refresh
-  epd_poweron();
-  epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
-  epd_poweroff();
-  s_partials = 0; s_last_full = s_now;
-  s_alert_prev = sm.alert;
+  draw_footer(sm, "button: table   hold: spectrum");
 }
 
 static void refresh(bool force_full) {
-  bool full = force_full || s_partials >= 12 || s_now - s_last_full > 600000UL;
+  bool full = force_full || s_partials >= 8 || (s_now - s_last_full > 300000UL);
   epd_poweron();
-  epd_hl_update_screen(&s_hl, full ? MODE_GC16 : MODE_DU, TEMP_C);
+  epd_hl_update_screen(&s_hl, full ? MODE_GC16 : MODE_GL16, TEMP_C);
   epd_poweroff();
   if (full) { s_partials = 0; s_last_full = s_now; } else s_partials++;
 }
 
 static void draw_board(bool force_full) {
   epd_hl_set_all_white(&s_hl);
-  if (s_map) { draw_map(); return; }
   UiSummary sm; ui_summarize(&sm, s_now);
+  if (s_map) {
+    draw_map();
+    refresh(force_full);
+    s_alert_prev = sm.alert;
+    return;
+  }
   draw_header(sm, nullptr);
   draw_table();
   draw_plot();
   draw_selected_strip();
-  draw_footer(sm, s_n > 1 ? "btn: next / map   hold: spec" : "btn: map   hold: spec");
+  draw_footer(sm, s_n > 1 ? "button: next / map   hold: spectrum" : "button: map   hold: spectrum");
   refresh(force_full || sm.alert != s_alert_prev);
   s_alert_prev = sm.alert;
 }
@@ -503,9 +607,9 @@ static void draw_spectrum() {
   snprintf(b, sizeof(b), "%d dBm", bot); text(&FreeSansBold9pt7b, b, X0 + 4, Y0 + PH - 6, GREY);
   const char* L[] = { "850", "868", "890", "915", "930" };
   for (int i = 0; i < 5; i++) text(&FreeSansBold9pt7b, L[i], X0 + i * (PW / 4) - (i == 4 ? 30 : 0), Y0 + PH + 18, GREY);
-  draw_footer(sm, "button: back");
+  draw_footer(sm, "tap or button: back");
   epd_poweron();
-  epd_hl_update_screen(&s_hl, (++s_partials % 8) == 0 ? MODE_GC16 : MODE_DU, TEMP_C);
+  epd_hl_update_screen(&s_hl, (++s_partials % 8) == 0 ? MODE_GC16 : MODE_GL16, TEMP_C);
   epd_poweroff();
 }
 
@@ -525,7 +629,7 @@ bool ui_begin() {
   epd_poweron();
   epd_clear();
   epd_hl_set_all_white(&s_hl);
-  text(&FreeSansBold24pt7b, "ORECCHINO", 300, 250, BLACK);
+  text(&FreeSansBold24pt7b, "ORECCHINO", (W - text_w(&FreeSansBold24pt7b, "ORECCHINO")) / 2, 250, BLACK);
   text(&FreeSansBold12pt7b, "Remote ID receiver  -  starting radios", 300, 300, GREY);
   epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
   epd_poweroff();
@@ -577,16 +681,24 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     t_was = t;
   }
   if (tap_x >= 0 && !s_spec) {
+    // Top bar view switcher tabs:
+    if (tap_y <= 70) {
+      if (tap_x >= 300 && tap_x < 405) {
+        if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); return; }
+      } else if (tap_x >= 405 && tap_x <= 510) {
+        if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
+      }
+    }
     if (!s_map) {
-      if (tap_y >= 84 + 26 && tap_x < TABLE_X + TABLE_W) {          // a table row
-        int k = (tap_y - (84 + 26)) / ROW_H;
+      if (tap_y >= 80 + 26 && tap_y < 420 && tap_x < TABLE_X + TABLE_W) {          // a table row
+        int k = (tap_y - (80 + 26)) / ROW_H;
         if (k < s_n) { s_sel = k; s_sig_prev = 0; }
-      } else if (tap_x > 620 && tap_y > 70 && tap_y < 500) {        // the plot: go to the map
-        s_map = true; s_sig_prev = 0;
+      } else if (tap_x > 560 && tap_y > 70 && tap_y < 496) {        // the plot: go to the map
+        s_map = true; s_sig_prev = 0; draw_board(true); return;
       }
     } else {
-      if (tap_x >= W - 56 && tap_y >= MAP_Y0 + 60 && tap_y < MAP_Y0 + 60 + 104) {   // zoom boxes
-        int dz = tap_y < MAP_Y0 + 60 + 52 ? 1 : -1;
+      if (tap_x >= W - 56 && tap_y >= MAP_Y0 + 56 && tap_y < MAP_Y0 + 56 + 110) {   // zoom boxes
+        int dz = tap_y < MAP_Y0 + 56 + 54 ? 1 : -1;
         int nz = s_cam_z + dz;
         if (nz >= TILE_ZMIN && nz <= TILE_ZMAX) {
           double f = dz > 0 ? 2.0 : 0.5;
@@ -642,28 +754,28 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   // then back to the table's first row.
   if (tap) {
     if (s_map && s_cam_manual) { s_cam_manual = false; }
-    else if (s_map) { s_map = false; s_sel = 0; }
+    else if (s_map) { s_map = false; s_sel = 0; draw_board(true); return; }
     else if (s_n > 1 && s_sel < s_n - 1) s_sel++;
-    else s_map = true;
+    else { s_map = true; draw_board(true); return; }
   }
   if (syncing) {
     static uint32_t last_prog = 0;
     if (now - last_prog >= 5000) {          // progress line, sparingly
       last_prog = now;
-      rect(0, 500, W, 40, WHITE);
+      rect(0, 496, W, 44, WHITE);
       char b[48]; snprintf(b, sizeof(b), "SYNCING MAP TILES  %d received", sync_files);
-      text(&FreeSansBold9pt7b, b, TABLE_X, 526, BLACK);
-      EpdRect r = {0, 500, W, 40};
-      epd_poweron(); epd_hl_update_area(&s_hl, MODE_DU, TEMP_C, r); epd_poweroff();
+      text(&FreeSansBold9pt7b, b, TABLE_X, 524, BLACK);
+      EpdRect r = {0, 496, W, 44};
+      epd_poweron(); epd_hl_update_area(&s_hl, MODE_GL16, TEMP_C, r); epd_poweroff();
     }
     return;
   }
   static uint32_t last_check = 0;
-  if (tap || now - last_check >= 1000) {
+  if (tap || now - last_check >= 3000) {
     last_check = now;
     build_order();
     uint32_t sig = signature();
-    if (sig != s_sig_prev || now - s_last_full > 600000UL) {
+    if (sig != s_sig_prev || now - s_last_full > 300000UL) {
       s_sig_prev = sig;
       draw_board(false);
     }
