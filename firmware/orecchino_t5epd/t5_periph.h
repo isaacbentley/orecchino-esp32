@@ -30,3 +30,17 @@ bool periph_gps_detected();        // true when valid NMEA sentences received on
 bool periph_gps_fix();
 int  periph_gps_sats();
 
+enum BlMode : uint8_t { BL_AUTO = 0, BL_ON = 1, BL_OFF = 2 };
+
+void    periph_bl_init();
+void    periph_bl_set_mode(BlMode mode);
+BlMode  periph_bl_get_mode();
+void    periph_bl_set_duty(uint8_t duty);
+uint8_t periph_bl_get_duty();
+bool    periph_bl_is_active();
+bool    periph_is_after_sundown();
+double  periph_sun_elevation();
+bool    periph_has_utc_time();
+void    periph_get_utc_time(uint16_t* y, uint8_t* m, uint8_t* d, uint8_t* h, uint8_t* min, uint8_t* s);
+void    periph_set_utc_time(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s);
+

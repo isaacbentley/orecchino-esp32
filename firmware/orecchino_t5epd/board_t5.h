@@ -12,6 +12,7 @@
 #define TOUCH_RST_PIN 9
 #define PIN_GPS_RX    44
 #define PIN_GPS_TX    43
+#define PIN_BL_EN     11    // Backlight boost enable / PWM (PT4103B23F)
 
 #define PIN_SPI_MISO  21
 #define PIN_SPI_MOSI  13

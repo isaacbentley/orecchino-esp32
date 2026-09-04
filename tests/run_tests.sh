@@ -7,6 +7,10 @@ echo "== ODID decoder (C, golden vectors from opendroneid/wireshark-dissector)"
 cc -std=c11 -Wall -Wextra -O2 tests/odid_test.c -o /tmp/orecchino_odid_test
 /tmp/orecchino_odid_test
 
+echo "== Solar position & sundown engine (C, NOAA algorithms)"
+cc -std=c11 -Wall -Wextra -O2 tests/solar_test.c -lm -o /tmp/orecchino_solar_test
+/tmp/orecchino_solar_test
+
 echo "== App tests (swift-testing)"
 cd app
 CLT=/Library/Developer/CommandLineTools
