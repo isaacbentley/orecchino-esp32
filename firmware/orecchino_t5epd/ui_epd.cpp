@@ -128,20 +128,37 @@ static void draw_header(const UiSummary& sm, const char* title) {
   uint8_t fg = loud ? WHITE : BLACK, mut = loud ? LIGHT : GREY;
   char b[48];
   if (title) snprintf(b, sizeof(b), "%s", title); else ui_headline(b, sizeof(b), &sm);
-  text(&FreeSansBold24pt7b, b, TABLE_X, 50, fg);
+  text(&FreeSansBold18pt7b, b, TABLE_X, 48, fg);
 
   // View Switcher Tabs (when not in spectrum)
   if (!title && !loud) {
+    const int bx = 310, by = 12, bw = 230, bh = 46, mid = bx + bw / 2;
+    // Outer crisp 2px border around the entire segmented control
+    box(bx, by, bw, bh, BLACK);
+    box(bx + 1, by + 1, bw - 2, bh - 2, BLACK);
+    // Vertical 2px divider between TABLE and MAP
+    rect(mid - 1, by, 2, bh, BLACK);
+
+    // Left Tab: TABLE
+    int tw_table = text_w(&FreeSansBold12pt7b, "TABLE");
+    int tx_table = bx + ((bw / 2) - tw_table) / 2;
     if (!s_map) {
-      rect(310, 14, 88, 42, BLACK);
-      text(&FreeSansBold12pt7b, "TABLE", 320, 42, WHITE);
-      box(410, 14, 80, 42, GREY);
-      text(&FreeSansBold12pt7b, "MAP", 426, 42, GREY);
+      rect(bx + 2, by + 2, (bw / 2) - 3, bh - 4, BLACK);
+      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, WHITE);
     } else {
-      box(310, 14, 88, 42, GREY);
-      text(&FreeSansBold12pt7b, "TABLE", 320, 42, GREY);
-      rect(410, 14, 80, 42, BLACK);
-      text(&FreeSansBold12pt7b, "MAP", 426, 42, WHITE);
+      rect(bx + 2, by + 2, (bw / 2) - 3, bh - 4, WHITE);
+      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, BLACK);
+    }
+
+    // Right Tab: MAP
+    int tw_map = text_w(&FreeSansBold12pt7b, "MAP");
+    int tx_map = mid + 1 + ((bw / 2) - tw_map) / 2;
+    if (s_map) {
+      rect(mid + 1, by + 2, (bw / 2) - 3, bh - 4, BLACK);
+      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, WHITE);
+    } else {
+      rect(mid + 1, by + 2, (bw / 2) - 3, bh - 4, WHITE);
+      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, BLACK);
     }
   }
 
@@ -682,10 +699,10 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   }
   if (tap_x >= 0 && !s_spec) {
     // Top bar view switcher tabs:
-    if (tap_y <= 70) {
-      if (tap_x >= 300 && tap_x < 405) {
+    if (tap_y <= 72) {
+      if (tap_x >= 280 && tap_x < 425) {
         if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); return; }
-      } else if (tap_x >= 405 && tap_x <= 510) {
+      } else if (tap_x >= 425 && tap_x <= 560) {
         if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
       }
     }
