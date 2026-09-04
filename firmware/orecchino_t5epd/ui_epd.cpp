@@ -200,8 +200,8 @@ static void draw_header(const UiSummary& sm, const char* title) {
 
   int xr = W - 20;
   snprintf(b, sizeof(b), s_ble_ok ? "RX OK" : "RX FAULT");
-  text_r(&FreeSansBold12pt7b, b, xr, 44, s_ble_ok ? mut : fg); xr -= text_w(&FreeSansBold12pt7b, b) + 16;
-  if (s_batt >= 0) { snprintf(b, sizeof(b), "%d%%", s_batt); text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 16; }
+  text_r(&FreeSansBold12pt7b, b, xr, 44, loud ? WHITE : (s_ble_ok ? BLACK : BLACK)); xr -= text_w(&FreeSansBold12pt7b, b) + 16;
+  if (s_batt >= 0) { snprintf(b, sizeof(b), "%d%%", s_batt); text_r(&FreeSansBold12pt7b, b, xr, 44, loud ? WHITE : BLACK); xr -= text_w(&FreeSansBold12pt7b, b) + 16; }
   if (periph_bl_is_active()) {
     snprintf(b, sizeof(b), "[BL]");
     text_r(&FreeSansBold12pt7b, b, xr, 44, loud ? WHITE : BLACK);
@@ -210,8 +210,8 @@ static void draw_header(const UiSummary& sm, const char* title) {
   if (periph_gps_fix()) snprintf(b, sizeof(b), "GPS %d", periph_gps_sats());
   else if (periph_gps_detected()) snprintf(b, sizeof(b), "GPS SEARCH");
   else snprintf(b, sizeof(b), g_home_set ? "APP POS" : "NO POS");
-  text_r(&FreeSansBold12pt7b, b, xr, 44, mut); xr -= text_w(&FreeSansBold12pt7b, b) + 16;
-  if (g_seen_count) { snprintf(b, sizeof(b), "%lu seen", (unsigned long)g_seen_count); text_r(&FreeSansBold9pt7b, b, xr, 43, mut); }
+  text_r(&FreeSansBold12pt7b, b, xr, 44, loud ? WHITE : BLACK); xr -= text_w(&FreeSansBold12pt7b, b) + 16;
+  if (g_seen_count) { snprintf(b, sizeof(b), "%lu seen", (unsigned long)g_seen_count); text_r(&FreeSansBold9pt7b, b, xr, 43, loud ? WHITE : BLACK); }
 }
 
 static void draw_footer(const UiSummary& sm, const char* hint) {
@@ -361,8 +361,10 @@ static void draw_table() {
         text(f9, a, auth_x, y + 20, ink);
       }
     }
+  if (!s_n) {
+    int tw_scan = text_w(&FreeSansBold18pt7b, "SCANNING");
+    text(&FreeSansBold18pt7b, "SCANNING", TABLE_X + (TABLE_W - tw_scan) / 2, y0 + 180, BLACK);
   }
-  if (!s_n) text(&FreeSansBold18pt7b, "SCANNING", TABLE_X + 160, y0 + 180, GREY);
 }
 
 static double nice_scale(double m) {
@@ -741,7 +743,7 @@ static void draw_tx() {
   bool running = txui_running();
   rect(0, 0, W, 70, running ? BLACK : WHITE);
   if (!running) rect(0, 68, W, 2, BLACK);
-  uint8_t fg = running ? WHITE : BLACK, mut = running ? LIGHT : GREY;
+  uint8_t fg = running ? WHITE : BLACK, mut = running ? WHITE : BLACK;
 
   // Headline
   text(&FreeSansBold18pt7b, running ? "TEST BEACON  ON AIR" : "TEST BEACON  PAUSED", TABLE_X, 48, fg);
@@ -758,11 +760,15 @@ static void draw_tx() {
   snprintf(st_b, sizeof(st_b), "%d/%d ACTIVE  •  %lu PKTS", on, n, (unsigned long)total_sent);
   text(&FreeSansBold9pt7b, st_b, 410, 45, mut);
 
-  // Battery and RX mode button on right
+  // Battery, backlight, and RX mode button on right
   int xr = W - 170;
   if (s_batt >= 0) {
     char bb[16]; snprintf(bb, sizeof(bb), "%d%%", s_batt);
     text_r(&FreeSansBold12pt7b, bb, xr, 44, mut);
+    xr -= text_w(&FreeSansBold12pt7b, bb) + 16;
+  }
+  if (periph_bl_is_active()) {
+    text_r(&FreeSansBold12pt7b, "[BL]", xr, 44, fg);
   }
 
   // [ RX MODE ] button
@@ -816,7 +822,7 @@ static void draw_tx() {
 
   // Band label on right
   text(&FreeSansBold9pt7b, "CH 6  •  2.4 GHz", 765, 102, BLACK);
-  text(&FreeSansBold9pt7b, "TEST BENCH RADIATOR", 765, 120, GREY);
+  text(&FreeSansBold9pt7b, "TEST BENCH RADIATOR", 765, 120, BLACK);
 
   // 10 Transmit Paths Grid (y: 146..488)
   const int card_w = 450, card_h = 58, row_pitch = 68;
@@ -831,8 +837,8 @@ static void draw_tx() {
       int y = 146 + r * row_pitch;
       bool path_on = txui_enabled(i);
 
-      // Card outer box
-      box(x0, y, card_w, card_h, path_on ? BLACK : LIGHT);
+      // Card outer box: crisp 1px black outline, active gets 2px bold frame
+      box(x0, y, card_w, card_h, BLACK);
       if (path_on) box(x0 + 1, y + 1, card_w - 2, card_h - 2, BLACK);
 
       // Left toggle pill: [ ON ] / [ OFF ]
@@ -842,15 +848,20 @@ static void draw_tx() {
         text(f12, "ON", px + (pw - text_w(f12, "ON")) / 2, py + 26, WHITE);
       } else {
         box(px, py, pw, ph, BLACK);
-        text(f12, "OFF", px + (pw - text_w(f12, "OFF")) / 2, py + 26, GREY);
+        text(f12, "OFF", px + (pw - text_w(f12, "OFF")) / 2, py + 26, BLACK);
       }
 
-      // Carrier badge
+      // Carrier badge: inverted black fill (active) or 1px outline box with black text (disabled)
       const char* carr = txui_carrier(i);
       int cw = text_w(f9, carr) + 12;
       int cx = x0 + 78, cy = y + 10;
-      rect(cx, cy, cw, 18, path_on ? BLACK : GREY);
-      text(f9, carr, cx + 6, cy + 14, WHITE);
+      if (path_on) {
+        rect(cx, cy, cw, 18, BLACK);
+        text(f9, carr, cx + 6, cy + 14, WHITE);
+      } else {
+        box(cx, cy, cw, 18, BLACK);
+        text(f9, carr, cx + 6, cy + 14, BLACK);
+      }
 
       // Packet count on right
       char cb[20];
@@ -879,12 +890,12 @@ static void draw_tx() {
           len--;
         }
       }
-      text(f12, id_b, id_x, y + 26, path_on ? BLACK : GREY);
+      text(f12, id_b, id_x, y + 26, BLACK);
 
       // Subtitle (self desc)
-      text(f9, txui_desc(i), cx, y + 46, path_on ? BLACK : GREY);
+      text(f9, txui_desc(i), cx, y + 46, BLACK);
 
-      text_r(f9, cb, x0 + card_w - 12, y + 34, path_on ? BLACK : GREY);
+      text_r(f9, cb, x0 + card_w - 12, y + 34, BLACK);
     }
   }
 
@@ -894,7 +905,7 @@ static void draw_tx() {
   text(f9, running ? "TRANSMITTING TEST BURSTS · DO NOT RADIATE NEAR LIVE AIRSPACE" :
                      "TRANSMIT PAUSED · CONFIGURE PATHS AND TAP [TRANSMIT] TO RADIATE",
        TABLE_X, 524, BLACK);
-  text_r(f9, "tap card to toggle · hold BOOT: rx mode", W - 20, 524, GREY);
+  text_r(f9, "tap card to toggle · hold BOOT: rx mode", W - 20, 524, BLACK);
 }
 
 static void draw_board(bool force_full) {
@@ -939,7 +950,12 @@ static void draw_spectrum() {
   text(&FreeSansBold9pt7b, "2.4 GHz CHANNELS", 20, 100, BLACK);
   for (int c = 0; c < 13; c++) {
     float v = (s_a24[c] + 115) / 70.0f; v = v < 0 ? 0 : v > 1 ? 1 : v;
-    int h = (int)(90 * v), x = 20 + c * 70;
+    int h = (int)(80 * v), x = 20 + c * 70;
+    // Channel meter frame (height 80px, base at y=200)
+    box(x, 120, 56, 80, GREY);
+    if (h > 0) {
+      rect(x + 2, 200 - h, 52, h, BLACK);
+    }
     char b[4]; snprintf(b, sizeof(b), "%d", c + 1);
     int tw_c = text_w(&FreeSansBold9pt7b, b);
     text(&FreeSansBold9pt7b, b, x + (56 - tw_c) / 2, 220, BLACK);
@@ -957,7 +973,9 @@ static void draw_spectrum() {
     float v = (float)(s_swp[i] - bot) / (top - bot); v = v < 0 ? 0 : v > 1 ? 1 : v;
     int y = Y0 + PH - (int)(PH * v);
     float vp = (float)(s_pk[i] - bot) / (top - bot); vp = vp < 0 ? 0 : vp > 1 ? 1 : vp;
-    epd_draw_pixel(x, Y0 + PH - (int)(PH * vp), GREY, s_fb);
+    int y_pk = Y0 + PH - (int)(PH * vp);
+    epd_draw_pixel(x, y_pk, BLACK, s_fb);
+    if (y_pk > Y0 + 1) epd_draw_pixel(x, y_pk - 1, BLACK, s_fb);
     if (px >= 0) epd_draw_line(px, py, x, y, BLACK, s_fb);
     px = x; py = y;
   }

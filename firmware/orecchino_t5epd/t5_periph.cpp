@@ -257,6 +257,13 @@ int periph_batt_pct() {
   return pct > 100 ? 100 : pct;
 }
 
+int periph_batt_mv() {
+  if (!s_have_gauge) return -1;
+  uint8_t reg = 0x08, r[2] = {0};   // Voltage, mV
+  if (!wrrd(s_gauge, &reg, 1, r, 2)) return -1;
+  return r[0] | (r[1] << 8);
+}
+
 // ---- RTC (PCF8563 at 0x51) & System Time
 #define PCF8563_ADDR 0x51
 static i2c_master_dev_handle_t s_rtc = nullptr;

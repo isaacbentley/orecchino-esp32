@@ -62,7 +62,69 @@ static bool parse_vcom_val(const char* str, uint16_t* out) {
   return false;
 }
 
+static void print_help() {
+  Serial.println("\n========================================================");
+  Serial.println("  ORECCHINO — Direct Remote ID Tactical Tool");
+  Serial.println("  Hardware: LilyGO T5 E-Paper S3 Pro (4.7\" ED047TC1)");
+  Serial.println("========================================================");
+  Serial.println("CLI Commands:");
+  Serial.println("  help / ?               Print this command reference");
+  Serial.println("  status                 Tactical telemetry (RF, GPS, power, panel)");
+  Serial.println("  mode <rx|tx>           Switch between Receiver and Test Beacon mode");
+  Serial.println("  bl <on|off|auto|0-100%> Backlight control (auto tracks NOAA sundown)");
+  Serial.println("  vcom <mV|-V>           Tune panel VCOM voltage (saved in NVS)");
+  Serial.println("  time [epoch]           Get or set UTC system & RTC time");
+  Serial.println("  reboot                 Software restart ESP32-S3");
+  Serial.println("  t                      Inject synthetic test contact (dev)");
+  Serial.println("\nJSON Commands:");
+  Serial.println("  {\"cmd\":\"help\"}");
+  Serial.println("  {\"cmd\":\"status\"}");
+  Serial.println("  {\"cmd\":\"mode\",\"mode\":\"rx\"|\"tx\"}");
+  Serial.println("  {\"cmd\":\"set_bl\",\"mode\":\"auto\"|\"on\"|\"off\",\"duty\":0..255}");
+  Serial.println("  {\"cmd\":\"get_bl\"}");
+  Serial.println("  {\"cmd\":\"set_vcom\",\"vcom\":1560}");
+  Serial.println("  {\"cmd\":\"get_vcom\"}");
+  Serial.println("  {\"cmd\":\"set_time\",\"utc\":<epoch_seconds>}");
+  Serial.println("  {\"cmd\":\"set_home\",\"lat\":<deg>,\"lon\":<deg>}");
+  Serial.println("========================================================\n");
+}
+
+static void print_status() {
+  int batt = periph_batt_pct();
+  int mv = periph_batt_mv();
+  uint16_t yr = 0; uint8_t mo = 0, da = 0, hr = 0, mi = 0, se = 0;
+  periph_get_utc_time(&yr, &mo, &da, &hr, &mi, &se);
+
+  char utc_buf[32];
+  snprintf(utc_buf, sizeof(utc_buf), "%04u-%02u-%02uT%02u:%02u:%02uZ", yr, mo, da, hr, mi, se);
+
+  Serial.printf("{\"type\":\"status\",\"device\":\"lilygo-t5-epaper-s3-pro\",\"mode\":\"%s\","
+                "\"batt_pct\":%d,\"batt_mv\":%d,\"gps_detected\":%s,\"gps_fix\":%s,\"gps_sats\":%d,"
+                "\"lat\":%.6f,\"lon\":%.6f,\"home_set\":%s,\"vcom\":%u,"
+                "\"bl_mode\":\"%s\",\"bl_active\":%s,\"bl_duty\":%u,\"sun_elev\":%.1f,\"sundown\":%s,"
+                "\"utc\":\"%s\",\"seen_count\":%lu,\"heap_free\":%u,\"psram_free\":%u}\n",
+                g_mode == UI_MODE_TX ? "tx" : "rx",
+                batt, mv,
+                periph_gps_detected() ? "true" : "false",
+                periph_gps_fix() ? "true" : "false",
+                periph_gps_sats(),
+                g_home_lat, g_home_lon,
+                g_home_set ? "true" : "false",
+                (unsigned)ui_get_vcom(),
+                periph_bl_get_mode() == BL_AUTO ? "auto" : periph_bl_get_mode() == BL_ON ? "on" : "off",
+                periph_bl_is_active() ? "true" : "false",
+                (unsigned)periph_bl_get_duty(),
+                periph_sun_elevation(),
+                periph_is_after_sundown() ? "true" : "false",
+                utc_buf,
+                (unsigned long)g_seen_count,
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)ESP.getFreePsram());
+}
+
 bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
+  if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) { print_help(); return true; }
+  if (!strcmp(cmd, "status")) { print_status(); return true; }
   if (!strcmp(cmd, "reboot")) { ESP.restart(); return true; }
 
   // Mode switching commands:
@@ -151,6 +213,18 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
   if (line) {
     const char* p = line;
     while (*p == ' ') p++;
+    if (!strcmp(p, "help") || !strcmp(p, "?")) {
+      print_help();
+      return true;
+    }
+    if (!strcmp(p, "status")) {
+      print_status();
+      return true;
+    }
+    if (!strcmp(p, "reboot")) {
+      ESP.restart();
+      return true;
+    }
     if (!strncmp(p, "bl", 2) || !strncmp(p, "backlight", 9)) {
       p += (!strncmp(p, "backlight", 9) ? 9 : 2);
       while (*p == ' ') p++;
@@ -242,46 +316,26 @@ void loop() {
   uint32_t now = millis();
 
   if (g_mode == UI_MODE_TX) {
-    // Check serial for mode switch or reboot
+    // Process serial input for TX mode using unified host line dispatcher
+    static char s_tx_buf[512];
+    static int s_tx_len = 0;
     while (Serial.available()) {
-      int c = Serial.peek();
-      if (c == '{' || c == 'm' || c == 'r' || c == 'b') {
-        String s = Serial.readStringUntil('\n');
-        s.trim();
-        if (s.startsWith("bl") || s.startsWith("backlight")) {
-          const char* p = s.c_str() + (s.startsWith("backlight") ? 9 : 2);
-          while (*p == ' ') p++;
-          if (!strncmp(p, "on", 2)) periph_bl_set_mode(BL_ON);
-          else if (!strncmp(p, "off", 3)) periph_bl_set_mode(BL_OFF);
-          else if (!strncmp(p, "auto", 4)) periph_bl_set_mode(BL_AUTO);
-          else if (*p >= '0' && *p <= '9') {
-            int v = atoi(p);
-            if (strchr(p, '%')) v = (v * 255) / 100;
-            if (v >= 0 && v <= 255) periph_bl_set_duty((uint8_t)v);
-          }
-          Serial.printf("{\"type\":\"backlight\",\"mode\":\"%s\",\"active\":%s,\"duty\":%u,\"sundown\":%s,\"sun_elev\":%.1f}\n",
-                        periph_bl_get_mode() == BL_AUTO ? "auto" : periph_bl_get_mode() == BL_ON ? "on" : "off",
-                        periph_bl_is_active() ? "true" : "false", (unsigned)periph_bl_get_duty(),
-                        periph_is_after_sundown() ? "true" : "false", periph_sun_elevation());
-        } else if (s == "mode rx") {
-          Serial.println("{\"type\":\"mode\",\"mode\":\"rx\",\"switching\":true}");
-          board_switch_mode(UI_MODE_RX);
-        } else if (s == "mode tx" || s == "mode") {
-          Serial.println("{\"type\":\"mode\",\"mode\":\"tx\"}");
-        } else if (s == "reboot") {
-          ESP.restart();
-        } else if (s.indexOf("\"cmd\":\"mode\"") >= 0 || s.indexOf("\"cmd\":\"set_mode\"") >= 0) {
-          if (s.indexOf("\"rx\"") >= 0) {
-            Serial.println("{\"type\":\"mode\",\"mode\":\"rx\",\"switching\":true}");
-            board_switch_mode(UI_MODE_RX);
-          } else {
-            Serial.println("{\"type\":\"mode\",\"mode\":\"tx\"}");
-          }
+      char c = (char)Serial.read();
+      if (c == '\n' || c == '\r') {
+        if (s_tx_len > 0) {
+          s_tx_buf[s_tx_len] = 0;
+          char cmd[16] = {0};
+          json_field_str(s_tx_buf, "cmd", cmd, sizeof(cmd));
+          rx_hook_host_line(cmd, s_tx_buf, now);
+          s_tx_len = 0;
         }
+      } else if (s_tx_len < (int)sizeof(s_tx_buf) - 1) {
+        s_tx_buf[s_tx_len++] = c;
       } else {
-        break; // regular tx_tick CLI will process
+        s_tx_len = 0;
       }
     }
+
     tx_tick(now);
     periph_tick(now);
     static int batt = -1;
