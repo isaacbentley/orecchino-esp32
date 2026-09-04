@@ -208,12 +208,12 @@ static void draw_table() {
   struct Col { const char* l; int x; };
   if (has_gps) {
     Col cols[] = {
-      {"ID", 26}, {"RSSI", 200}, {"HGT", 280}, {"SPD", 345}, {"RANGE", 405}, {"BRG", 465}, {"AUTH", 510}
+      {"ID", 26}, {"RSSI", 226}, {"HGT", 286}, {"SPD", 346}, {"RANGE", 406}, {"BRG", 466}, {"AUTH", 512}
     };
     for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
   } else {
     Col cols[] = {
-      {"ID", 26}, {"RSSI", 205}, {"HGT", 285}, {"SPD", 355}, {"RANGE", 425}, {"AUTH", 505}
+      {"ID", 26}, {"RSSI", 235}, {"HGT", 300}, {"SPD", 365}, {"RANGE", 430}, {"AUTH", 510}
     };
     for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
   }
@@ -234,9 +234,28 @@ static void draw_table() {
     }
     if (danger && !sel) box(TABLE_X + 8, y - 2, TABLE_W - 8, ROW_H - 2, BLACK);
 
-    char b[32];
-    snprintf(b, sizeof(b), "%.14s", t->uas[0] ? t->uas : "(no id)");
-    text(&FreeSansBold12pt7b, b, TABLE_X + 8, y + 20, ink);
+    int bx = has_gps ? 226 : 235, bw = has_gps ? 42 : 45;
+    int max_id_w = bx - (TABLE_X + 8) - 10;
+
+    // Line 1: ID string with pixel-width truncation to guarantee it never overflows into RSSI
+    char id_b[32];
+    const char* src_id = t->uas[0] ? t->uas : "(no id)";
+    strncpy(id_b, src_id, sizeof(id_b) - 1);
+    id_b[sizeof(id_b) - 1] = 0;
+    if (text_w(&FreeSansBold12pt7b, id_b) > max_id_w) {
+      int len = strlen(id_b);
+      while (len > 2) {
+        id_b[len - 1] = 0;
+        char temp[32];
+        snprintf(temp, sizeof(temp), "%s..", id_b);
+        if (text_w(&FreeSansBold12pt7b, temp) <= max_id_w) {
+          strcpy(id_b, temp);
+          break;
+        }
+        len--;
+      }
+    }
+    text(&FreeSansBold12pt7b, id_b, TABLE_X + 8, y + 20, ink);
 
     // Line 2: Verdict on selected row, or alert status on unselected
     if (sel) {
@@ -253,6 +272,19 @@ static void draw_table() {
                ui_auth_text(t->auth_state),
                (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
                age_buf);
+      if (text_w(f9, v) > max_id_w) {
+        int vlen = strlen(v);
+        while (vlen > 2) {
+          v[vlen - 1] = 0;
+          char vtemp[64];
+          snprintf(vtemp, sizeof(vtemp), "%s..", v);
+          if (text_w(f9, vtemp) <= max_id_w) {
+            strcpy(v, vtemp);
+            break;
+          }
+          vlen--;
+        }
+      }
       text(f9, v, TABLE_X + 8, y + 36, WHITE);
     } else {
       if (t->in_tfr) text(f9, "IN TFR", TABLE_X + 8, y + 36, BLACK);
@@ -260,30 +292,29 @@ static void draw_table() {
     }
 
     // rssi bar
-    int bx = has_gps ? 200 : 205, bw = 50;
     box(bx, y + 6, bw, 8, ink);
     rect(bx, y + 6, (int)(bw * ui_rssi01(t->rssi)), 8, ink);
-    snprintf(b, sizeof(b), "%d", t->rssi); text(f9, b, bx, y + 34, ink);
+    char rb[16]; snprintf(rb, sizeof(rb), "%d", t->rssi); text(f9, rb, bx, y + 34, ink);
 
-    int hgt_x = has_gps ? 280 : 285;
-    if (!isnan(t->height)) { snprintf(b, sizeof(b), "%dm", (int)t->height); text(f9, b, hgt_x, y + 20, ink); }
+    int hgt_x = has_gps ? 286 : 300;
+    if (!isnan(t->height)) { char hb[16]; snprintf(hb, sizeof(hb), "%dm", (int)t->height); text(f9, hb, hgt_x, y + 20, ink); }
 
-    int spd_x = has_gps ? 345 : 355;
-    if (!isnan(t->speed))  { snprintf(b, sizeof(b), "%.0f", t->speed);       text(f9, b, spd_x, y + 20, ink); }
+    int spd_x = has_gps ? 346 : 365;
+    if (!isnan(t->speed))  { char sb[16]; snprintf(sb, sizeof(sb), "%.0f", t->speed);       text(f9, sb, spd_x, y + 20, ink); }
 
-    int rng_x = has_gps ? 405 : 425;
+    int rng_x = has_gps ? 406 : 430;
     if (g_home_set && t->has_pos) {
       char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
       text(f9, r, rng_x, y + 20, ink);
       if (has_gps) {
-        snprintf(b, sizeof(b), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
-        text(f9, b, 465, y + 20, ink);
+        char bb[16]; snprintf(bb, sizeof(bb), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
+        text(f9, bb, 466, y + 20, ink);
       }
     }
     if (t->auth_state) {
       const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
                     : t->auth_state == 2 ? "?" : "...";       // column is headed AUTH
-      int auth_x = has_gps ? 510 : 505;
+      int auth_x = has_gps ? 512 : 510;
       if (!sel && t->auth_state == 4) {
         rect(auth_x - 4, y + 4, 34, 18, BLACK);
         text(f9, a, auth_x, y + 17, WHITE);
