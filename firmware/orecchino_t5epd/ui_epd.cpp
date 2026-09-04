@@ -18,8 +18,8 @@
 #define WHITE 0xFF
 #define GREY  0x60
 #define LIGHT 0xC8
-#define ROW_H 44
-#define ROWS  7
+#define ROW_H 46
+#define ROWS  8
 #define TABLE_X 20
 #define TABLE_W 540
 #define PLOT_CX 760
@@ -37,6 +37,7 @@ static int  s_batt = -1;
 static int  s_sel = 0, s_n = 0, s_order[TRK_MAX];
 static bool s_spec = false, s_sx_ok = false;
 static bool s_map = false;        // table (false) or map (true) board
+static bool s_map_touched = false; // first-use guidance
 static int  s_cam_z = 13;         // map camera: zoom and centre in world px
 static double s_cam_wx = 0, s_cam_wy = 0;
 static bool s_cam_valid = false;
@@ -47,6 +48,13 @@ static uint32_t s_last_full = 0;
 static int s_partials = 0;
 static uint32_t s_sig_prev = 0;
 static UiAlert s_alert_prev = UI_QUIET;
+
+static const char* uas_tail(const char* s, size_t max_len = 8) {
+  if (!s || !*s) return "?";
+  size_t len = strlen(s);
+  if (len <= max_len) return s;
+  return s + (len - max_len);
+}
 
 // ---- GFXfont blitter onto the epdiy framebuffer
 static int glyph_run(const GFXfont* f, const char* s, int x, int y, uint8_t color, bool draw) {
@@ -116,7 +124,7 @@ static uint32_t signature() {
     mix(t->status); mix(t->auth_state); mix(t->in_tfr); mix(ui_stale(t, s_now));
   }
   mix(s_n); mix(s_sel); mix(g_seen_count / 100); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
-  mix(s_map); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
+  mix(s_map); mix(s_map_touched); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
   mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
   return h;
 }
@@ -180,6 +188,13 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
   else if (sm.newest_age_s < 10) snprintf(b, sizeof(b), "ACTIVE RX");
   else if (sm.newest_age_s < 60) snprintf(b, sizeof(b), "RX <1m");
   else snprintf(b, sizeof(b), "RX %lum ago", (unsigned long)(sm.newest_age_s / 60));
+
+  if (!s_map && s_n > ROWS) {
+    char extra[24];
+    snprintf(extra, sizeof(extra), "  •  +%d more", s_n - ROWS);
+    strncat(b, extra, sizeof(b) - strlen(b) - 1);
+  }
+
   text(&FreeSansBold9pt7b, b, TABLE_X, 524, BLACK);
   text_r(&FreeSansBold9pt7b, hint, W - 20, 524, BLACK);
 }
@@ -197,25 +212,49 @@ static void draw_table() {
 
   for (int k = 0; k < ROWS && k < s_n; k++) {
     const Track* t = &g_tracks[s_order[k]];
-    int y = y0 + 26 + k * ROW_H;
-    bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now), sel = k == s_sel;
-    uint8_t ink = stale ? GREY : BLACK;
+    int y = y0 + 24 + k * ROW_H;
+    bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now), sel = (k == s_sel);
+    uint8_t ink = sel ? WHITE : (stale ? GREY : BLACK);
+
     if (sel) {
-      rect(TABLE_X, y, 6, ROW_H - 4, BLACK);
-      box(TABLE_X + 6, y, TABLE_W - 6, ROW_H - 4, BLACK);
+      // Invert selected row: solid black background with verdict
+      rect(TABLE_X, y, TABLE_W, ROW_H - 2, BLACK);
+    } else {
+      rect(TABLE_X + 8, y + ROW_H - 2, TABLE_W - 8, 1, LIGHT);
     }
-    if (danger) box(TABLE_X + 8, y - 2, TABLE_W - 8, ROW_H - 2, BLACK);
+    if (danger && !sel) box(TABLE_X + 8, y - 2, TABLE_W - 8, ROW_H - 2, BLACK);
+
     char b[32];
     snprintf(b, sizeof(b), "%.14s", t->uas[0] ? t->uas : "(no id)");
     text(&FreeSansBold12pt7b, b, TABLE_X + 8, y + 20, ink);
-    // status / tfr tag under the id, small
-    if (t->in_tfr) text(f9, "IN TFR", TABLE_X + 8, y + 36, BLACK);
-    else if (t->status == 3) text(f9, "EMERGENCY", TABLE_X + 8, y + 36, BLACK);
+
+    // Line 2: Verdict on selected row, or alert status on unselected
+    if (sel) {
+      char v[64];
+      uint32_t age_s = (s_now - t->last_ms) / 1000;
+      char age_buf[16];
+      if (age_s < 10) snprintf(age_buf, sizeof(age_buf), "now");
+      else if (age_s < 60) snprintf(age_buf, sizeof(age_buf), "%lus", (unsigned long)age_s);
+      else snprintf(age_buf, sizeof(age_buf), "%lum", (unsigned long)(age_s / 60));
+
+      snprintf(v, sizeof(v), "%s%s  %s  %s%s%s  %s",
+               t->in_tfr ? "IN TFR • " : "",
+               ui_status_name(t->status),
+               ui_auth_text(t->auth_state),
+               (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
+               age_buf);
+      text(f9, v, TABLE_X + 8, y + 36, WHITE);
+    } else {
+      if (t->in_tfr) text(f9, "IN TFR", TABLE_X + 8, y + 36, BLACK);
+      else if (t->status == 3) text(f9, "EMERGENCY", TABLE_X + 8, y + 36, BLACK);
+    }
+
     // rssi bar
     int bx = 200, bw = 50;
     box(bx, y + 6, bw, 8, ink);
     rect(bx, y + 6, (int)(bw * ui_rssi01(t->rssi)), 8, ink);
     snprintf(b, sizeof(b), "%d", t->rssi); text(f9, b, bx, y + 34, ink);
+
     if (!isnan(t->height)) { snprintf(b, sizeof(b), "%dm", (int)t->height); text(f9, b, 280, y + 20, ink); }
     if (!isnan(t->speed))  { snprintf(b, sizeof(b), "%.0f", t->speed);       text(f9, b, 345, y + 20, ink); }
     if (g_home_set && t->has_pos) {
@@ -227,10 +266,13 @@ static void draw_table() {
     if (t->auth_state) {
       const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
                     : t->auth_state == 2 ? "?" : "...";       // column is headed AUTH
-      if (t->auth_state == 4) { rect(506, y + 4, 34, 18, BLACK); text(f9, a, 510, y + 17, WHITE); }
-      else text(f9, a, 510, y + 20, ink);
+      if (!sel && t->auth_state == 4) {
+        rect(506, y + 4, 34, 18, BLACK);
+        text(f9, a, 510, y + 17, WHITE);
+      } else {
+        text(f9, a, 510, y + 20, ink);
+      }
     }
-    rect(TABLE_X + 8, y + ROW_H - 4, TABLE_W - 8, 1, LIGHT);
   }
   if (!s_n) text(&FreeSansBold18pt7b, "SCANNING", TABLE_X + 160, y0 + 180, GREY);
 }
@@ -253,9 +295,15 @@ static void draw_plot() {
     epd_draw_line(PLOT_CX, PLOT_CY - PLOT_R, PLOT_CX, PLOT_CY + PLOT_R, LIGHT, s_fb);
     epd_draw_line(PLOT_CX - PLOT_R, PLOT_CY, PLOT_CX + PLOT_R, PLOT_CY, LIGHT, s_fb);
     text(&FreeSansBold9pt7b, "N", PLOT_CX - 6, PLOT_CY - PLOT_R - 8, BLACK);
-    char b[24];
-    if (scale >= 1000) snprintf(b, sizeof(b), "%.0f km", scale / 1000); else snprintf(b, sizeof(b), "%.0f m", scale);
-    text(&FreeSansBold9pt7b, b, PLOT_CX + PLOT_R - 40, PLOT_CY + PLOT_R + 22, GREY);
+    // Range rings at 1/3, 2/3, and full scale
+    for (int i = 1; i <= 3; i++) {
+      char rb[16];
+      double rd = scale * i / 3.0;
+      if (rd >= 1000) snprintf(rb, sizeof(rb), "%.1fkm", rd / 1000.0);
+      else snprintf(rb, sizeof(rb), "%.0fm", rd);
+      int ry = PLOT_CY + (PLOT_R * i / 3);
+      text(&FreeSansBold9pt7b, rb, PLOT_CX + 6, ry - 3, GREY);
+    }
     epd_fill_circle(PLOT_CX, PLOT_CY, 4, BLACK, s_fb);
 
     for (int k = 0; k < s_n; k++) {
@@ -272,7 +320,8 @@ static void draw_plot() {
         double hr = t->heading * M_PI / 180;
         epd_draw_line(px, py, px + (int)(sin(hr) * 18), py - (int)(cos(hr) * 18), BLACK, s_fb);
       }
-      snprintf(b, sizeof(b), "%.8s", t->uas[0] ? t->uas : "?");
+      char b[16];
+      snprintf(b, sizeof(b), "%s", uas_tail(t->uas, 8));
       int tw = text_w(&FreeSansBold9pt7b, b);
       rect(px + 8, py - 18, tw + 6, 16, WHITE);
       box(px + 8, py - 18, tw + 6, 16, stale ? GREY : BLACK);
@@ -307,38 +356,6 @@ static void draw_plot() {
       text(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN", PLOT_CX - 130, 290, GREY);
     }
   }
-}
-
-static void draw_selected_strip() {
-  if (!s_n) return;
-  const Track* t = &g_tracks[s_order[s_sel]];
-  rect(TABLE_X, 426, TABLE_W, 62, WHITE);
-  box(TABLE_X, 426, TABLE_W, 62, BLACK);
-  box(TABLE_X + 1, 427, TABLE_W - 2, 60, BLACK);
-  char b[64];
-  // Line 1: UAS ID + Status + Auth
-  snprintf(b, sizeof(b), "%.16s  %s", t->uas[0] ? t->uas : "(no id)", ui_status_name(t->status));
-  text(&FreeSansBold12pt7b, b, TABLE_X + 12, 448, BLACK);
-  if (t->auth_state) {
-    const char* a = track_auth_badge(t->auth_state);
-    text_r(&FreeSansBold9pt7b, a, TABLE_X + TABLE_W - 12, 448, t->auth_state == 4 ? BLACK : GREY);
-  }
-  // Line 2: MAC / protocol / msgs / age / dist / brg
-  uint32_t age_s = (s_now - t->last_ms) / 1000;
-  char age_buf[16];
-  if (age_s < 10) snprintf(age_buf, sizeof(age_buf), "now");
-  else if (age_s < 60) snprintf(age_buf, sizeof(age_buf), "%lus", (unsigned long)age_s);
-  else snprintf(age_buf, sizeof(age_buf), "%lum", (unsigned long)(age_s / 60));
-
-  char dist_buf[24] = "";
-  if (g_home_set && t->has_pos) {
-    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
-    snprintf(dist_buf, sizeof(dist_buf), "  %s %03d°", r, (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
-  }
-  snprintf(b, sizeof(b), "%s%s%s  %u msgs  %s%s",
-           (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
-           t->msgs, age_buf, dist_buf);
-  text(&FreeSansBold9pt7b, b, TABLE_X + 12, 474, BLACK);
 }
 
 
@@ -523,7 +540,7 @@ static void draw_map() {
       double hr = t->heading * M_PI / 180;
       epd_draw_line(x, y, x + (int)(sin(hr) * 20), y - (int)(cos(hr) * 20), BLACK, s_fb);
     }
-    snprintf(b, sizeof(b), "%.10s", t->uas[0] ? t->uas : "?");
+    snprintf(b, sizeof(b), "%s", uas_tail(t->uas, 8));
     int tw = text_w(&FreeSansBold9pt7b, b);
     rect(x + 10, y - 20, tw + 8, 18, WHITE);
     box(x + 10, y - 20, tw + 8, 18, stale ? GREY : BLACK);
@@ -565,7 +582,7 @@ static void draw_map() {
 
   UiSummary sm; ui_summarize(&sm, s_now);
   draw_header(sm, nullptr);
-  draw_footer(sm, "btn: table   hold: spec");
+  draw_footer(sm, !s_map_touched ? "tap marker: select · tap: recentre · drag: pan" : "tap or button: table · hold: spectrum");
 }
 
 static void refresh(bool force_full) {
@@ -591,8 +608,7 @@ static void draw_board(bool force_full) {
   draw_header(sm, nullptr);
   draw_table();
   draw_plot();
-  draw_selected_strip();
-  draw_footer(sm, s_n > 1 ? "btn: next / map   hold: spec" : "btn: map   hold: spec");
+  draw_footer(sm, "tap a row · button: next contact · hold: spectrum");
   refresh(force_full || sm.alert != s_alert_prev);
   s_alert_prev = sm.alert;
 }
@@ -638,9 +654,26 @@ static void draw_spectrum() {
   char b[32];
   snprintf(b, sizeof(b), "%d dBm", top); text(&FreeSansBold9pt7b, b, X0 + 6, Y0 + 18, BLACK);
   snprintf(b, sizeof(b), "%d dBm", bot); text(&FreeSansBold9pt7b, b, X0 + 6, Y0 + PH - 8, BLACK);
-  const char* L[] = { "850", "868", "890", "915", "930" };
-  for (int i = 0; i < 5; i++) text(&FreeSansBold9pt7b, L[i], X0 + i * (PW / 4) - (i == 4 ? 30 : 0), Y0 + PH + 18, BLACK);
-  draw_footer(sm, "tap / btn: back");
+  struct FreqMark { int freq; const char* label; } FREQS[] = {
+    { 850, "850" }, { 868, "868" }, { 890, "890" }, { 915, "915" }, { 930, "930" }
+  };
+  for (const auto& fm : FREQS) {
+    int fx = X0 + (fm.freq - 850) * PW / 80;
+    // Tick mark inside the plot box
+    epd_draw_line(fx, Y0 + PH - 6, fx, Y0 + PH, BLACK, s_fb);
+    // Light grid line through the spectrum box
+    if (fx > X0 && fx < X0 + PW) {
+      for (int gy = Y0 + 4; gy < Y0 + PH - 6; gy += 6) {
+        epd_draw_pixel(fx, gy, LIGHT, s_fb);
+      }
+    }
+    int tw = text_w(&FreeSansBold9pt7b, fm.label);
+    int lx = fx - tw / 2;
+    if (lx < X0) lx = X0;
+    if (lx + tw > X0 + PW) lx = X0 + PW - tw;
+    text(&FreeSansBold9pt7b, fm.label, lx, Y0 + PH + 18, BLACK);
+  }
+  draw_footer(sm, "tap or button: back");
   refresh(false);
 }
 
@@ -734,13 +767,14 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       }
     }
     if (!s_map) {
-      if (tap_y >= 80 + 26 && tap_y < 420 && tap_x < TABLE_X + TABLE_W) {          // a table row
-        int k = (tap_y - (80 + 26)) / ROW_H;
+      if (tap_y >= 104 && tap_y < 104 + ROWS * ROW_H && tap_x < TABLE_X + TABLE_W) {          // a table row
+        int k = (tap_y - 104) / ROW_H;
         if (k < s_n) { s_sel = k; s_sig_prev = 0; }
       } else if (tap_x > 560 && tap_y > 70 && tap_y < 496) {        // the plot: go to the map
         s_map = true; s_sig_prev = 0; draw_board(true); return;
       }
     } else {
+      s_map_touched = true;
       if (tap_x >= W - 56 && tap_y >= MAP_Y0 + 56 && tap_y < MAP_Y0 + 56 + 110) {   // zoom boxes
         int dz = tap_y < MAP_Y0 + 56 + 54 ? 1 : -1;
         int nz = s_cam_z + dz;
@@ -768,6 +802,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     }
   }
   if ((drag_dx || drag_dy) && s_map && !s_spec) {
+    s_map_touched = true;
     s_cam_wx -= drag_dx; s_cam_wy -= drag_dy; s_cam_manual = true; s_cam_manual_ms = now; s_sig_prev = 0;
   }
   if (s_cam_manual && now - s_cam_manual_ms > 120000) { s_cam_manual = false; s_sig_prev = 0; }
