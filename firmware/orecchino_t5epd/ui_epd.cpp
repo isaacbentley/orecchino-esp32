@@ -49,6 +49,11 @@ static uint32_t s_last_full = 0;
 static int s_partials = 0;
 static uint32_t s_sig_prev = 0;
 static UiAlert s_alert_prev = UI_QUIET;
+static uint8_t s_mode = UI_MODE_RX;
+static bool s_confirm_switch = false;
+static uint8_t s_target_mode = UI_MODE_RX;
+
+uint8_t ui_get_mode() { return s_mode; }
 
 static const char* uas_tail(const char* s, size_t max_len = 8) {
   if (!s || !*s) return "?";
@@ -117,6 +122,19 @@ static void build_order() {
 static uint32_t signature() {
   uint32_t h = 2166136261u;
   auto mix = [&](uint32_t v) { h ^= v; h *= 16777619u; };
+  mix(s_mode);
+  mix(s_confirm_switch);
+  if (s_mode == UI_MODE_TX) {
+    mix(txui_running());
+    mix(txui_emergency());
+    int n = txui_count();
+    for (int i = 0; i < n; i++) {
+      mix(txui_enabled(i));
+      mix(txui_sent(i) / 25);
+    }
+    mix(s_batt / 5);
+    return h;
+  }
   for (int k = 0; k < s_n; k++) {
     const Track* t = &g_tracks[s_order[k]];
     for (const char* p = t->uas; *p; p++) mix((uint8_t)*p);
@@ -141,34 +159,41 @@ static void draw_header(const UiSummary& sm, const char* title) {
 
   // View Switcher Tabs (when not in spectrum)
   if (!title && !loud) {
-    const int bx = 310, by = 12, bw = 230, bh = 46, mid = bx + bw / 2;
+    const int bx = 270, by = 12, bw = 264, bh = 46;
     // Outer crisp 2px border around the entire segmented control
     box(bx, by, bw, bh, BLACK);
     box(bx + 1, by + 1, bw - 2, bh - 2, BLACK);
-    // Vertical 2px divider between TABLE and MAP
-    rect(mid - 1, by, 2, bh, BLACK);
+    // Vertical 2px dividers between TABLE, MAP, and TX
+    rect(bx + 88 - 1, by, 2, bh, BLACK);
+    rect(bx + 176 - 1, by, 2, bh, BLACK);
 
-    // Left Tab: TABLE
+    // Tab 1: TABLE (bx .. bx + 88)
     int tw_table = text_w(&FreeSansBold12pt7b, "TABLE");
-    int tx_table = bx + ((bw / 2) - tw_table) / 2;
+    int tx_table = bx + (88 - tw_table) / 2;
     if (!s_map) {
-      rect(bx + 2, by + 2, (bw / 2) - 3, bh - 4, BLACK);
+      rect(bx + 2, by + 2, 85, bh - 4, BLACK);
       text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, WHITE);
     } else {
-      rect(bx + 2, by + 2, (bw / 2) - 3, bh - 4, WHITE);
+      rect(bx + 2, by + 2, 85, bh - 4, WHITE);
       text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, BLACK);
     }
 
-    // Right Tab: MAP
+    // Tab 2: MAP (bx + 88 .. bx + 176)
     int tw_map = text_w(&FreeSansBold12pt7b, "MAP");
-    int tx_map = mid + 1 + ((bw / 2) - tw_map) / 2;
+    int tx_map = bx + 88 + 1 + (87 - tw_map) / 2;
     if (s_map) {
-      rect(mid + 1, by + 2, (bw / 2) - 3, bh - 4, BLACK);
+      rect(bx + 88 + 1, by + 2, 86, bh - 4, BLACK);
       text(&FreeSansBold12pt7b, "MAP", tx_map, 41, WHITE);
     } else {
-      rect(mid + 1, by + 2, (bw / 2) - 3, bh - 4, WHITE);
+      rect(bx + 88 + 1, by + 2, 86, bh - 4, WHITE);
       text(&FreeSansBold12pt7b, "MAP", tx_map, 41, BLACK);
     }
+
+    // Tab 3: TX (bx + 176 .. bx + 264)
+    int tw_tx = text_w(&FreeSansBold12pt7b, "TX");
+    int tx_tx = bx + 176 + 1 + (87 - tw_tx) / 2;
+    rect(bx + 176 + 1, by + 2, 86, bh - 4, WHITE);
+    text(&FreeSansBold12pt7b, "TX", tx_tx, 41, BLACK);
   }
 
   int xr = W - 20;
@@ -205,15 +230,21 @@ static void draw_table() {
   const int y0 = 80;
   const GFXfont* f9 = &FreeSansBold9pt7b;
   bool has_gps = periph_gps_detected();
+  bool has_pos = has_gps || g_home_set;
   struct Col { const char* l; int x; };
   if (has_gps) {
     Col cols[] = {
       {"ID", 26}, {"RSSI", 226}, {"HGT", 286}, {"SPD", 346}, {"RANGE", 406}, {"BRG", 466}, {"AUTH", 512}
     };
     for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
-  } else {
+  } else if (has_pos) {
     Col cols[] = {
       {"ID", 26}, {"RSSI", 235}, {"HGT", 300}, {"SPD", 365}, {"RANGE", 430}, {"AUTH", 510}
+    };
+    for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
+  } else {
+    Col cols[] = {
+      {"ID", 26}, {"RSSI", 260}, {"HGT", 335}, {"SPD", 410}, {"AUTH", 495}
     };
     for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
   }
@@ -234,7 +265,8 @@ static void draw_table() {
     }
     if (danger && !sel) box(TABLE_X + 8, y - 2, TABLE_W - 8, ROW_H - 2, BLACK);
 
-    int bx = has_gps ? 226 : 235, bw = has_gps ? 42 : 45;
+    int bx = has_gps ? 226 : (has_pos ? 235 : 260);
+    int bw = has_gps ? 42 : (has_pos ? 45 : 50);
     int max_id_w = bx - (TABLE_X + 8) - 10;
 
     // Line 1: ID string with pixel-width truncation to guarantee it never overflows into RSSI
@@ -296,14 +328,14 @@ static void draw_table() {
     rect(bx, y + 6, (int)(bw * ui_rssi01(t->rssi)), 8, ink);
     char rb[16]; snprintf(rb, sizeof(rb), "%d", t->rssi); text(f9, rb, bx, y + 34, ink);
 
-    int hgt_x = has_gps ? 286 : 300;
+    int hgt_x = has_gps ? 286 : (has_pos ? 300 : 335);
     if (!isnan(t->height)) { char hb[16]; snprintf(hb, sizeof(hb), "%dm", (int)t->height); text(f9, hb, hgt_x, y + 20, ink); }
 
-    int spd_x = has_gps ? 346 : 365;
+    int spd_x = has_gps ? 346 : (has_pos ? 365 : 410);
     if (!isnan(t->speed))  { char sb[16]; snprintf(sb, sizeof(sb), "%.0f", t->speed);       text(f9, sb, spd_x, y + 20, ink); }
 
-    int rng_x = has_gps ? 406 : 430;
-    if (g_home_set && t->has_pos) {
+    if (has_pos && t->has_pos) {
+      int rng_x = has_gps ? 406 : 430;
       char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
       text(f9, r, rng_x, y + 20, ink);
       if (has_gps) {
@@ -314,7 +346,7 @@ static void draw_table() {
     if (t->auth_state) {
       const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
                     : t->auth_state == 2 ? "?" : "...";       // column is headed AUTH
-      int auth_x = has_gps ? 512 : 510;
+      int auth_x = has_gps ? 512 : (has_pos ? 510 : 495);
       if (!sel && t->auth_state == 4) {
         rect(auth_x - 4, y + 4, 34, 18, BLACK);
         text(f9, a, auth_x, y + 17, WHITE);
@@ -648,11 +680,193 @@ static void refresh(bool force_full) {
   if (full) { s_partials = 0; s_last_full = s_now; } else s_partials++;
 }
 
+static void draw_switch_modal() {
+  int mw = 580, mh = 260;
+  int mx = (W - mw) / 2, my = (H - mh) / 2;
+  // White card with thick multi-stroke border
+  rect(mx, my, mw, mh, WHITE);
+  box(mx, my, mw, mh, BLACK);
+  box(mx + 1, my + 1, mw - 2, mh - 2, BLACK);
+  box(mx + 3, my + 3, mw - 6, mh - 6, BLACK);
+
+  const char* title = (s_target_mode == UI_MODE_TX) ? "SWITCH TO TEST BEACON?" : "SWITCH TO RECEIVER?";
+  int tw = text_w(&FreeSansBold18pt7b, title);
+  text(&FreeSansBold18pt7b, title, mx + (mw - tw) / 2, my + 48, BLACK);
+
+  const char* l1 = (s_target_mode == UI_MODE_TX) ?
+    "The board will reboot into Test Beacon mode." :
+    "The board will reboot into Remote ID Receiver mode.";
+  const char* l2 = (s_target_mode == UI_MODE_TX) ?
+    "Radios will reinitialize to transmit test signals on 2.4 GHz." :
+    "Radios will listen for Remote ID broadcasts on BLE and Wi-Fi.";
+
+  text(&FreeSansBold9pt7b, l1, mx + (mw - text_w(&FreeSansBold9pt7b, l1)) / 2, my + 92, BLACK);
+  text(&FreeSansBold9pt7b, l2, mx + (mw - text_w(&FreeSansBold9pt7b, l2)) / 2, my + 118, GREY);
+
+  int bw = 220, bh = 54, by = my + 164;
+  int bx_ok = mx + 45;
+  int bx_can = mx + mw - 45 - bw;
+
+  // OK button (solid black)
+  rect(bx_ok, by, bw, bh, BLACK);
+  const char* ok_txt = (s_target_mode == UI_MODE_TX) ? "REBOOT TO TX" : "REBOOT TO RX";
+  text(&FreeSansBold12pt7b, ok_txt, bx_ok + (bw - text_w(&FreeSansBold12pt7b, ok_txt)) / 2, by + 35, WHITE);
+
+  // Cancel button (outline)
+  box(bx_can, by, bw, bh, BLACK);
+  box(bx_can + 1, by + 1, bw - 2, bh - 2, BLACK);
+  text(&FreeSansBold12pt7b, "CANCEL", bx_can + (bw - text_w(&FreeSansBold12pt7b, "CANCEL")) / 2, by + 35, BLACK);
+}
+
+static void draw_tx() {
+  bool running = txui_running();
+  rect(0, 0, W, 70, running ? BLACK : WHITE);
+  if (!running) rect(0, 68, W, 2, BLACK);
+  uint8_t fg = running ? WHITE : BLACK, mut = running ? LIGHT : GREY;
+
+  // Headline
+  text(&FreeSansBold18pt7b, running ? "TEST BEACON  ON AIR" : "TEST BEACON  PAUSED", TABLE_X, 48, fg);
+
+  // Status tally
+  int n = txui_count();
+  int on = 0;
+  uint32_t total_sent = 0;
+  for (int i = 0; i < n; i++) {
+    if (txui_enabled(i)) on++;
+    total_sent += txui_sent(i);
+  }
+  char st_b[48];
+  snprintf(st_b, sizeof(st_b), "%d/%d ACTIVE  •  %lu PKTS", on, n, (unsigned long)total_sent);
+  text(&FreeSansBold9pt7b, st_b, 410, 45, mut);
+
+  // Battery and RX mode button on right
+  int xr = W - 170;
+  if (s_batt >= 0) {
+    char bb[16]; snprintf(bb, sizeof(bb), "%d%%", s_batt);
+    text_r(&FreeSansBold12pt7b, bb, xr, 44, mut);
+  }
+
+  // [ RX MODE ] button
+  const int rx_btn_w = 130, rx_btn_h = 46, rx_btn_x = W - 150, rx_btn_y = 12;
+  box(rx_btn_x, rx_btn_y, rx_btn_w, rx_btn_h, fg);
+  box(rx_btn_x + 1, rx_btn_y + 1, rx_btn_w - 2, rx_btn_h - 2, fg);
+  int tw_rx = text_w(&FreeSansBold12pt7b, "RX MODE");
+  text(&FreeSansBold12pt7b, "RX MODE", rx_btn_x + (rx_btn_w - tw_rx) / 2, 41, fg);
+
+  // Master Controls Row (y: 78..138)
+  rect(TABLE_X, 138, W - TABLE_X * 2, 2, BLACK);
+
+  // Button 1: Transmit [ON / OFF]
+  int tx_w = 210, tx_h = 46, tx_x = 20, tx_y = 82;
+  if (running) {
+    rect(tx_x, tx_y, tx_w, tx_h, BLACK);
+    const char* lbl = "TRANSMIT [ON]";
+    text(&FreeSansBold12pt7b, lbl, tx_x + (tx_w - text_w(&FreeSansBold12pt7b, lbl)) / 2, tx_y + 30, WHITE);
+  } else {
+    box(tx_x, tx_y, tx_w, tx_h, BLACK);
+    box(tx_x + 1, tx_y + 1, tx_w - 2, tx_h - 2, BLACK);
+    const char* lbl = "TRANSMIT [OFF]";
+    text(&FreeSansBold12pt7b, lbl, tx_x + (tx_w - text_w(&FreeSansBold12pt7b, lbl)) / 2, tx_y + 30, BLACK);
+  }
+
+  // Button 2: Emergency [ON / OFF]
+  bool em = txui_emergency();
+  int em_w = 230, em_h = 46, em_x = 245, em_y = 82;
+  if (em) {
+    rect(em_x, em_y, em_w, em_h, BLACK);
+    const char* lbl = "EMERGENCY [ON]";
+    text(&FreeSansBold12pt7b, lbl, em_x + (em_w - text_w(&FreeSansBold12pt7b, lbl)) / 2, em_y + 30, WHITE);
+  } else {
+    box(em_x, em_y, em_w, em_h, BLACK);
+    box(em_x + 1, em_y + 1, em_w - 2, em_h - 2, BLACK);
+    const char* lbl = "EMERGENCY [OFF]";
+    text(&FreeSansBold12pt7b, lbl, em_x + (em_w - text_w(&FreeSansBold12pt7b, lbl)) / 2, em_y + 30, BLACK);
+  }
+
+  // Button 3: [ ALL ON ]
+  int aon_w = 115, aon_h = 46, aon_x = 490, aon_y = 82;
+  box(aon_x, aon_y, aon_w, aon_h, BLACK);
+  box(aon_x + 1, aon_y + 1, aon_w - 2, aon_h - 2, BLACK);
+  text(&FreeSansBold12pt7b, "ALL ON", aon_x + (aon_w - text_w(&FreeSansBold12pt7b, "ALL ON")) / 2, aon_y + 30, BLACK);
+
+  // Button 4: [ ALL OFF ]
+  int aoff_w = 120, aoff_h = 46, aoff_x = 620, aoff_y = 82;
+  box(aoff_x, aoff_y, aoff_w, aoff_h, BLACK);
+  box(aoff_x + 1, aoff_y + 1, aoff_w - 2, aoff_h - 2, BLACK);
+  text(&FreeSansBold12pt7b, "ALL OFF", aoff_x + (aoff_w - text_w(&FreeSansBold12pt7b, "ALL OFF")) / 2, aoff_y + 30, BLACK);
+
+  // Band label on right
+  text(&FreeSansBold9pt7b, "CH 6  •  2.4 GHz", 765, 102, BLACK);
+  text(&FreeSansBold9pt7b, "TEST BENCH RADIATOR", 765, 120, GREY);
+
+  // 10 Transmit Paths Grid (y: 146..488)
+  const int card_w = 450, card_h = 58, row_pitch = 68;
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+
+  for (int col = 0; col < 2; col++) {
+    int x0 = col == 0 ? 20 : 490;
+    for (int r = 0; r < 5; r++) {
+      int i = col * 5 + r;
+      if (i >= n) break;
+      int y = 146 + r * row_pitch;
+      bool path_on = txui_enabled(i);
+
+      // Card outer box
+      box(x0, y, card_w, card_h, path_on ? BLACK : LIGHT);
+      if (path_on) box(x0 + 1, y + 1, card_w - 2, card_h - 2, BLACK);
+
+      // Left toggle pill: [ ON ] / [ OFF ]
+      int pw = 58, ph = 38, px = x0 + 10, py = y + 10;
+      if (path_on) {
+        rect(px, py, pw, ph, BLACK);
+        text(f12, "ON", px + (pw - text_w(f12, "ON")) / 2, py + 26, WHITE);
+      } else {
+        box(px, py, pw, ph, BLACK);
+        text(f12, "OFF", px + (pw - text_w(f12, "OFF")) / 2, py + 26, GREY);
+      }
+
+      // Carrier badge
+      const char* carr = txui_carrier(i);
+      int cw = text_w(f9, carr) + 12;
+      int cx = x0 + 78, cy = y + 10;
+      rect(cx, cy, cw, 18, path_on ? BLACK : GREY);
+      text(f9, carr, cx + 6, cy + 14, WHITE);
+
+      // UAS ID
+      text(f12, txui_id(i), cx + cw + 10, y + 26, path_on ? BLACK : GREY);
+
+      // Subtitle (self desc)
+      text(f9, txui_desc(i), cx, y + 46, path_on ? BLACK : GREY);
+
+      // Packet count on right
+      char cb[20];
+      snprintf(cb, sizeof(cb), "%lu pkts", (unsigned long)txui_sent(i));
+      text_r(f9, cb, x0 + card_w - 12, y + 34, path_on ? BLACK : GREY);
+    }
+  }
+
+  // Footer (y: 496..540)
+  rect(0, 496, W, 44, WHITE);
+  rect(0, 496, W, 2, BLACK);
+  text(f9, running ? "TRANSMITTING TEST BURSTS · DO NOT RADIATE NEAR LIVE AIRSPACE" :
+                     "TRANSMIT PAUSED · CONFIGURE PATHS AND TAP [TRANSMIT] TO RADIATE",
+       TABLE_X, 524, BLACK);
+  text_r(f9, "tap card to toggle · hold BOOT: rx mode", W - 20, 524, GREY);
+}
+
 static void draw_board(bool force_full) {
   epd_hl_set_all_white(&s_hl);
+  if (s_mode == UI_MODE_TX) {
+    draw_tx();
+    if (s_confirm_switch) draw_switch_modal();
+    refresh(force_full);
+    return;
+  }
   UiSummary sm; ui_summarize(&sm, s_now);
   if (s_map) {
     draw_map();
+    if (s_confirm_switch) draw_switch_modal();
     refresh(force_full);
     s_alert_prev = sm.alert;
     return;
@@ -661,6 +875,7 @@ static void draw_board(bool force_full) {
   draw_table();
   draw_plot();
   draw_footer(sm, "tap a row · button: next contact · hold: spectrum");
+  if (s_confirm_switch) draw_switch_modal();
   refresh(force_full || sm.alert != s_alert_prev);
   s_alert_prev = sm.alert;
 }
@@ -760,7 +975,8 @@ bool ui_set_vcom(uint16_t vcom) {
   return true;
 }
 
-bool ui_begin() {
+bool ui_begin(uint8_t mode) {
+  s_mode = mode;
   pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
   // The 1 K LUT trades a little refresh time for ~60 KB of internal RAM,
   // which the radio stacks need more than the panel does.
@@ -779,7 +995,7 @@ bool ui_begin() {
   epd_hl_set_all_white(&s_hl);
   int w_ore = text_w(&FreeSansBold24pt7b, "ORECCHINO");
   text(&FreeSansBold24pt7b, "ORECCHINO", (W - w_ore) / 2, 250, BLACK);
-  const char* sub = "Remote ID receiver  -  starting radios";
+  const char* sub = (s_mode == UI_MODE_TX) ? "Remote ID test beacon  -  starting transmitter" : "Remote ID receiver  -  starting radios";
   int w_sub = text_w(&FreeSansBold12pt7b, sub);
   text(&FreeSansBold12pt7b, sub, (W - w_sub) / 2, 300, BLACK);
   epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
@@ -809,8 +1025,14 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (!k && was && !fired && now - down > 30) tap = true;
   was = k;
 
-  // Capacitive round home button below display toggles view
+  // Capacitive round home button below display
   if (periph_home_key() && !s_spec) {
+    if (s_mode == UI_MODE_TX) {
+      txui_set_running(!txui_running());
+      s_sig_prev = 0;
+      draw_board(false);
+      return;
+    }
     s_map = !s_map;
     s_sig_prev = 0;
     draw_board(true);
@@ -841,13 +1063,134 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     }
     t_was = t;
   }
+
+  // Confirmation Modal Touch Routing
+  if (s_confirm_switch) {
+    if (tap_x >= 0) {
+      int mw = 580, mh = 260;
+      int mx = (W - mw) / 2, my = (H - mh) / 2;
+      int bw = 220, bh = 54, by = my + 164;
+      int bx_ok = mx + 45;
+      int bx_can = mx + mw - 45 - bw;
+      if (tap_y >= by && tap_y <= by + bh) {
+        if (tap_x >= bx_ok && tap_x <= bx_ok + bw) {
+          board_switch_mode(s_target_mode);
+          return;
+        } else if (tap_x >= bx_can && tap_x <= bx_can + bw) {
+          s_confirm_switch = false;
+          s_sig_prev = 0;
+          draw_board(false);
+          return;
+        }
+      } else if (tap_x < mx || tap_x > mx + mw || tap_y < my || tap_y > my + mh) {
+        // Tapped outside modal -> dismiss
+        s_confirm_switch = false;
+        s_sig_prev = 0;
+        draw_board(false);
+        return;
+      }
+    }
+    return;
+  }
+
+  // ===================== TX MODE UI & INPUT =====================
+  if (s_mode == UI_MODE_TX) {
+    if (hold) {
+      // Holding BOOT button reboots to RX mode
+      board_switch_mode(UI_MODE_RX);
+      return;
+    }
+    if (tap) {
+      // Tap BOOT button toggles transmit
+      txui_set_running(!txui_running());
+      s_sig_prev = 0;
+      draw_board(false);
+      return;
+    }
+    if (tap_x >= 0) {
+      // Top bar [ RX MODE ] button
+      if (tap_y <= 70 && tap_x >= W - 160) {
+        s_confirm_switch = true;
+        s_target_mode = UI_MODE_RX;
+        s_sig_prev = 0;
+        draw_board(false);
+        return;
+      }
+      // Master Controls Row (y: 78..138)
+      if (tap_y >= 78 && tap_y <= 138) {
+        if (tap_x >= 20 && tap_x <= 235) {
+          txui_set_running(!txui_running());
+          s_sig_prev = 0;
+          draw_board(false);
+          return;
+        } else if (tap_x >= 245 && tap_x <= 480) {
+          txui_set_emergency(!txui_emergency());
+          s_sig_prev = 0;
+          draw_board(false);
+          return;
+        } else if (tap_x >= 490 && tap_x <= 610) {
+          for (int i = 0; i < txui_count(); i++) txui_set_enabled(i, true);
+          s_sig_prev = 0;
+          draw_board(false);
+          return;
+        } else if (tap_x >= 620 && tap_x <= 745) {
+          for (int i = 0; i < txui_count(); i++) txui_set_enabled(i, false);
+          s_sig_prev = 0;
+          draw_board(false);
+          return;
+        }
+      }
+      // 10 Path cards (y: 146..488)
+      if (tap_y >= 146 && tap_y <= 488) {
+        int r = (tap_y - 146) / 68;
+        if (r >= 0 && r < 5) {
+          if (tap_x >= 20 && tap_x <= 470) {
+            int i = r;
+            if (i < txui_count()) {
+              txui_set_enabled(i, !txui_enabled(i));
+              s_sig_prev = 0;
+              draw_board(false);
+              return;
+            }
+          } else if (tap_x >= 490 && tap_x <= 940) {
+            int i = r + 5;
+            if (i < txui_count()) {
+              txui_set_enabled(i, !txui_enabled(i));
+              s_sig_prev = 0;
+              draw_board(false);
+              return;
+            }
+          }
+        }
+      }
+    }
+    // Background refresh budget in TX mode (refresh stats/packet counts every ~5s)
+    static uint32_t last_tx_check = 0;
+    if (now - last_tx_check >= 4000) {
+      last_tx_check = now;
+      uint32_t sig = signature();
+      if (sig != s_sig_prev || now - s_last_full > 300000UL) {
+        s_sig_prev = sig;
+        draw_board(false);
+      }
+    }
+    return;
+  }
+
+  // ===================== RX MODE UI & INPUT =====================
   if (tap_x >= 0 && !s_spec) {
     // Top bar view switcher tabs:
     if (tap_y <= 72) {
-      if (tap_x >= 280 && tap_x < 425) {
+      if (tap_x >= 270 && tap_x < 358) {
         if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); return; }
-      } else if (tap_x >= 425 && tap_x <= 560) {
+      } else if (tap_x >= 358 && tap_x < 446) {
         if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
+      } else if (tap_x >= 446 && tap_x <= 540) {
+        s_confirm_switch = true;
+        s_target_mode = UI_MODE_TX;
+        s_sig_prev = 0;
+        draw_board(false);
+        return;
       }
     }
     if (!s_map) {

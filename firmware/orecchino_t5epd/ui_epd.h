@@ -16,8 +16,11 @@
 #pragma once
 #include <Arduino.h>
 
-bool ui_begin();
-/// Input (BOOT button), refresh scheduling, spectrum sweep. Call every pass.
+enum UiMode : uint8_t { UI_MODE_RX = 0, UI_MODE_TX = 1 };
+
+bool ui_begin(uint8_t mode = UI_MODE_RX);
+uint8_t ui_get_mode();
+/// Input (BOOT button, touch, home key), refresh scheduling, spectrum sweep. Call every pass.
 /// sync_files: -1 when idle, else files received so far in a running sync.
 void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files);
 /// Where the map is looking (tile-eviction scoring). False if unknown.
@@ -27,3 +30,17 @@ void ui_feed_wifi(uint8_t chan, int8_t rssi);
 void ui_set_wifi_channel(uint8_t chan);
 uint16_t ui_get_vcom();
 bool     ui_set_vcom(uint16_t vcom);
+
+// Transmit core accessors provided by main sketch
+int         txui_count();
+const char* txui_id(int i);
+const char* txui_carrier(int i);
+const char* txui_desc(int i);
+bool        txui_enabled(int i);
+void        txui_set_enabled(int i, bool on);
+uint32_t    txui_sent(int i);
+bool        txui_running();
+void        txui_set_running(bool on);
+bool        txui_emergency();
+void        txui_set_emergency(bool on);
+void        board_switch_mode(uint8_t mode);
