@@ -21,12 +21,16 @@
 static const uint8_t ODID_TEST_SEED[32] =
     "orecchino test key - NOT REAL\0\0";
 
-static uint8_t g_auth_pub[32];
-static uint8_t g_auth_sec[32];
+static uint8_t s_auth_pub[32];
+static uint8_t s_auth_sec[32];
 
 static inline void odid_auth_init() {
-  memcpy(g_auth_sec, ODID_TEST_SEED, 32);
-  crypto_sign_public_key(g_auth_pub, g_auth_sec);
+  memcpy(s_auth_sec, ODID_TEST_SEED, 32);
+  crypto_sign_public_key(s_auth_pub, s_auth_sec);
+}
+
+static inline const uint8_t* odid_auth_pubkey() {
+  return s_auth_pub;
 }
 
 /// Sign `basic_id_msg` (25 bytes) plus the 4-byte little-endian timestamp.
@@ -40,7 +44,7 @@ static inline void odid_auth_sign(uint8_t* sig_out,
   buf[ODID_MSG_SIZE + 1] = (uint8_t)((timestamp >> 8) & 0xFF);
   buf[ODID_MSG_SIZE + 2] = (uint8_t)((timestamp >> 16) & 0xFF);
   buf[ODID_MSG_SIZE + 3] = (uint8_t)((timestamp >> 24) & 0xFF);
-  crypto_sign(sig_out, g_auth_sec, g_auth_pub, buf, sizeof(buf));
+  crypto_sign(sig_out, s_auth_sec, s_auth_pub, buf, sizeof(buf));
 }
 
 /// True when the signature verifies — used by the on-device self-test so a
@@ -54,5 +58,5 @@ static inline bool odid_auth_verify(const uint8_t* sig,
   buf[ODID_MSG_SIZE + 1] = (uint8_t)((timestamp >> 8) & 0xFF);
   buf[ODID_MSG_SIZE + 2] = (uint8_t)((timestamp >> 16) & 0xFF);
   buf[ODID_MSG_SIZE + 3] = (uint8_t)((timestamp >> 24) & 0xFF);
-  return crypto_check(sig, g_auth_pub, buf, sizeof(buf)) == 0;
+  return crypto_check(sig, s_auth_pub, buf, sizeof(buf)) == 0;
 }

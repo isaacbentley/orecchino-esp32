@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 PORT="${1:?usage: flash_indicator.sh /dev/cu.usbserialXXXX}"
 # LoopCore=1 keeps the app (decode/render/touch) off core 0, where the WiFi
 # and BLE stacks live — radios never wait on a map redraw.
-FQBN="esp32:esp32:esp32s3:FlashMode=qio,FlashSize=8M,PSRAM=opi,CPUFreq=240,UploadSpeed=460800,CDCOnBoot=default,LoopCore=1,EventsCore=1"
+FQBN="esp32:esp32:esp32s3:FlashMode=qio,FlashSize=8M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240,UploadSpeed=460800,CDCOnBoot=default,LoopCore=1,EventsCore=1"
 
 pkill -9 -x Orecchino 2>/dev/null || true
 sleep 1

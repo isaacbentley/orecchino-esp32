@@ -3,7 +3,7 @@
 // bring-up (Arduino_GFX + ST7701 RGB + IO expander).
 #pragma once
 #include <Arduino.h>
-#include "tracker.h"
+#include "../common/tracker.h"
 
 // Operator location pushed by the host app (defined in the sketch); used
 // for ranging readouts and as the map's default center.

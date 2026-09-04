@@ -40,22 +40,8 @@ void display_force_redraw() {}
 #define TILE_ZMAX  15
 #define HOME_LAT   37.7749
 #define HOME_LON   -122.4194
-// A "contact" means heard within the last minute (RID transmits at 1-3 Hz);
-// anything older is history and renders freshness-grey until it expires.
-#define ACTIVE_MS  60000UL
-
-#define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
-static const uint16_t C_BG     = RGB565(0x07, 0x09, 0x0E);
-static const uint16_t C_TEXT   = RGB565(0xE2, 0xE8, 0xF0);
-static const uint16_t C_MUTED  = RGB565(0x8A, 0x99, 0xAD);
-static const uint16_t C_ACCENT = RGB565(0x35, 0xD0, 0xBA);
-static const uint16_t C_DANGER = RGB565(0xE0, 0x5A, 0x5A);
-static const uint16_t C_BAR    = RGB565(0x10, 0x14, 0x1C);
-static const uint16_t TRACK_COLORS[] = {
-  RGB565(0x00, 0xB4, 0xD8), RGB565(0xFF, 0x9D, 0x6F), RGB565(0xB7, 0x8B, 0xFF),
-  RGB565(0x6F, 0xB6, 0xFF), RGB565(0xE0, 0xA8, 0x3A), RGB565(0x7F, 0xD6, 0xA0),
-};
-#define N_TRACK_COLORS (sizeof(TRACK_COLORS) / sizeof(TRACK_COLORS[0]))
+#include "../common/ui_common.h"
+#define ACTIVE_MS  UI_ACTIVE_MS
 
 static Arduino_DataBus*       s_bus;
 static Arduino_ESP32RGBPanel* s_panel;
@@ -138,24 +124,9 @@ static void world_px(double lat, double lon, int z, double* wx, double* wy) {
   double rad = lat * M_PI / 180.0;
   *wy = (1.0 - log(tan(rad) + 1.0 / cos(rad)) / M_PI) / 2.0 * n;
 }
-// RSSI → 0…1 over a practical Remote ID window (−95 … −35 dBm)
-static double rssi01(int rssi) {
-  double v = (rssi + 95) / 60.0;
-  return v < 0 ? 0 : (v > 1 ? 1 : v);
-}
-
-static double dist_m(double la1, double lo1, double la2, double lo2) {
-  double dla = (la2 - la1) * M_PI / 180, dlo = (lo2 - lo1) * M_PI / 180;
-  double a = sin(dla / 2) * sin(dla / 2) +
-             cos(la1 * M_PI / 180) * cos(la2 * M_PI / 180) *
-             sin(dlo / 2) * sin(dlo / 2);
-  return 12742000.0 * asin(sqrt(a));
-}
-
-static void fmt_range(char* out, size_t n, double m) {
-  if (m >= 1000) snprintf(out, n, "%.1fkm", m / 1000);
-  else snprintf(out, n, "%dm", (int)m);
-}
+static inline double rssi01(int rssi) { return ui_rssi01(rssi); }
+static inline double dist_m(double la1, double lo1, double la2, double lo2) { return ui_dist_m(la1, lo1, la2, lo2); }
+static inline void fmt_range(char* out, size_t n, double m) { ui_fmt_range(out, n, m); }
 
 static void px_world(double wx, double wy, int z, double* lat, double* lon) {
   double n = 256.0 * (double)(1L << z);
@@ -402,13 +373,13 @@ static const Track* find_selected() {
 }
 
 static void draw_detail_card(const Track* t) {
-  int y0 = 320;
-  s_cv->fillRoundRect(8, y0, 416, 132, 8, C_BAR);
-  s_cv->drawRoundRect(8, y0, 416, 132, 8, C_ACCENT);
+  int y0 = 310;
+  s_cv->fillRoundRect(8, y0, 416, 142, 8, C_BAR);
+  s_cv->drawRoundRect(8, y0, 416, 142, 8, C_ACCENT);
   s_cv->setFont(&FreeSansBold9pt7b);
   s_cv->setTextSize(1);
   s_cv->setTextColor(C_TEXT);
-  s_cv->setCursor(20, y0 + 24);
+  s_cv->setCursor(20, y0 + 20);
   s_cv->print(t->uas[0] ? t->uas : "(no id)");
   s_cv->setFont(nullptr);
   s_cv->setTextSize(1);
@@ -417,36 +388,33 @@ static void draw_detail_card(const Track* t) {
   char hb[12] = "--", sb[16] = "--";
   if (!isnan(t->height)) snprintf(hb, sizeof(hb), "%d m", (int)t->height);
   if (!isnan(t->speed)) snprintf(sb, sizeof(sb), "%.1f m/s", t->speed);
-  s_cv->setCursor(20, y0 + 36);
+  s_cv->setCursor(20, y0 + 34);
   snprintf(b, sizeof(b), "rssi %d dBm   height %s   speed %s", t->rssi, hb, sb);
   s_cv->print(b);
-  s_cv->setCursor(20, y0 + 52);
+  s_cv->setCursor(20, y0 + 48);
   snprintf(b, sizeof(b), "pos %.5f, %.5f", t->lat, t->lon);
   s_cv->print(b);
-  s_cv->setCursor(20, y0 + 68);
-  const char* stat = t->status == 2 ? "airborne"
-                   : t->status == 1 ? "on ground"
-                   : t->status == 3 ? "EMERGENCY" : "unknown";
+  s_cv->setCursor(20, y0 + 62);
+  const char* stat = ui_status_name(t->status);
   snprintf(b, sizeof(b), "status %s   src %s%s%s   msgs %u", stat,
            (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
            (t->src_mask & 4) ? "B" : "", t->msgs);
   s_cv->print(b);
-  s_cv->setCursor(20, y0 + 84);
+  s_cv->setCursor(20, y0 + 76);
   snprintf(b, sizeof(b), "mac %02X:%02X:%02X:%02X:%02X:%02X   seen %lus ago",
            t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5],
            (unsigned long)((s_now_ms - t->last_ms) / 1000));
   s_cv->print(b);
+  s_cv->setCursor(20, y0 + 90);
   if (t->auth_state) {
-    s_cv->setCursor(20, y0 + 86);
-    uint16_t ac = t->auth_state == 3 ? RGB565(0x5E, 0xCB, 0x7A)
-                : t->auth_state == 4 ? C_DANGER : C_MUTED;
+    uint16_t ac = ui_auth_color(t->auth_state);
     s_cv->setTextColor(ac, C_BAR);
-    s_cv->print(t->auth_state == 3 ? "ID signature valid (not position)"
-              : t->auth_state == 4 ? "ID SIGNATURE INVALID"
-              : t->auth_state == 2 ? "signed, key not trusted"
-                                   : "signature pages incomplete");
+    s_cv->print(ui_auth_text(t->auth_state));
+  } else {
+    s_cv->setTextColor(C_MUTED, C_BAR);
+    s_cv->print("no auth");
   }
-  s_cv->setCursor(20, y0 + 100);
+  s_cv->setCursor(20, y0 + 104);
   if (g_home_set && t->has_pos) {
     char r[12];
     fmt_range(r, sizeof(r), dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
@@ -460,9 +428,9 @@ static void draw_detail_card(const Track* t) {
     s_cv->setTextColor(t->in_tfr ? C_DANGER : C_MUTED, C_BAR);
     s_cv->print(b);
   }
-  s_cv->setCursor(20, y0 + 114);
-  s_cv->setTextColor(C_MUTED, C_BAR);
-  s_cv->print("tap map to close");
+  s_cv->setCursor(20, y0 + 124);
+  s_cv->setTextColor(C_ACCENT, C_BAR);
+  s_cv->print("tap to close");
 }
 
 static void pick_auto_view() {
@@ -518,9 +486,9 @@ static void render_map() {
     int x = (int)(lround(wx) - left), y = (int)(lround(wy) - top);
     if (x < -20 || x > 500 || y < -20 || y > 500) continue;
     bool stale = s_now_ms - t->last_ms > ACTIVE_MS;
+    bool danger = ui_danger(t, s_now_ms);
     uint16_t col = stale ? C_MUTED
-                 : ((t->status == 3 || t->in_tfr)
-                        ? C_DANGER : TRACK_COLORS[i % N_TRACK_COLORS]);
+                 : (danger ? C_DANGER : TRACK_COLORS[i % N_TRACK_COLORS]);
     const Track* sel = find_selected();
     bool is_sel = (sel == t);
     s_cv->fillCircle(x, y, 6, col);
@@ -978,6 +946,11 @@ void display_tick(uint32_t now) {
     hold_fired = true;
     s_spec_mode = true;
     spectrum_reset(now);
+  } else if (btn && !hold_fired && now - btn_down_ms >= 400 && !s_spec_mode) {
+    int prog_w = (int)(480L * (now - btn_down_ms) / SPEC_HOLD_MS);
+    if (prog_w > 480) prog_w = 480;
+    s_cv->fillRect(0, 0, prog_w, 4, C_ACCENT);
+    s_cv->flush();
   }
   if (!btn && btn_was && !hold_fired) {
     if (s_spec_mode) {
