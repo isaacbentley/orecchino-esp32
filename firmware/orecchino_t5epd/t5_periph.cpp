@@ -49,6 +49,28 @@ static void rail_on() {
 }
 
 // ---- Goodix GT911 (16-bit registers, big-endian)
+static bool s_home_key = false;
+bool periph_home_key() {
+  if (s_home_key) {
+    s_home_key = false;
+    return true;
+  }
+  return false;
+}
+
+void periph_touch_reset() {
+  pinMode(TOUCH_RST_PIN, OUTPUT);
+  pinMode(PIN_TOUCH_INT, OUTPUT);
+  digitalWrite(PIN_TOUCH_INT, LOW);  // INT low -> GT911 latches address 0x5D
+  digitalWrite(TOUCH_RST_PIN, LOW);  // assert RST
+  delay(15);
+  digitalWrite(TOUCH_RST_PIN, HIGH); // release RST while INT is still LOW
+  delay(10);
+  pinMode(PIN_TOUCH_INT, INPUT);     // release INT to high-Z (GT911 drives it now)
+  pinMode(TOUCH_RST_PIN, INPUT);     // high-Z so epdiy can claim GPIO9 for LCD D8
+  delay(60);                         // wait out GT911 firmware boot
+}
+
 static bool gt911_rd(uint16_t reg, uint8_t* r, size_t n) {
   uint8_t a[2] = { (uint8_t)(reg >> 8), (uint8_t)reg };
   return wrrd(s_tp, a, 2, r, n);
@@ -58,25 +80,54 @@ static bool gt911_wr8(uint16_t reg, uint8_t v) {
   return wr(s_tp, w, 3);
 }
 static bool gt911_probe() {
-  uint8_t id[4] = {0};
+  uint8_t id[5] = {0};
   if (!gt911_rd(0x8140, id, 4)) return false;
-  if (memcmp(id, "911", 3) != 0) return false;
+  if (memcmp(id, "911", 3) != 0 && memcmp(id, "927", 3) != 0 && memcmp(id, "928", 3) != 0) return false;
   uint8_t r[4] = {0};
-  if (gt911_rd(0x8048, r, 4)) { s_tp_max_x = r[0] | (r[1] << 8); s_tp_max_y = r[2] | (r[3] << 8); }
+  if (gt911_rd(0x8048, r, 4)) {
+    int rx = r[0] | (r[1] << 8);
+    int ry = r[2] | (r[3] << 8);
+    if (rx > 0 && ry > 0) {
+      s_tp_max_x = rx;
+      s_tp_max_y = ry;
+    }
+  }
+  if (s_tp_max_x <= 0 || s_tp_max_y <= 0) {
+    s_tp_max_x = 540;
+    s_tp_max_y = 960;
+  }
   return true;
 }
-static bool gt911_read(int* x, int* y) {
+static int gt911_read_point(int* x, int* y) {
   uint8_t st = 0;
-  if (!gt911_rd(0x814E, &st, 1)) return false;
-  if (!(st & 0x80)) return false;
+  if (!gt911_rd(0x814E, &st, 1)) return 0;
+  if (!(st & 0x80)) return 0;
+
+  // The round capacitive home button below the screen sets bit 4 (HaveKey)
+  if (st & 0x10) {
+    static uint32_t s_last_home = 0;
+    uint32_t now = millis();
+    if (now - s_last_home >= 500) {
+      s_last_home = now;
+      s_home_key = true;
+      Serial.println("{\"type\":\"home_button\"}");
+    }
+  }
+
   int n = st & 0x0F;
-  bool down = false;
+  int res = 0;
   if (n > 0) {
     uint8_t p[8];
-    if (gt911_rd(0x814F, p, 8)) { *x = p[1] | (p[2] << 8); *y = p[3] | (p[4] << 8); down = true; }
+    if (gt911_rd(0x814F, p, 8)) {
+      *x = p[1] | (p[2] << 8);
+      *y = p[3] | (p[4] << 8);
+      res = 1;
+    }
+  } else {
+    res = -1; // 0 points reported = explicit finger release
   }
   gt911_wr8(0x814E, 0);
-  return down;
+  return res;
 }
 
 // ---- Goodix GT6972P ("Berlin": 32-bit registers, big-endian, 64 B chunks)
@@ -143,12 +194,9 @@ static bool gt6_read(int* x, int* y) {
 }
 
 static void touch_begin() {
-  pinMode(PIN_TOUCH_INT, INPUT_PULLUP);
-  pinMode(TOUCH_RST_PIN, OUTPUT);
-  digitalWrite(TOUCH_RST_PIN, LOW);
-  delay(2);
-  digitalWrite(TOUCH_RST_PIN, HIGH);
-  delay(120);
+  if (!present(0x5D) && !present(0x14)) {
+    periph_touch_reset();
+  }
   for (uint8_t addr : { (uint8_t)0x5D, (uint8_t)0x14 }) {
     if (!present(addr)) continue;
     s_tp = dev_add(addr);
@@ -164,20 +212,34 @@ bool periph_touch(int* x, int* y) {
   if (s_tp_kind == TP_NONE) return false;
   static bool down = false;
   static int lx = 0, ly = 0;
-  // INT low = the controller has something for us; otherwise report the
-  // last state (a held finger keeps INT pulsing at the report rate).
-  if (digitalRead(PIN_TOUCH_INT) == HIGH) {
-    static uint32_t last_hi = 0;
-    if (down && millis() - last_hi > 60) down = false;   // lifted
-    if (!down) last_hi = millis();
-    if (down) { *x = lx; *y = ly; }
-    return down;
+  static uint32_t last_touch_ms = 0;
+  uint32_t now = millis();
+
+  if (s_tp_kind == TP_GT911) {
+    int tx = 0, ty = 0;
+    int res = gt911_read_point(&tx, &ty);
+    if (res == 1) {
+      lx = tx; ly = ty;
+      down = true;
+      last_touch_ms = now;
+      *x = tx; *y = ty;
+      return true;
+    } else if (res == -1) {
+      down = false;
+      return false;
+    } else {
+      if (down && now - last_touch_ms > 60) down = false;
+      if (down) { *x = lx; *y = ly; return true; }
+      return false;
+    }
+  } else {
+    int tx = 0, ty = 0;
+    bool d = gt6_read(&tx, &ty);
+    if (d) { lx = tx; ly = ty; down = true; last_touch_ms = now; *x = tx; *y = ty; return true; }
+    if (down && now - last_touch_ms > 60) down = false;
+    if (down) { *x = lx; *y = ly; return true; }
+    return false;
   }
-  int tx, ty;
-  bool d = s_tp_kind == TP_GT911 ? gt911_read(&tx, &ty) : gt6_read(&tx, &ty);
-  if (d) { lx = tx; ly = ty; down = true; *x = tx; *y = ty; }
-  else if (down) { down = false; }
-  return down;
 }
 void periph_touch_range(int* mx, int* my) { *mx = s_tp_max_x; *my = s_tp_max_y; }
 const char* periph_touch_kind() { return s_tp_kind == TP_GT911 ? "gt911" : s_tp_kind == TP_GT6972P ? "gt6972p" : "none"; }

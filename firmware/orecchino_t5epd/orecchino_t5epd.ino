@@ -19,6 +19,7 @@
 void rx_hook_wifi_frame(uint8_t chan, int8_t rssi) { ui_feed_wifi(chan, rssi); }
 bool rx_hook_paused() { return ui_spectrum_active(); }
 bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
+  if (!strcmp(cmd, "reboot")) { ESP.restart(); return true; }
   return tile_store_host_line(cmd, line, now);
 }
 void rx_hook_track(Track*, bool, bool) {}
@@ -34,6 +35,7 @@ void setup() {
   while (!Serial && millis() - t0 < 2000) delay(10);
   Serial.println("\n[ORECCHINO] LilyGO T5 E-Paper S3 Pro starting...");
   tile_store_begin(ui_map_center);
+  periph_touch_reset();
   bool disp = ui_begin();
   Serial.printf("[ORECCHINO] E-Paper display init %s\n", disp ? "OK" : "FAILED (continuing headless)");
   periph_begin();   // after epdiy owns the I2C bus

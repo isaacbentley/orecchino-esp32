@@ -115,7 +115,7 @@ static uint32_t signature() {
     mix((uint32_t)(int32_t)(t->lat * 1e3)); mix((uint32_t)(int32_t)(t->lon * 1e3));
     mix(t->status); mix(t->auth_state); mix(t->in_tfr); mix(ui_stale(t, s_now));
   }
-  mix(s_n); mix(s_sel); mix(g_seen_count / 10); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
+  mix(s_n); mix(s_sel); mix(g_seen_count / 100); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
   mix(s_map); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
   mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
   return h;
@@ -174,14 +174,14 @@ static void draw_header(const UiSummary& sm, const char* title) {
 
 static void draw_footer(const UiSummary& sm, const char* hint) {
   rect(0, 496, W, 44, WHITE);
-  rect(0, 496, W, 1, GREY);
+  rect(0, 496, W, 2, BLACK);
   char b[64];
   if (sm.newest_age_s == UINT32_MAX) snprintf(b, sizeof(b), "SCANNING");
   else if (sm.newest_age_s < 10) snprintf(b, sizeof(b), "ACTIVE RX");
   else if (sm.newest_age_s < 60) snprintf(b, sizeof(b), "RX <1m");
   else snprintf(b, sizeof(b), "RX %lum ago", (unsigned long)(sm.newest_age_s / 60));
-  text(&FreeSansBold9pt7b, b, TABLE_X, 524, GREY);
-  text_r(&FreeSansBold9pt7b, hint, W - 20, 524, GREY);
+  text(&FreeSansBold9pt7b, b, TABLE_X, 524, BLACK);
+  text_r(&FreeSansBold9pt7b, hint, W - 20, 524, BLACK);
 }
 
 static void draw_table() {
@@ -191,8 +191,8 @@ static void draw_table() {
   struct Col { const char* l; int x; } COLS[] = {
     {"ID", 26}, {"RSSI", 200}, {"HGT", 280}, {"SPD", 345}, {"RANGE", 405}, {"BRG", 465}, {"AUTH", 510}
   };
-  for (auto& c : COLS) text(f9, c.l, c.x, y0 + 16, GREY);
-  rect(TABLE_X, y0 + 22, TABLE_W, 1, GREY);
+  for (auto& c : COLS) text(f9, c.l, c.x, y0 + 16, BLACK);
+  rect(TABLE_X, y0 + 22, TABLE_W, 2, BLACK);
   rect(565, 76, 1, 416, LIGHT);  // vertical divider between table and right board
 
   for (int k = 0; k < ROWS && k < s_n; k++) {
@@ -200,7 +200,10 @@ static void draw_table() {
     int y = y0 + 26 + k * ROW_H;
     bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now), sel = k == s_sel;
     uint8_t ink = stale ? GREY : BLACK;
-    if (sel) rect(TABLE_X, y, 4, ROW_H - 4, BLACK);
+    if (sel) {
+      rect(TABLE_X, y, 6, ROW_H - 4, BLACK);
+      box(TABLE_X + 6, y, TABLE_W - 6, ROW_H - 4, BLACK);
+    }
     if (danger) box(TABLE_X + 8, y - 2, TABLE_W - 8, ROW_H - 2, BLACK);
     char b[32];
     snprintf(b, sizeof(b), "%.14s", t->uas[0] ? t->uas : "(no id)");
@@ -278,26 +281,29 @@ static void draw_plot() {
   } else {
     // No operator fix: Signal Strength Ladder (no circles underneath!)
     text(&FreeSansBold12pt7b, "PROXIMITY (RSSI)", PLOT_CX - PLOT_R, 106, BLACK);
-    text(&FreeSansBold9pt7b, "NO OPERATOR FIX  •  TAP FOR MAP", PLOT_CX - PLOT_R, 126, GREY);
+    text(&FreeSansBold9pt7b, "NO OPERATOR FIX  •  TAP FOR MAP", PLOT_CX - PLOT_R, 126, BLACK);
     int y = 144;
     for (int k = 0; k < s_n && k < 7; k++) {
       const Track* t = &g_tracks[s_order[k]];
       bool sel = k == s_sel;
-      if (sel) rect(PLOT_CX - PLOT_R - 4, y, 4, 38, BLACK);
+      if (sel) {
+        rect(PLOT_CX - PLOT_R - 4, y, 6, 38, BLACK);
+        box(PLOT_CX - PLOT_R + 4, y, PLOT_R * 2 - 4, 38, BLACK);
+      }
       char b[32];
       snprintf(b, sizeof(b), "%.14s", t->uas[0] ? t->uas : "(no id)");
-      text(&FreeSansBold9pt7b, b, PLOT_CX - PLOT_R + 6, y + 16, BLACK);
+      text(&FreeSansBold9pt7b, b, PLOT_CX - PLOT_R + 10, y + 16, BLACK);
       snprintf(b, sizeof(b), "%d dBm", t->rssi);
-      text_r(&FreeSansBold9pt7b, b, PLOT_CX + PLOT_R, y + 16, GREY);
+      text_r(&FreeSansBold9pt7b, b, PLOT_CX + PLOT_R - 4, y + 16, BLACK);
 
-      int bw = PLOT_R * 2 - 6;
-      box(PLOT_CX - PLOT_R + 6, y + 22, bw, 10, GREY);
+      int bw = PLOT_R * 2 - 14;
+      box(PLOT_CX - PLOT_R + 10, y + 22, bw, 10, BLACK);
       int fill = (int)(bw * ui_rssi01(t->rssi));
-      if (fill > 0) rect(PLOT_CX - PLOT_R + 6, y + 22, fill, 10, ui_stale(t, s_now) ? GREY : BLACK);
+      if (fill > 0) rect(PLOT_CX - PLOT_R + 10, y + 22, fill, 10, ui_stale(t, s_now) ? GREY : BLACK);
       y += 46;
     }
     if (!s_n) {
-      text(&FreeSansBold12pt7b, "WAITING FOR SIGNALS", PLOT_CX - 100, 260, GREY);
+      text(&FreeSansBold12pt7b, "WAITING FOR SIGNALS", PLOT_CX - 100, 260, BLACK);
       text(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN", PLOT_CX - 130, 290, GREY);
     }
   }
@@ -307,7 +313,8 @@ static void draw_selected_strip() {
   if (!s_n) return;
   const Track* t = &g_tracks[s_order[s_sel]];
   rect(TABLE_X, 426, TABLE_W, 62, WHITE);
-  box(TABLE_X, 426, TABLE_W, 62, GREY);
+  box(TABLE_X, 426, TABLE_W, 62, BLACK);
+  box(TABLE_X + 1, 427, TABLE_W - 2, 60, BLACK);
   char b[64];
   // Line 1: UAS ID + Status + Auth
   snprintf(b, sizeof(b), "%.16s  %s", t->uas[0] ? t->uas : "(no id)", ui_status_name(t->status));
@@ -331,7 +338,7 @@ static void draw_selected_strip() {
   snprintf(b, sizeof(b), "%s%s%s  %u msgs  %s%s",
            (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
            t->msgs, age_buf, dist_buf);
-  text(&FreeSansBold9pt7b, b, TABLE_X + 12, 474, GREY);
+  text(&FreeSansBold9pt7b, b, TABLE_X + 12, 474, BLACK);
 }
 
 
@@ -469,9 +476,10 @@ static void draw_map() {
     text(&FreeSansBold9pt7b, "E", cx + 246, cy + 4, GREY);
 
     // Pill badge: Tactical basemap
-    rect(20, MAP_Y0 + 8, 250, 26, WHITE);
-    box(20, MAP_Y0 + 8, 250, 26, GREY);
-    text(&FreeSansBold9pt7b, "TACTICAL GRID (NO TILES)", 30, MAP_Y0 + 26, GREY);
+    rect(20, MAP_Y0 + 8, 220, 28, WHITE);
+    box(20, MAP_Y0 + 8, 220, 28, BLACK);
+    box(21, MAP_Y0 + 9, 218, 26, BLACK);
+    text(&FreeSansBold9pt7b, "TACTICAL GRID", 32, MAP_Y0 + 26, BLACK);
 
     if (!s_n && !g_home_set) {
       rect(cx - 160, cy - 28, 320, 56, WHITE);
@@ -481,8 +489,9 @@ static void draw_map() {
     }
   } else {
     // Raster tiles present
-    rect(20, MAP_Y0 + 8, 120, 26, WHITE);
-    box(20, MAP_Y0 + 8, 120, 26, GREY);
+    rect(20, MAP_Y0 + 8, 130, 28, WHITE);
+    box(20, MAP_Y0 + 8, 130, 28, BLACK);
+    box(21, MAP_Y0 + 9, 128, 26, BLACK);
     char b[32]; snprintf(b, sizeof(b), "MAP  Z%d", s_cam_z);
     text(&FreeSansBold9pt7b, b, 30, MAP_Y0 + 26, BLACK);
   }
@@ -527,13 +536,15 @@ static void draw_map() {
   double bar_m = m_per_px * 100;
   if (bar_m >= 1000) snprintf(b, sizeof(b), "%.1f km", bar_m / 1000); else snprintf(b, sizeof(b), "%d m", (int)bar_m);
   rect(20, MAP_Y0 + MAP_H - 32, 160, 26, WHITE);
-  box(20, MAP_Y0 + MAP_H - 32, 160, 26, GREY);
+  box(20, MAP_Y0 + MAP_H - 32, 160, 26, BLACK);
+  box(21, MAP_Y0 + MAP_H - 31, 158, 24, BLACK);
   rect(28, MAP_Y0 + MAP_H - 16, 80, 4, BLACK);
   text(&FreeSansBold9pt7b, b, 114, MAP_Y0 + MAP_H - 14, BLACK);
 
   // Compass Rose top-right
   rect(W - 48, MAP_Y0 + 8, 36, 36, WHITE);
-  box(W - 48, MAP_Y0 + 8, 36, 36, GREY);
+  box(W - 48, MAP_Y0 + 8, 36, 36, BLACK);
+  box(W - 47, MAP_Y0 + 9, 34, 34, BLACK);
   text(&FreeSansBold12pt7b, "N", W - 38, MAP_Y0 + 32, BLACK);
 
   // touch zoom boxes, right edge
@@ -541,6 +552,7 @@ static void draw_map() {
     int by = MAP_Y0 + 56 + i * 54;
     rect(W - 54, by, 44, 44, WHITE);
     box(W - 54, by, 44, 44, BLACK);
+    box(W - 53, by + 1, 42, 42, BLACK);
     text(&FreeSansBold18pt7b, i ? "-" : "+", W - 40, by + 32, BLACK);
   }
   if (s_cam_manual) {
@@ -553,11 +565,14 @@ static void draw_map() {
 
   UiSummary sm; ui_summarize(&sm, s_now);
   draw_header(sm, nullptr);
-  draw_footer(sm, "button: table   hold: spectrum");
+  draw_footer(sm, "btn: table   hold: spec");
 }
 
 static void refresh(bool force_full) {
-  bool full = force_full || s_partials >= 8 || (s_now - s_last_full > 300000UL);
+  // E-Paper Best Practice: Full DC-balanced GC16 refresh on view changes,
+  // alert state transitions, or periodically every 12 partial cycles / 3 minutes
+  // to eliminate residual charge and ghosting.
+  bool full = force_full || s_partials >= 12 || (s_now - s_last_full > 180000UL);
   epd_poweron();
   epd_hl_update_screen(&s_hl, full ? MODE_GC16 : MODE_GL16, TEMP_C);
   epd_poweroff();
@@ -577,7 +592,7 @@ static void draw_board(bool force_full) {
   draw_table();
   draw_plot();
   draw_selected_strip();
-  draw_footer(sm, s_n > 1 ? "button: next / map   hold: spectrum" : "button: map   hold: spectrum");
+  draw_footer(sm, s_n > 1 ? "btn: next / map   hold: spec" : "btn: map   hold: spec");
   refresh(force_full || sm.alert != s_alert_prev);
   s_alert_prev = sm.alert;
 }
@@ -596,19 +611,20 @@ static void draw_spectrum() {
     else s_a24[c - 1] -= 1.0f;
     if (s_a24[c - 1] < -115) s_a24[c - 1] = -115;
   }
-  text(&FreeSansBold9pt7b, "2.4 GHz CHANNELS", 20, 100, GREY);
+  text(&FreeSansBold9pt7b, "2.4 GHz CHANNELS", 20, 100, BLACK);
   for (int c = 0; c < 13; c++) {
     float v = (s_a24[c] + 115) / 70.0f; v = v < 0 ? 0 : v > 1 ? 1 : v;
     int h = (int)(90 * v), x = 20 + c * 70;
     rect(x, 200 - h, 56, h, BLACK);
-    char b[4]; snprintf(b, sizeof(b), "%d", c + 1); text(&FreeSansBold9pt7b, b, x + 20, 220, GREY);
+    char b[4]; snprintf(b, sizeof(b), "%d", c + 1); text(&FreeSansBold9pt7b, b, x + 20, 220, BLACK);
   }
   // sub-GHz trace
   int lo = 0, hi = -127;
   for (int i = 0; i < N_BIN; i++) { if (s_swp[i] < lo) lo = s_swp[i]; if (s_swp[i] > hi) hi = s_swp[i]; }
   int top = hi + 6, bot = lo - 2; if (top - bot < 30) top = bot + 30;
   const int X0 = 20, PW = 920, Y0 = 250, PH = 220;
-  box(X0, Y0, PW, PH, GREY);
+  box(X0, Y0, PW, PH, BLACK);
+  box(X0 + 1, Y0 + 1, PW - 2, PH - 2, BLACK);
   int px = -1, py = -1;
   for (int i = 0; i < N_BIN; i++) {
     int x = X0 + i * PW / N_BIN;
@@ -620,14 +636,12 @@ static void draw_spectrum() {
     px = x; py = y;
   }
   char b[32];
-  snprintf(b, sizeof(b), "%d dBm", top); text(&FreeSansBold9pt7b, b, X0 + 4, Y0 + 16, GREY);
-  snprintf(b, sizeof(b), "%d dBm", bot); text(&FreeSansBold9pt7b, b, X0 + 4, Y0 + PH - 6, GREY);
+  snprintf(b, sizeof(b), "%d dBm", top); text(&FreeSansBold9pt7b, b, X0 + 6, Y0 + 18, BLACK);
+  snprintf(b, sizeof(b), "%d dBm", bot); text(&FreeSansBold9pt7b, b, X0 + 6, Y0 + PH - 8, BLACK);
   const char* L[] = { "850", "868", "890", "915", "930" };
-  for (int i = 0; i < 5; i++) text(&FreeSansBold9pt7b, L[i], X0 + i * (PW / 4) - (i == 4 ? 30 : 0), Y0 + PH + 18, GREY);
-  draw_footer(sm, "tap or button: back");
-  epd_poweron();
-  epd_hl_update_screen(&s_hl, (++s_partials % 8) == 0 ? MODE_GC16 : MODE_GL16, TEMP_C);
-  epd_poweroff();
+  for (int i = 0; i < 5; i++) text(&FreeSansBold9pt7b, L[i], X0 + i * (PW / 4) - (i == 4 ? 30 : 0), Y0 + PH + 18, BLACK);
+  draw_footer(sm, "tap / btn: back");
+  refresh(false);
 }
 
 bool ui_begin() {
@@ -646,8 +660,11 @@ bool ui_begin() {
   epd_poweron();
   epd_clear();
   epd_hl_set_all_white(&s_hl);
-  text(&FreeSansBold24pt7b, "ORECCHINO", (W - text_w(&FreeSansBold24pt7b, "ORECCHINO")) / 2, 250, BLACK);
-  text(&FreeSansBold12pt7b, "Remote ID receiver  -  starting radios", 300, 300, GREY);
+  int w_ore = text_w(&FreeSansBold24pt7b, "ORECCHINO");
+  text(&FreeSansBold24pt7b, "ORECCHINO", (W - w_ore) / 2, 250, BLACK);
+  const char* sub = "Remote ID receiver  -  starting radios";
+  int w_sub = text_w(&FreeSansBold12pt7b, sub);
+  text(&FreeSansBold12pt7b, sub, (W - w_sub) / 2, 300, BLACK);
   epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
   epd_poweroff();
   s_ok = true;
@@ -675,6 +692,14 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (!k && was && !fired && now - down > 30) tap = true;
   was = k;
 
+  // Capacitive round home button below display toggles view
+  if (periph_home_key() && !s_spec) {
+    s_map = !s_map;
+    s_sig_prev = 0;
+    draw_board(true);
+    return;
+  }
+
   // touch: tap or drag-release (a slow panel wants whole gestures)
   static bool t_was = false; static int tx0 = 0, ty0 = 0, txl = 0, tyl = 0;
   static uint32_t t_poll = 0;
@@ -689,6 +714,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       if (mx && my && mx < my) { sx = (int)((long)ry * W / my); sy = (int)((long)(mx - rx) * H / mx); }  // portrait-native panel
       else if (mx && my)       { sx = (int)((long)rx * W / mx); sy = (int)((long)ry * H / my); }
       else                     { sx = rx; sy = ry; }
+      if (sx < 0) sx = 0; else if (sx >= W) sx = W - 1;
+      if (sy < 0) sy = 0; else if (sy >= H) sy = H - 1;
       if (!t_was) { tx0 = sx; ty0 = sy; Serial.printf("{\"type\":\"touch\",\"raw\":[%d,%d],\"xy\":[%d,%d]}\n", rx, ry, sx, sy); }
       txl = sx; tyl = sy;
     } else if (t_was) {
@@ -752,10 +779,14 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       for (int i = 0; i < N_BIN; i++) { s_swp[i] = -127; s_pk[i] = -127; }
       s_sx_ok = sx1262_sweep_begin();
       if (s_sx_ok) sx1262_sweep_set_span(SX_SWEEP_LO_HZ, SX_SWEEP_HI_HZ, N_BIN);
+      draw_spectrum();
+      refresh(true);
+      return;
     } else {
       sx1262_sweep_stop();
       draw_board(true);
       s_sig_prev = signature();
+      return;
     }
   }
   if (s_spec) {
