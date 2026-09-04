@@ -519,11 +519,19 @@ bool ui_begin() {
   epd_set_rotation(EPD_ROT_LANDSCAPE);
   s_fb = epd_hl_get_framebuffer(&s_hl);
   if (!s_fb) return false;
+  // Boot: wipe whatever the panel was left holding (e-paper keeps the last
+  // image through power-off — often another firmware's), then a splash with
+  // a clean full refresh so the panel visibly comes alive before the radios.
   epd_poweron();
   epd_clear();
+  epd_hl_set_all_white(&s_hl);
+  text(&FreeSansBold24pt7b, "ORECCHINO", 300, 250, BLACK);
+  text(&FreeSansBold12pt7b, "Remote ID receiver  -  starting radios", 300, 300, GREY);
+  epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
   epd_poweroff();
   s_ok = true;
   s_now = millis();
+  s_last_full = s_now;
   build_order();
   draw_board(true);
   s_sig_prev = signature();

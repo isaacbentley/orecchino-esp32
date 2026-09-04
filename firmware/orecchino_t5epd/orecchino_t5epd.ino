@@ -32,8 +32,10 @@ void setup() {
   Serial.begin(115200);
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 2000) delay(10);
+  Serial.println("\n[ORECCHINO] LilyGO T5 E-Paper S3 Pro starting...");
   tile_store_begin(ui_map_center);
   bool disp = ui_begin();
+  Serial.printf("[ORECCHINO] E-Paper display init %s\n", disp ? "OK" : "FAILED (continuing headless)");
   periph_begin();   // after epdiy owns the I2C bus
   rx_begin(disp ? ",\"display\":true" : ",\"display\":false");
 }

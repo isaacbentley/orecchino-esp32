@@ -123,8 +123,11 @@ static lcd_bus_config_t lcd_config = {
 static void epd_board_init(uint32_t epd_row_width, const EpdInitConfig* init_config) {
     gpio_hold_dis(CKH);  // free CKH after wakeup
 
-    ESP_ERROR_CHECK(epd_board_i2c_init(&config_reg.i2c, &board_i2c_config, init_config, true, true)
-    );
+    esp_err_t i2c_err = epd_board_i2c_init(&config_reg.i2c, &board_i2c_config, init_config, true, true);
+    if (i2c_err != ESP_OK) {
+        ESP_LOGE("epdiy", "epd_board_i2c_init failed: 0x%x", i2c_err);
+        return;
+    }
     config_reg.pwrup = false;
     config_reg.vcom_ctrl = false;
     config_reg.wakeup = false;
@@ -133,14 +136,29 @@ static void epd_board_init(uint32_t epd_row_width, const EpdInitConfig* init_con
     }
 
     gpio_set_direction(CFG_INTR, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(CFG_INTR, GPIO_PULLUP_ONLY);
     gpio_set_intr_type(CFG_INTR, GPIO_INTR_NEGEDGE);
 
-    ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_EDGE));
+    gpio_install_isr_service(ESP_INTR_FLAG_EDGE);
+    gpio_isr_handler_add(CFG_INTR, interrupt_handler, (void*)CFG_INTR);
 
-    ESP_ERROR_CHECK(gpio_isr_handler_add(CFG_INTR, interrupt_handler, (void*)CFG_INTR));
+    // Give I2C bus and PCA9555 a moment to stabilize after power/reset
+    vTaskDelay(pdMS_TO_TICKS(15));
 
-    // set all epdiy lines to output except TPS interrupt + PWR good
-    ESP_ERROR_CHECK(pca9555_set_config(config_reg.i2c.pca, CFG_PIN_PWRGOOD | CFG_PIN_INT, 1));
+    // set all epdiy lines to output except TPS interrupt + PWR good (with retry & bus reset)
+    esp_err_t pca_err = ESP_FAIL;
+    for (int r = 0; r < 5; r++) {
+        pca_err = pca9555_set_config(config_reg.i2c.pca, CFG_PIN_PWRGOOD | CFG_PIN_INT, 1);
+        if (pca_err == ESP_OK) break;
+        ESP_LOGW("epdiy", "pca9555_set_config attempt %d failed (0x%x), resetting bus", r + 1, pca_err);
+        if (config_reg.i2c.bus) {
+            i2c_master_bus_reset(config_reg.i2c.bus);
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (pca_err != ESP_OK) {
+        ESP_LOGE("epdiy", "pca9555_set_config failed after retries: 0x%x", pca_err);
+    }
 
     const EpdDisplay_t* display = epd_get_display();
 
@@ -158,9 +176,12 @@ static void epd_board_init(uint32_t epd_row_width, const EpdInitConfig* init_con
 static void epd_board_deinit() {
     epd_lcd_deinit();
 
-    ESP_ERROR_CHECK(pca9555_set_config(
+    esp_err_t deinit_err = pca9555_set_config(
         config_reg.i2c.pca, CFG_PIN_PWRGOOD | CFG_PIN_INT | CFG_PIN_VCOM_CTRL | CFG_PIN_PWRUP, 1
-    ));
+    );
+    if (deinit_err != ESP_OK) {
+        ESP_LOGW("epdiy", "pca9555_set_config deinit failed: 0x%x", deinit_err);
+    }
 
     int tries = 0;
     while (!((pca9555_read_input(config_reg.i2c.pca, 1) & 0xC0) == 0x80)) {
@@ -197,7 +218,10 @@ static void epd_board_set_ctrl(epd_ctrl_state_t* state, const epd_ctrl_state_t* 
         if (config_reg.wakeup)
             value |= CFG_PIN_WAKEUP;
 
-        ESP_ERROR_CHECK(pca9555_set_value(config_reg.i2c.pca, value, 1));
+        esp_err_t err = pca9555_set_value(config_reg.i2c.pca, value, 1);
+        if (err != ESP_OK) {
+            ESP_LOGW("epdiy", "pca9555_set_value failed: 0x%x", err);
+        }
     }
 }
 
@@ -228,10 +252,19 @@ static void epd_board_poweron(epd_ctrl_state_t* state) {
     // give the IC time to powerup and set lines
     vTaskDelay(1);
 
+    int pg_tries = 0;
     while (!(pca9555_read_input(config_reg.i2c.pca, 1) & CFG_PIN_PWRGOOD)) {
+        if (++pg_tries >= 200) {
+            ESP_LOGW("epdiy", "Timeout waiting for PWRGOOD");
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
-    ESP_ERROR_CHECK(tps_write_register(config_reg.i2c.tps, TPS_REG_ENABLE, 0x3F));
+    esp_err_t tps_err = tps_write_register(config_reg.i2c.tps, TPS_REG_ENABLE, 0x3F);
+    if (tps_err != ESP_OK) {
+        ESP_LOGW("epdiy", "tps_write_register failed: 0x%x", tps_err);
+    }
 
     tps_set_vcom(config_reg.i2c.tps, vcom);
 
@@ -278,7 +311,13 @@ static void epd_board_measure_vcom(epd_ctrl_state_t* state) {
     };
     epd_board_set_ctrl(state, &mask);
 
+    int pg_tries = 0;
     while (!(pca9555_read_input(config_reg.i2c.pca, 1) & CFG_PIN_PWRGOOD)) {
+        if (++pg_tries >= 200) {
+            ESP_LOGW("epdiy", "Timeout waiting for PWRGOOD in measure_vcom");
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     ESP_LOGI("epdiy", "Power rails enabled");
 

@@ -129,7 +129,7 @@ emergency, a flight-restriction incursion, or a forged identity. How many
 LEDs light follows the strongest contact's signal, so the ring reads as a
 signal meter from across the room.
 
-The backlight dims after a minute without input and wakes on any touch of
+The backlight dims to 25% after two minutes without input and wakes on any touch of
 the knob or key — never while a danger alert is live. The side button is
 **Back** from anywhere — detail, menu, beacon list, spectrum — and brightness
 is a menu item; hold the side button for a spectrum view that

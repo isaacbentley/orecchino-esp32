@@ -32,7 +32,7 @@ static int      s_n = 0;
 static uint32_t s_now;
 static bool     s_ble_ok = true;
 static int      s_batt = -1;
-static const uint8_t BL_LEVELS[] = { 255, 110, 30 };
+static const uint8_t BL_LEVELS[] = { 255, 110, 64 };   // lowest step must still read as ON
 static uint8_t  s_bl = 0;
 static uint32_t s_bl_toast_until = 0;
 static bool     s_dirty = true;
@@ -154,7 +154,7 @@ static void draw_meter(int x, int y, int w, int rssi, uint16_t col) {
 
 static void draw_bl_toast() {
   if (s_now >= s_bl_toast_until) return;
-  const char* lvl = s_bl == 0 ? "BRT 100%" : s_bl == 1 ? "BRT 43%" : "BRT 12%";
+  const char* lvl = s_bl == 0 ? "BRT 100%" : s_bl == 1 ? "BRT 43%" : "BRT 25%";
   int tw = 86, th = 22;
   int tx = (W - tw) / 2, ty = 28;
   s_cv->fillRoundRect(tx, ty, tw, th, 5, RGB565(0x06, 0x24, 0x22));
@@ -568,10 +568,11 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
   if (s_now < s_bl_toast_until) s_dirty = true;
 
   // ---- idle dimming (both modes): 60 s without input drops the backlight to
-  //      its lowest step; any input restores it; a live danger never dims.
+  //      its lowest step (25%, still plainly lit); any input restores it; a
+  //      live danger never dims.
   {
     UiSummary sm; ui_summarize(&sm, now);
-    bool want_dim = now - s_last_input > 60000 && !sm.danger && s_view != V_SPECTRUM;
+    bool want_dim = now - s_last_input > 120000 && !sm.danger && s_view != V_SPECTRUM;
     if (want_dim != s_dimmed) {
       s_dimmed = want_dim;
       ledcWrite(PIN_LCD_BL, want_dim ? BL_LEVELS[2] : BL_LEVELS[s_bl]);
