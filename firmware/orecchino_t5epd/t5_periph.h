@@ -18,6 +18,24 @@ void periph_touch_reset();
 /// Call after ui_begin() (epdiy must have created the bus).
 void periph_begin();
 void periph_tick(uint32_t now);
+enum TouchEventType : uint8_t {
+  TOUCH_EVT_NONE = 0,
+  TOUCH_EVT_TAP,
+  TOUCH_EVT_DRAG
+};
+
+struct TouchEvent {
+  TouchEventType type;
+  int16_t x;
+  int16_t y;
+  int16_t dx;
+  int16_t dy;
+  uint32_t ms;
+};
+
+/// Fetch next queued touch event produced asynchronously on Core 0. Returns false if empty.
+bool periph_poll_touch_event(TouchEvent* evt);
+
 /// One finger: true while down, raw controller coordinates.
 bool periph_touch(int* x, int* y);
 /// True once when the capacitive circle/home key is pressed.

@@ -9,8 +9,17 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+
 static i2c_master_bus_handle_t s_bus = nullptr;
 static i2c_master_dev_handle_t s_pca = nullptr, s_tp = nullptr, s_gauge = nullptr, s_charger = nullptr;
+static SemaphoreHandle_t s_i2c_mutex = nullptr;
+static QueueHandle_t s_touch_queue = nullptr;
+static TaskHandle_t s_input_task_handle = nullptr;
+
 static bool s_have_gauge = false;
 static bool s_have_charger = false;
 enum TpKind : uint8_t { TP_NONE, TP_GT911, TP_GT6972P };
@@ -23,7 +32,7 @@ static uint32_t s_gps_fix_ms = 0;
 
 static const uint8_t BQ25896_ADDR = 0x6B;
 
-// ---- bus helpers
+// ---- bus helpers (thread-safe across Core 0 and Core 1 via s_i2c_mutex)
 static i2c_master_dev_handle_t dev_add(uint8_t addr) {
   i2c_device_config_t cfg = {};
   cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
@@ -34,12 +43,26 @@ static i2c_master_dev_handle_t dev_add(uint8_t addr) {
   return d;
 }
 static bool wr(i2c_master_dev_handle_t d, const uint8_t* w, size_t wl) {
-  return d && i2c_master_transmit(d, w, wl, 50) == ESP_OK;
+  if (!d) return false;
+  if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  esp_err_t err = i2c_master_transmit(d, w, wl, 50);
+  if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+  return err == ESP_OK;
 }
 static bool wrrd(i2c_master_dev_handle_t d, const uint8_t* w, size_t wl, uint8_t* r, size_t rl) {
-  return d && i2c_master_transmit_receive(d, w, wl, r, rl, 50) == ESP_OK;
+  if (!d) return false;
+  if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  esp_err_t err = i2c_master_transmit_receive(d, w, wl, r, rl, 50);
+  if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+  return err == ESP_OK;
 }
-static bool present(uint8_t addr) { return i2c_master_probe(s_bus, addr, 30) == ESP_OK; }
+static bool present(uint8_t addr) {
+  if (!s_bus) return false;
+  if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  esp_err_t err = i2c_master_probe(s_bus, addr, 30);
+  if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+  return err == ESP_OK;
+}
 
 // ---- BQ25896 Battery Charger
 static bool bq25896_read(uint8_t reg, uint8_t* val) {
