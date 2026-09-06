@@ -165,6 +165,14 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
     Serial.printf("{\"type\":\"mode\",\"mode\":\"%s\"}\n", g_mode == UI_MODE_TX ? "tx" : "rx");
     return true;
   }
+  if (!strcmp(cmd, "view") || !strcmp(cmd, "set_view")) {
+    char v[16] = {0};
+    if (json_field_str(line, "view", v, sizeof(v))) {
+      ui_set_view(v);
+      Serial.printf("{\"type\":\"view\",\"view\":\"%s\"}\n", v);
+      return true;
+    }
+  }
 
   // 1. JSON Backlight & VCOM commands:
   if (!strcmp(cmd, "set_bl") || !strcmp(cmd, "bl")) {

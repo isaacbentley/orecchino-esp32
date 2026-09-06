@@ -31,6 +31,7 @@ void ui_feed_wifi(uint8_t chan, int8_t rssi);
 void ui_set_wifi_channel(uint8_t chan);
 uint16_t ui_get_vcom();
 bool     ui_set_vcom(uint16_t vcom);
+void     ui_set_view(const char* view);
 void     ui_show_shutdown_screen();
 
 // Transmit core accessors provided by main sketch

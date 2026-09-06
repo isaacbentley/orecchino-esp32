@@ -1734,6 +1734,19 @@ static void spectrum_exit(bool to_map) {
   s_sig_prev = signature();
 }
 
+void ui_set_view(const char* view) {
+  if (!view) return;
+  if (!strcmp(view, "table")) {
+    if (s_spec) spectrum_exit(false);
+    else if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); }
+  } else if (!strcmp(view, "map")) {
+    if (s_spec) spectrum_exit(true);
+    else if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); }
+  } else if (!strcmp(view, "spectrum") || !strcmp(view, "spec")) {
+    if (!s_spec) spectrum_enter();
+  }
+}
+
 void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (!s_ok) return;
   s_now = now; s_ble_ok = ble_ok; s_batt = batt_pct;
