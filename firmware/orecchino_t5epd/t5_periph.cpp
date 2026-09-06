@@ -668,7 +668,6 @@ static void periph_input_task(void* arg) {
         s_x0 = sx;
         s_y0 = sy;
         s_down_ms = now;
-        Serial.printf("{\"type\":\"touch\",\"core\":0,\"raw\":[%d,%d],\"xy\":[%d,%d]}\n", rx, ry, sx, sy);
       }
       s_xl = sx;
       s_yl = sy;

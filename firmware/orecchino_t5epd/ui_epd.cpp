@@ -57,6 +57,28 @@ static bool s_diag = false;         // System diagnostics & hardware calibration
 #define DEFAULT_VCOM 1560
 static uint16_t s_vcom = DEFAULT_VCOM;
 
+// PMIC rail hold: avoid repeated TPS65185 power-up/down (~90 ms each).
+// Keep high-voltage rails energized during active interaction; idle-timeout
+// after EPD_POWER_HOLD_MS of inactivity.
+#define EPD_POWER_HOLD_MS 3000
+static bool     s_epd_powered = false;
+static uint32_t s_epd_last_use_ms = 0;
+
+static void epd_ensure_on() {
+  if (!s_epd_powered) { epd_poweron(); s_epd_powered = true; }
+  s_epd_last_use_ms = s_now;
+}
+static void epd_idle_check(uint32_t now) {
+  if (s_epd_powered && (now - s_epd_last_use_ms > EPD_POWER_HOLD_MS)) {
+    epd_poweroff();
+    s_epd_powered = false;
+  }
+}
+
+// Track dirty flag: skip build_order()/signature() when no new data arrived.
+static volatile bool s_tracks_dirty = true;
+void ui_mark_tracks_dirty() { s_tracks_dirty = true; }
+
 // 8-pixel aligned bounding boxes for sub-screen updates (eliminates sub-byte boundary artifacts)
 static const EpdRect RECT_BODY = { 0, 72, 960, 468 };   // table + plot + footer
 static const EpdRect RECT_TABLE  = { 16, 72, 552, 424 };
@@ -736,16 +758,27 @@ static int pngDrawCb(PNGDRAW* d) {
   int y = s_blit_y + d->y;
   if (y < MAP_Y0 || y >= MAP_Y0 + MAP_H) return 1;
   s_png.getLineAsRGB565(d, line, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
-  for (int i = 0; i < d->iWidth; i++) {
-    int x = s_blit_x + i;
-    if (x < 0 || x >= W) continue;
-    uint16_t c = line[i];
+
+  // Direct 4-bit framebuffer span write — EPD_ROT_LANDSCAPE is the identity
+  // transform, so user (x,y) maps straight to framebuffer (x,y).  The stride
+  // is epd_width()/2 bytes per row.  Eliminates ~256 epd_draw_pixel() calls
+  // (each doing _rotate + bounds check + read-modify-write) per PNG scanline.
+  const int stride = epd_width() / 2;
+  int x0 = s_blit_x;
+  int x1 = s_blit_x + d->iWidth;
+  if (x0 < 0) x0 = 0;
+  if (x1 > W) x1 = W;
+  uint8_t* row = s_fb + y * stride;
+  for (int x = x0; x < x1; x++) {
+    uint16_t c = line[x - s_blit_x];
     int r = (c >> 11) << 3, g = ((c >> 5) & 0x3F) << 2, b = (c & 0x1F) << 3;
     int luma = (r * 77 + g * 150 + b * 29) >> 8;
-    // dark_all inverted: background near white, roads mid-grey, labels dark.
-    // A gentle gamma keeps faint roads from vanishing on the panel.
-    int g16 = 255 - luma; g16 = g16 < 40 ? g16 : 40 + (g16 - 40) * 215 / 215;
-    epd_draw_pixel(x, y, (uint8_t)(g16 & 0xF0), s_fb);
+    // Inverted dark_all tile style: background near white, roads mid-grey.
+    // Clamp faint features to preserve visibility on e-paper.
+    int g4 = (255 - luma) >> 4;  // 8-bit greyscale → 4-bit nibble
+    uint8_t* bp = &row[x / 2];
+    if (x & 1) *bp = (*bp & 0x0F) | (uint8_t)(g4 << 4);
+    else       *bp = (*bp & 0xF0) | (uint8_t)(g4);
   }
   return 1;
 }
@@ -951,7 +984,7 @@ static void refresh_area(EpdRect area, bool force_full, bool fast_mode = false) 
   // alert state transitions, or periodically every 10 partial cycles / 3 minutes
   // to eliminate residual charge and ghosting.
   bool full = force_full || (s_partials >= 10 || (s_now - s_last_full > 180000UL));
-  epd_poweron();
+  epd_ensure_on();  // PMIC rail hold: skip poweron if already energized
   if (full) {
     epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
     s_partials = 0;
@@ -961,7 +994,8 @@ static void refresh_area(EpdRect area, bool force_full, bool fast_mode = false) 
     epd_hl_update_area(&s_hl, mode, TEMP_C, area);
     s_partials++;
   }
-  epd_poweroff();
+  // No epd_poweroff() here — rails stay hot during interaction;
+  // epd_idle_check() in ui_tick() handles the 3-second idle timeout.
 }
 
 static void refresh(bool force_full) {
@@ -2051,7 +2085,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     s_map_touched = true;
     s_cam_wx -= drag_dx; s_cam_wy -= drag_dy; s_cam_manual = true; s_cam_manual_ms = now;
     draw_map();
-    refresh_area(RECT_MAP, false);
+    refresh_area(RECT_MAP, false, true);  // MODE_DU during active drag for speed
     s_sig_prev = signature();
     return;
   }
@@ -2086,20 +2120,27 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       char b[48]; snprintf(b, sizeof(b), "SYNCING MAP TILES  %d received", sync_files);
       text(&FreeSansBold9pt7b, b, TABLE_X, 524, BLACK);
       EpdRect r = {0, 496, W, 44};
-      epd_poweron(); epd_hl_update_area(&s_hl, MODE_GL16, TEMP_C, r); epd_poweroff();
+      epd_ensure_on(); epd_hl_update_area(&s_hl, MODE_GL16, TEMP_C, r);
     }
     return;
   }
   static uint32_t last_check = 0;
   if (tap || now - last_check >= 3000) {
     last_check = now;
-    build_order();
-    uint32_t sig = signature();
-    if (sig != s_sig_prev || now - s_last_full > 300000UL) {
-      s_sig_prev = sig;
-      draw_board(false);
+    if (s_tracks_dirty || now - s_last_full > 300000UL) {
+      s_tracks_dirty = false;
+      build_order();
+      uint32_t sig = signature();
+      if (sig != s_sig_prev || now - s_last_full > 300000UL) {
+        s_sig_prev = sig;
+        draw_board(false);
+      }
     }
   }
+
+  // PMIC idle timeout: power down TPS65185 high-voltage rails after 3 s
+  // of display inactivity, saving ~10–15 mA.
+  epd_idle_check(now);
 }
 
 void ui_show_shutdown_screen() {
@@ -2152,8 +2193,9 @@ void ui_show_shutdown_screen() {
   text(f9, foot, (W - text_w(f9, foot)) / 2, H - 24, GREY);
 
   // Full GC16 refresh to clear any ghosting and freeze high-contrast image
-  epd_poweron();
+  epd_ensure_on();
   epd_hl_update_screen(&s_hl, MODE_GC16, epd_ambient_temperature());
   epd_poweroff();
+  s_epd_powered = false;
 }
 

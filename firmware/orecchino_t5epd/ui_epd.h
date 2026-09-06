@@ -33,6 +33,7 @@ uint16_t ui_get_vcom();
 bool     ui_set_vcom(uint16_t vcom);
 void     ui_set_view(const char* view);
 void     ui_show_shutdown_screen();
+void     ui_mark_tracks_dirty();
 
 // Transmit core accessors provided by main sketch
 int         txui_count();

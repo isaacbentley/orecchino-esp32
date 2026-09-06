@@ -286,7 +286,7 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
 
   return tile_store_host_line(cmd, line, now);
 }
-void rx_hook_track(Track*, bool, bool) {}
+void rx_hook_track(Track*, bool, bool) { ui_mark_tracks_dirty(); }
 
 static int batt_pct() { return periph_batt_pct(); }
 
@@ -360,7 +360,7 @@ void loop() {
     static uint32_t last_batt = 0;
     if (now - last_batt >= 10000 || last_batt == 0) { last_batt = now; batt = batt_pct(); }
     ui_tick(now, true, batt, -1);
-    delay(3);
+    vTaskDelay(1);
     return;
   }
 
@@ -376,6 +376,6 @@ void loop() {
   if (was_syncing && !syncing) tile_store_reset_count();
   was_syncing = syncing;
   ui_tick(now, st.ble_ok, batt, syncing ? (int)tile_store_files_done() : -1);
-  delay(3);
+  vTaskDelay(1);
 }
 

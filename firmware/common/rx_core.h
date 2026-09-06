@@ -620,7 +620,7 @@ static void rx_set_channel(uint8_t ch) {
 /// Bring up the radios and print the boot line. `extra_json` is appended
 /// inside the boot object (e.g. ",\"display\":true"), may be null.
 static void rx_begin(const char* extra_json) {
-  s_q = xQueueCreate(12, sizeof(RidEvt));
+  s_q = xQueueCreate(36, sizeof(RidEvt));
   s_ble_ok = ble_start_scanner();  // bring up BT before promiscuous WiFi
   wifi_start_sniffer();
   s_cur_chan = HOP[0].chan;
