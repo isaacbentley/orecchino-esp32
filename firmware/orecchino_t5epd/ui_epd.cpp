@@ -496,6 +496,131 @@ static double nice_scale(double m) {
   return 20000;
 }
 
+static void draw_target_card(const Track* t, int sel_idx, int total_n) {
+  const int cx = 574, cy = 76, cw = 378, ch = 416;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  const GFXfont* f9  = &FreeSansBold9pt7b;
+  char b[64];
+
+  // Outer border
+  box(cx, cy, cw, ch, BLACK);
+
+  // Top header banner
+  rect(cx, cy, cw, 32, BLACK);
+  snprintf(b, sizeof(b), "CONTACT %d OF %d", sel_idx + 1, total_n);
+  text(f9, b, cx + 12, cy + 22, WHITE);
+
+  bool stale = ui_stale(t, s_now);
+  bool danger = ui_danger(t, s_now);
+  const char* status_badge = danger ? "EMERGENCY" : stale ? "STALE" : "ACTIVE";
+  text_r(f9, status_badge, cx + cw - 12, cy + 22, WHITE);
+
+  // UAS ID / Call sign
+  int y = cy + 58;
+  snprintf(b, sizeof(b), "%.20s", t->uas[0] ? t->uas : "(UNIDENTIFIED UAS)");
+  text(f12, b, cx + 12, y, BLACK);
+
+  // Subtitle: Manufacturer & Transport
+  y += 24;
+  snprintf(b, sizeof(b), "%s | %s%s%s",
+           uas_manufacturer(t->uas),
+           (t->src_mask & 1) ? "Wi-Fi " : "",
+           (t->src_mask & 2) ? "NAN " : "",
+           (t->src_mask & 4) ? "BLE" : "");
+  text(f9, b, cx + 12, y, GREY);
+
+  // Divider
+  y += 10;
+  rect(cx + 12, y, cw - 24, 1, GREY);
+
+  // Grid Row 1: Altitude & Speed
+  y += 22;
+  text(f9, "ALTITUDE (AGL)", cx + 12, y, GREY);
+  text(f9, "SPEED", cx + 200, y, GREY);
+
+  y += 20;
+  if (!isnan(t->height)) {
+    snprintf(b, sizeof(b), "%d m (%d ft)", (int)t->height, (int)(t->height * 3.28084f));
+  } else {
+    snprintf(b, sizeof(b), "--");
+  }
+  text(f9, b, cx + 12, y, BLACK);
+
+  if (!isnan(t->speed)) {
+    snprintf(b, sizeof(b), "%.1f m/s (%.0f kt)", t->speed, t->speed * 1.94384f);
+  } else {
+    snprintf(b, sizeof(b), "--");
+  }
+  text(f9, b, cx + 200, y, BLACK);
+
+  // Grid Row 2: Heading & Packets
+  y += 24;
+  text(f9, "HEADING", cx + 12, y, GREY);
+  text(f9, "PACKETS", cx + 200, y, GREY);
+
+  y += 20;
+  if (!isnan(t->heading)) {
+    static const char* CARDINALS[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW", "N"};
+    int c_idx = (int)((t->heading + 22.5f) / 45.0f) % 8;
+    snprintf(b, sizeof(b), "%03d deg (%s)", (int)t->heading, CARDINALS[c_idx]);
+  } else {
+    snprintf(b, sizeof(b), "--");
+  }
+  text(f9, b, cx + 12, y, BLACK);
+
+  snprintf(b, sizeof(b), "%u msgs", t->msgs);
+  text(f9, b, cx + 200, y, BLACK);
+
+  // Divider
+  y += 10;
+  rect(cx + 12, y, cw - 24, 1, LIGHT);
+
+  // Grid Row 3: Position / Coordinates
+  y += 22;
+  text(f9, "GNSS POSITION", cx + 12, y, GREY);
+  y += 20;
+  if (t->has_pos) {
+    snprintf(b, sizeof(b), "%.6f, %.6f", t->lat, t->lon);
+    text(f9, b, cx + 12, y, BLACK);
+  } else {
+    text(f9, "NO COORDINATES REPORTED", cx + 12, y, GREY);
+  }
+
+  // Divider
+  y += 10;
+  rect(cx + 12, y, cw - 24, 1, LIGHT);
+
+  // Grid Row 4: Signal & Peak RSSI
+  y += 22;
+  text(f9, "SIGNAL STRENGTH", cx + 12, y, GREY);
+  snprintf(b, sizeof(b), "%d dBm (Peak %d)", t->rssi, t->peak_rssi);
+  text_r(f9, b, cx + cw - 12, y, BLACK);
+
+  y += 8;
+  int bar_w = cw - 24;
+  box(cx + 12, y, bar_w, 10, BLACK);
+  int fill = (int)(bar_w * ui_rssi01(t->rssi));
+  if (fill > 0) rect(cx + 12, y, fill, 10, stale ? GREY : BLACK);
+
+  // Grid Row 5: Authentication & Seen History
+  y += 26;
+  const char* auth_str = (t->auth_state == 3) ? "VALID (Ed25519)" :
+                         (t->auth_state == 4) ? "INVALID SIGNATURE" :
+                         (t->auth_state == 2) ? "Untrusted Key" :
+                         (t->auth_state == 1) ? "Partial Page" : "None";
+  snprintf(b, sizeof(b), "Auth: %s", auth_str);
+  text(f9, b, cx + 12, y, t->auth_state == 4 ? BLACK : GREY);
+
+  uint32_t age_s = (s_now - t->last_ms) / 1000;
+  snprintf(b, sizeof(b), "Seen: %lus ago", (unsigned long)age_s);
+  text_r(f9, b, cx + cw - 12, y, BLACK);
+
+  // Footer tap banner
+  rect(cx + 1, cy + ch - 24, cw - 2, 23, LIGHT);
+  int tw_tap = text_w(f9, "TAP CARD FOR FULL AUDIT INSPECTOR");
+  text(f9, "TAP CARD FOR FULL AUDIT INSPECTOR", cx + (cw - tw_tap) / 2, cy + ch - 8, BLACK);
+}
+
 static void draw_plot() {
   rect(RECT_PLOT.x, RECT_PLOT.y, RECT_PLOT.width, RECT_PLOT.height, WHITE);
   if (g_home_set) {
@@ -550,34 +675,17 @@ static void draw_plot() {
       text(&FreeSansBold9pt7b, b, bx + 3, py - 6, stale ? GREY : BLACK);
     }
   } else {
-    // No operator fix: Signal Strength Ladder (no circles underneath!)
-    text(&FreeSansBold12pt7b, "PROXIMITY (RSSI)", PLOT_CX - PLOT_R, 106, BLACK);
-    text(&FreeSansBold9pt7b, "NO OPERATOR FIX | TAP FOR MAP", PLOT_CX - PLOT_R, 126, BLACK);
-    int y = 144;
-    for (int k = 0; k < s_n && k < 7; k++) {
-      const Track* t = &g_tracks[s_order[k]];
-      bool sel = k == s_sel;
-      if (sel) {
-        rect(PLOT_CX - PLOT_R - 4, y, 6, 38, BLACK);
-        box(PLOT_CX - PLOT_R + 4, y, PLOT_R * 2 - 4, 38, BLACK);
-      }
-      char b[32];
-      snprintf(b, sizeof(b), "%.14s", t->uas[0] ? t->uas : "(no id)");
-      text(&FreeSansBold9pt7b, b, PLOT_CX - PLOT_R + 10, y + 16, BLACK);
-      snprintf(b, sizeof(b), "%d dBm", t->rssi);
-      text_r(&FreeSansBold9pt7b, b, PLOT_CX + PLOT_R - 4, y + 16, BLACK);
-
-      int bw = PLOT_R * 2 - 14;
-      box(PLOT_CX - PLOT_R + 10, y + 22, bw, 10, BLACK);
-      int fill = (int)(bw * ui_rssi01(t->rssi));
-      if (fill > 0) rect(PLOT_CX - PLOT_R + 10, y + 22, fill, 10, ui_stale(t, s_now) ? GREY : BLACK);
-      y += 46;
-    }
-    if (!s_n) {
-      int tw1 = text_w(&FreeSansBold12pt7b, "WAITING FOR SIGNALS");
-      text(&FreeSansBold12pt7b, "WAITING FOR SIGNALS", PLOT_CX - tw1 / 2, 260, BLACK);
-      int tw2 = text_w(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN");
-      text(&FreeSansBold9pt7b, "Listening on BLE, Wi-Fi Beacon & NAN", PLOT_CX - tw2 / 2, 290, GREY);
+    // No operator fix: Display rich Selected Target Detail Card
+    if (s_n > 0 && s_sel >= 0 && s_sel < s_n) {
+      const Track* t = &g_tracks[s_order[s_sel]];
+      draw_target_card(t, s_sel, s_n);
+    } else {
+      int tw1 = text_w(&FreeSansBold12pt7b, "WAITING FOR TARGETS");
+      text(&FreeSansBold12pt7b, "WAITING FOR TARGETS", PLOT_CX - tw1 / 2, 230, BLACK);
+      int tw2 = text_w(&FreeSansBold9pt7b, "Listening on BLE4, BLE5, Wi-Fi Beacon & NAN");
+      text(&FreeSansBold9pt7b, "Listening on BLE4, BLE5, Wi-Fi Beacon & NAN", PLOT_CX - tw2 / 2, 260, GREY);
+      int tw3 = text_w(&FreeSansBold9pt7b, "RF Spectrum: 2.4 GHz & 850-930 MHz");
+      text(&FreeSansBold9pt7b, "RF Spectrum: 2.4 GHz & 850-930 MHz", PLOT_CX - tw3 / 2, 286, GREY);
     }
   }
 }
@@ -1982,10 +2090,12 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
             if (abs(px - tap_x) < 24 && abs(py - tap_y) < 24) { hit = k; break; }
           }
         } else {
-          int ly = 144;
-          for (int k = 0; k < s_n && k < 7; k++) {
-            if (tap_y >= ly && tap_y < ly + 46) { hit = k; break; }
-            ly += 46;
+          // In Target Card mode: tapping the card opens the full inspector modal
+          if (s_n > 0 && s_sel >= 0 && s_sel < s_n) {
+            s_inspector = true;
+            s_sig_prev = 0;
+            draw_board(false);
+            return;
           }
         }
         if (hit >= 0) {
