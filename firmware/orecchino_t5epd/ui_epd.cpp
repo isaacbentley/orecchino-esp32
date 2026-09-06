@@ -2070,20 +2070,20 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
 
   // ===================== RX MODE UI & INPUT =====================
   if (tap_x >= 0 && !s_spec) {
-    // Top bar view switcher tabs & backlight toggle:
-    if (tap_y <= 72) {
-      if (tap_x >= 310 && tap_x < 386) {
+    // Top bar view switcher tabs:
+    if (tap_y <= 92 && tap_x >= 280 && tap_x <= 590) {
+      if (tap_x < 386) {
         if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); return; }
-      } else if (tap_x >= 386 && tap_x < 458) {
+      } else if (tap_x < 460) {
         if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
-      } else if (tap_x >= 458 && tap_x <= 570) {
+      } else {
         spectrum_enter();
         return;
       }
     }
     if (!s_map) {
-      if (tap_y >= 104 && tap_y < 104 + ROWS * ROW_H && tap_x < TABLE_X + TABLE_W) {          // a table row
-        int row_idx = (tap_y - 104) / ROW_H;
+      if (tap_y >= 92 && tap_y < 104 + ROWS * ROW_H && tap_x < TABLE_X + TABLE_W) {          // a table row
+        int row_idx = (tap_y < 104) ? 0 : (tap_y - 104) / ROW_H;
         int k = s_table_page * ROWS + row_idx;
         if (k < s_n) {
           if (s_sel == k) {
@@ -2145,8 +2145,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         s_sig_prev = 0;
         draw_board(true);
         return;
-      } else if (tap_y >= 496) {
-        if (tap_x >= 320 && tap_x <= 480 && s_n > ROWS) {
+      } else if (tap_y >= 485) {
+        if (tap_x >= 310 && tap_x <= 490 && s_n > ROWS) {
           int max_pages = (s_n + ROWS - 1) / ROWS;
           s_table_page = (s_table_page + 1) % max_pages;
           s_sel = s_table_page * ROWS;
@@ -2157,12 +2157,12 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           refresh_area(RECT_BODY, false);
           s_sig_prev = signature();
           return;
-        } else if (tap_x >= W - 220 && tap_x <= W - 120 && s_n > 0 && s_sel >= 0 && s_sel < s_n) {
+        } else if (tap_x >= W - 230 && tap_x <= W - 115 && s_n > 0 && s_sel >= 0 && s_sel < s_n) {
           s_inspector = true;
           s_sig_prev = 0;
           draw_board(false);
           return;
-        } else if (tap_x >= W - 110 && tap_x <= W - 20) {
+        } else if (tap_x >= W - 115 && tap_x <= W - 10) {
           s_diag = true;
           s_sig_prev = 0;
           draw_board(true);
@@ -2259,10 +2259,10 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (s_spec) {
     const int X0 = 20, PW = 920, Y0 = 250, PH = 220;
     // Header navigation tabs in Spectrum:
-    if (tap_y <= 72) {
-      if (tap_x >= 310 && tap_x < 386) {
+    if (tap_y <= 92 && tap_x >= 280 && tap_x <= 590) {
+      if (tap_x < 386) {
         spectrum_exit(false); return;
-      } else if (tap_x >= 386 && tap_x < 458) {
+      } else if (tap_x < 460) {
         spectrum_exit(true); return;
       }
     }
@@ -2273,7 +2273,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       return;
     }
     // Footer action buttons:
-    if (tap_y >= 496) {
+    if (tap_y >= 485) {
       if (tap_x >= W - 20 - 90 - 12 - 120 - 12 - 110 && tap_x <= W - 20 - 90 - 12 - 120 - 12) {
         s_spec_paused = !s_spec_paused;
         if (!s_spec_paused) { memset((void*)s_wsum, 0, sizeof(s_wsum)); memset((void*)s_wcnt, 0, sizeof(s_wcnt)); }
