@@ -507,6 +507,9 @@ static uint32_t s_gps_last_sentence = 0, s_gps_baud_since = 0;
 static char s_nmea[120];
 static int s_nmea_n = 0;
 static bool s_gps_detected = false;
+static bool s_gps_disabled = false;
+static uint8_t s_gps_hunt_attempts = 0;
+static const uint8_t GPS_MAX_HUNT_ATTEMPTS = 6; // 2 probe cycles across the 3 baud rates (~20s)
 
 static bool nmea_valid(const char* s) {
   if (!s || s[0] != '$' || strlen(s) < 9) return false;
@@ -536,6 +539,7 @@ static void nmea_line(const char* s, uint32_t now) {
   if (!nmea_valid(s)) return;
   s_gps_last_sentence = now;
   s_gps_detected = true;
+  s_gps_hunt_attempts = 0;
 
   char f[16][16] = {{0}};
   int fi = 0, fc = 0;
@@ -584,7 +588,7 @@ static void nmea_line(const char* s, uint32_t now) {
   }
 }
 
-bool periph_gps_detected() { return s_gps_detected && (millis() - s_gps_last_sentence < 15000); }
+bool periph_gps_detected() { return !s_gps_disabled && s_gps_detected && (millis() - s_gps_last_sentence < 15000); }
 bool periph_gps_fix() { return s_gps_fix; }
 int  periph_gps_sats() { return s_gps_sats; }
 
@@ -603,30 +607,42 @@ static void periph_input_task(void* arg) {
   for (;;) {
     uint32_t now = millis();
 
-    // 1. Drain GPS UART (Serial1) continuously so FIFO never overflows during display redraws
-    while (Serial1.available()) {
-      char c = (char)Serial1.read();
-      if (c == '\n' || c == '\r') {
-        if (s_nmea_n > 0) {
-          s_nmea[s_nmea_n] = 0;
-          nmea_line(s_nmea, now);
+    // 1. Drain GPS UART (Serial1) if not disabled
+    if (!s_gps_disabled) {
+      while (Serial1.available()) {
+        char c = (char)Serial1.read();
+        if (c == '\n' || c == '\r') {
+          if (s_nmea_n > 0) {
+            s_nmea[s_nmea_n] = 0;
+            nmea_line(s_nmea, now);
+            s_nmea_n = 0;
+          }
+        } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) {
+          s_nmea[s_nmea_n++] = c;
+        } else {
           s_nmea_n = 0;
         }
-      } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) {
-        s_nmea[s_nmea_n++] = c;
-      } else {
-        s_nmea_n = 0;
       }
-    }
 
-    // Hunt baud rate if silent
-    uint32_t hunt_interval = periph_gps_detected() ? 10000 : 4000;
-    if (now - s_gps_last_sentence > hunt_interval && now - s_gps_baud_since > hunt_interval) {
-      s_gps_baud_i = (s_gps_baud_i + 1) % 3;
-      Serial1.updateBaudRate(GPS_BAUDS[s_gps_baud_i]);
-      s_gps_baud_since = now;
+      // Hunt baud rate if silent; if not found after 6 attempts, disable UART1
+      uint32_t hunt_interval = periph_gps_detected() ? 10000 : 3500;
+      if (now - s_gps_last_sentence > hunt_interval && now - s_gps_baud_since > hunt_interval) {
+        if (!s_gps_detected) {
+          s_gps_hunt_attempts++;
+          if (s_gps_hunt_attempts >= GPS_MAX_HUNT_ATTEMPTS) {
+            s_gps_disabled = true;
+            Serial1.end();
+            Serial.println("{\"type\":\"periph\",\"gps\":false,\"status\":\"not_found_disabled\"}");
+          }
+        }
+        if (!s_gps_disabled) {
+          s_gps_baud_i = (s_gps_baud_i + 1) % 3;
+          Serial1.updateBaudRate(GPS_BAUDS[s_gps_baud_i]);
+          s_gps_baud_since = now;
+        }
+      }
+      if (s_gps_fix && now - s_gps_fix_ms > 30000) s_gps_fix = false;
     }
-    if (s_gps_fix && now - s_gps_fix_ms > 30000) s_gps_fix = false;
 
     // 2. Poll Touch Controller (GT911 / GT6972P)
     int rx = 0, ry = 0;
@@ -741,7 +757,7 @@ void periph_begin() {
 
 void periph_tick(uint32_t now) {
   // If input task is not running for some reason, fallback to reading Serial1 here
-  if (!s_input_task_handle) {
+  if (!s_input_task_handle && !s_gps_disabled) {
     while (Serial1.available()) {
       char c = (char)Serial1.read();
       if (c == '\n' || c == '\r') {
