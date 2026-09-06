@@ -1844,12 +1844,12 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       int bw = 220, bh = 54, by = my + 164;
       int bx_ok = mx + 45;
       int bx_can = mx + mw - 45 - bw;
-      if (tap_y >= by && tap_y <= by + bh) {
-        if (tap_x >= bx_ok && tap_x <= bx_ok + bw) {
+      if (tap_y >= by - 12 && tap_y <= by + bh + 16) {
+        if (tap_x >= bx_ok - 15 && tap_x <= bx_ok + bw + 15) {
           if (s_target_mode == UI_TARGET_POWER_OFF) periph_power_off();
           else board_switch_mode(s_target_mode);
           return;
-        } else if (tap_x >= bx_can && tap_x <= bx_can + bw) {
+        } else if (tap_x >= bx_can - 15 && tap_x <= bx_can + bw + 15) {
           s_confirm_switch = false;
           s_sig_prev = 0;
           draw_board(false);
@@ -1878,13 +1878,13 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       int btn1_x = mx + 60;
       int btn2_x = mx + mw - 60 - btn_w;
 
-      if (tap_x >= close_x && tap_x <= close_x + close_w && tap_y >= close_y && tap_y <= close_y + close_h) {
+      if (tap_x >= mx + mw - 60 && tap_y >= my && tap_y <= my + 55) {
         s_inspector = false;
         s_sig_prev = 0;
         draw_board(false);
         return;
-      } else if (tap_y >= btn_y && tap_y <= btn_y + btn_h) {
-        if (tap_x >= btn1_x && tap_x <= btn1_x + btn_w) {
+      } else if (tap_y >= btn_y - 12 && tap_y <= my + mh) {
+        if (tap_x >= btn1_x - 15 && tap_x <= btn1_x + btn_w + 20) {
           s_inspector = false;
           s_map = true;
           if (s_sel >= 0 && s_sel < s_n) {
@@ -1898,7 +1898,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           s_sig_prev = 0;
           draw_board(true);
           return;
-        } else if (tap_x >= btn2_x && tap_x <= btn2_x + btn_w) {
+        } else if (tap_x >= btn2_x - 20 && tap_x <= btn2_x + btn_w + 15) {
           s_inspector = false;
           s_sig_prev = 0;
           draw_board(false);
@@ -2192,8 +2192,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           }
         }
       }
-      if (tap_x >= W - 56 && tap_y >= MAP_Y0 + 56 && tap_y < MAP_Y0 + 164) {   // zoom boxes
-        int dz = tap_y < MAP_Y0 + 110 ? 1 : -1;
+      if (tap_x >= W - 70 && tap_y >= MAP_Y0 + 40 && tap_y < MAP_Y0 + 164) {   // zoom boxes
+        int dz = tap_y < MAP_Y0 + 105 ? 1 : -1;
         int nz = s_cam_z + dz;
         if (nz >= TILE_ZMIN && nz <= TILE_ZMAX) {
           double f = dz > 0 ? 2.0 : 0.5;
@@ -2203,7 +2203,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           s_sig_prev = signature();
           return;
         }
-      } else if (tap_x >= W - 56 && tap_y >= MAP_Y0 + 164 && tap_y < MAP_Y0 + 210) { // Recenter reticle
+      } else if (tap_x >= W - 70 && tap_y >= MAP_Y0 + 164 && tap_y < MAP_Y0 + 225) { // Recenter reticle
         s_cam_manual = false;
         map_camera();
         draw_map();
@@ -2217,7 +2217,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         refresh_area(RECT_MAP, false);
         s_sig_prev = signature();
         return;
-      } else if (tap_y >= 496 && tap_x >= W - 110 && tap_x <= W - 20) {
+      } else if (tap_y >= 485 && tap_x >= W - 115 && tap_x <= W - 10) {
         s_diag = true;
         s_sig_prev = 0;
         draw_board(true);
@@ -2231,7 +2231,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           if (!t->has_pos) continue;
           double wx, wy; world_px(t->lat, t->lon, s_cam_z, &wx, &wy);
           int x = (int)(wx - left), y = MAP_Y0 + (int)(wy - top);
-          if (abs(x - tap_x) < 28 && abs(y - tap_y) < 28) { hit = k; break; }
+          if (abs(x - tap_x) < 36 && abs(y - tap_y) < 36) { hit = k; break; }
         }
         if (hit >= 0) s_sel = hit;
         else { s_cam_wx = left + tap_x; s_cam_wy = top + (tap_y - MAP_Y0); s_cam_manual = true; s_cam_manual_ms = now; }
