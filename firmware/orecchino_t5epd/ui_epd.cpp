@@ -688,7 +688,7 @@ static void draw_plot() {
 
 // ---- offline map: tiles from the shared store, inverted into greys
 #define MAP_Y0   72
-#define MAP_H    426
+#define MAP_H    424   // ends at the footer rule; must match RECT_MAP
 #define MAP_CX   (W / 2)
 #define MAP_CY   (MAP_Y0 + MAP_H / 2)
 #define TILE_ZMIN 11
@@ -1613,8 +1613,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (syncing != was_syncing) { was_syncing = syncing; if (!syncing) { s_sig_prev = 0; } }
 
   // Hardware Power/Function button (PCA9535 S3 button IO1_2):
-  static bool pwr_was = false; static uint32_t pwr_down = 0;
-  bool pwr_k = periph_pwr_btn_down();
+  static bool pwr_was = false; static uint32_t pwr_down = 0, pwr_poll = 0;
+  bool pwr_k = pwr_was;
+  if (now - pwr_poll >= 50) { pwr_poll = now; pwr_k = periph_pwr_btn_down(); }  // one I2C read per 50 ms, not per pass
   if (pwr_k && !pwr_was) { pwr_down = now; }
   if (pwr_k && (now - pwr_down >= 800)) {
     periph_power_off();
@@ -2061,8 +2062,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         s_sig_prev = 0;
         draw_board(true);
         return;
-      } else {
-        // a marker near the tap selects it; anywhere else re-centres there
+      } else if (tap_y >= MAP_Y0 && tap_y < MAP_Y0 + MAP_H) {
+        // a marker near the tap selects it; anywhere else on the map re-centres there
         double left = s_cam_wx - W / 2.0, top = s_cam_wy - MAP_H / 2.0;
         int hit = -1;
         for (int k = 0; k < s_n; k++) {

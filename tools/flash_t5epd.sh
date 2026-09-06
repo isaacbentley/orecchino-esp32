@@ -23,7 +23,8 @@ arduino-cli compile --jobs 2 --libraries firmware/libraries -b "$FQBN" firmware/
 arduino-cli upload -b "$FQBN" -p "$PORT" firmware/orecchino_t5epd
 
 echo "Upload complete. Exiting USB download bootloader into firmware..."
-ESPTOOL="$(find "$HOME/Library/Arduino15/packages/esp32/tools/esptool_py" -name esptool 2>/dev/null | sort -V | tail -n 1 || which esptool || true)"
+ESPTOOL="$(find "$HOME/Library/Arduino15/packages/esp32/tools/esptool_py" -name esptool 2>/dev/null | sort -V | tail -n 1)"
+[ -n "$ESPTOOL" ] || ESPTOOL="$(which esptool || true)"   # tail exits 0 on empty input, so fall back explicitly
 if [ -n "$ESPTOOL" ] && [ -x "$ESPTOOL" ]; then
   sleep 0.5
   "$ESPTOOL" --chip esp32s3 -p "$PORT" --after watchdog-reset chip-id >/dev/null 2>&1 || true

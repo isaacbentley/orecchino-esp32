@@ -825,8 +825,9 @@ void periph_power_off() {
   // 1. Draw persistent power-off screen on E-paper display and power down TPS65185
   ui_show_shutdown_screen();
 
-  // 2. Turn off backlight PT4103 boost converter
-  periph_bl_set_duty(0);
+  // 2. Turn off backlight PT4103 boost converter. Drive the pin directly:
+  //    periph_bl_set_duty() persists to NVS and would zero the saved brightness.
+  if (s_bl_active) ledcWrite(PIN_BL_EN, 0);
   digitalWrite(PIN_BL_EN, LOW);
 
   // 3. Cut LoRa & GPS 3V3 power rail via PCA9535 (Port 0 Bit 0 = 0)

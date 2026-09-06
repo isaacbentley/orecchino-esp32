@@ -170,19 +170,28 @@ attached; the header shows the satellite count (`GPS 9`), or `APP POS` when
 the Mac app supplied the position instead, or `NO POS`. Battery percentage
 comes from the board's gauge.
 
-It has touch. On the table, tap a row to select it or tap the plot to open
-the map. On the map, tap a marker to select it, tap anywhere else to
-re-centre there, drag to pan, and use the + / − boxes to zoom; the view
-stays where you put it until you press the button (or two minutes pass),
-then auto-follow resumes. E-paper is slow, so gestures are whole taps and
-drag-releases rather than live tracking.
+It has touch. The header has TABLE and MAP tabs. On the table, tap a row
+to select it and tap it again for a full contact card; tap an aircraft on
+the plot to select it, or an empty spot on the plot to open the map. With
+more than eight contacts, a PAGE button in the footer turns the pages. On
+the map, tap a marker to select it (a banner shows its vitals, with
+DETAILS and X buttons), tap anywhere else to re-centre there, drag to pan,
+and use the + / − boxes to zoom; the view stays where you put it until you
+tap the reticle (or two minutes pass), then auto-follow resumes. E-paper is
+slow, so gestures are whole taps and drag-releases rather than live
+tracking.
 
 E-paper is slow and ghosts, so the board only redraws when its content
-actually changes: fast partial updates for routine table changes, a clean
-full refresh every dozen updates, on any alert change, for every map frame,
-and at least every ten minutes. The button steps through contacts on the
-table, then over to the map, then back; hold it for the spectrum view,
-which sweeps 850–930 MHz on the SX1262.
+actually changes: fast partial updates for routine table and map changes,
+a clean full refresh every ten updates, on any alert change, when you
+switch views, and at least every five minutes. The BOOT button steps
+through contacts on the table, then over to the map, then back; hold it
+for two seconds to power the board off (the side power button does the
+same after a short hold; in test beacon mode the hold returns to receiver
+mode instead). The SYSTEM button in the footer opens a service screen for
+panel voltage (VCOM) tuning, a greyscale test strip, backlight control,
+and hardware readouts; from there you can switch into test beacon mode or
+power off, each after a confirmation.
 
 The touch controller differs between production batches — a Goodix GT911
 on some, a GT6972P on others — and the firmware probes for both at boot.
@@ -191,7 +200,7 @@ The panel driver is [epdiy](https://github.com/vroland/epdiy), vendored
 under `firmware/libraries/epdiy` (the board is an epdiy v7 layout).
 
 ```bash
-tools/flash_t5epd.sh /dev/cu.usbmodemXXXX
+tools/flash_t5epd.sh            # finds the port itself; pass one to override
 ```
 
 > **Note**: If compiling by hand or in the Arduino IDE instead of using the helper script, select **Partition Scheme: Custom** (`PartitionScheme=custom`) and include `--libraries firmware/libraries` to include the vendored `epdiy` library and use the 3 MB app partition.
