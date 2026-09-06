@@ -130,8 +130,19 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
   if (!strcmp(cmd, "lora") || !strcmp(cmd, "spec")) {
     sx1262_sweep_reset_tried();
     bool ok = sx1262_sweep_begin();
-    if (ok) sx1262_sweep_stop();
-    Serial.printf("{\"type\":\"lora\",\"detected\":%s}\n", ok ? "true" : "false");
+    if (ok) {
+      sx1262_sweep_set_span(SX_SWEEP_LO_HZ, SX_SWEEP_HI_HZ, 16);
+      int8_t test_bins[16];
+      for (int i = 0; i < 16; i++) test_bins[i] = -127;
+      int cur = 0;
+      sx1262_sweep_chunk(test_bins, 16, &cur, 16);
+      sx1262_sweep_stop();
+      Serial.printf("{\"type\":\"lora\",\"detected\":true,\"rssi_sample\":[%d,%d,%d,%d,%d,%d,%d,%d]}\n",
+                    test_bins[0], test_bins[2], test_bins[4], test_bins[6],
+                    test_bins[8], test_bins[10], test_bins[12], test_bins[14]);
+    } else {
+      Serial.println("{\"type\":\"lora\",\"detected\":false}");
+    }
     return true;
   }
 
