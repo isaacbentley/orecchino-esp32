@@ -17,6 +17,7 @@
 #include "board_t5.h"
 #include "ui_epd.h"
 #include "t5_periph.h"
+#include "sx1262_sweep.h"
 
 static uint8_t g_mode = UI_MODE_RX;
 
@@ -126,6 +127,13 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
   if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) { print_help(); return true; }
   if (!strcmp(cmd, "status")) { print_t5_status(); return true; }
   if (!strcmp(cmd, "reboot")) { ESP.restart(); return true; }
+  if (!strcmp(cmd, "lora") || !strcmp(cmd, "spec")) {
+    sx1262_sweep_reset_tried();
+    bool ok = sx1262_sweep_begin();
+    if (ok) sx1262_sweep_stop();
+    Serial.printf("{\"type\":\"lora\",\"detected\":%s}\n", ok ? "true" : "false");
+    return true;
+  }
 
   // Mode switching commands:
   if (!strcmp(cmd, "mode") || !strcmp(cmd, "set_mode")) {
@@ -295,6 +303,12 @@ void setup() {
   if (g_mode == UI_MODE_RX) {
     tile_store_begin(ui_map_center);
   }
+  // LoRa and SD share SPI bus: pull CS lines high immediately to prevent bus contention
+  gpio_hold_dis((gpio_num_t)PIN_LORA_RST);
+  gpio_deep_sleep_hold_dis();
+  pinMode(PIN_LORA_CS, OUTPUT); digitalWrite(PIN_LORA_CS, HIGH);
+  pinMode(PIN_SD_CS, OUTPUT);   digitalWrite(PIN_SD_CS, HIGH);
+
   periph_touch_reset();
   bool disp = ui_begin(g_mode);
   uint16_t vcom = ui_get_vcom();
@@ -302,6 +316,10 @@ void setup() {
                 disp ? "OK" : "FAILED", (unsigned)vcom, vcom / 1000.0,
                 g_mode == UI_MODE_TX ? "TX (Test Beacon)" : "RX (Receiver)");
   periph_begin();   // after epdiy owns the I2C bus
+
+  bool sx_ok = sx1262_sweep_begin();
+  if (sx_ok) sx1262_sweep_stop(); // Park in standby until spectrum view is opened
+  Serial.printf("[ORECCHINO] SX1262 LoRa sweep hardware: %s\n", sx_ok ? "READY" : "NOT DETECTED");
 
   if (g_mode == UI_MODE_TX) {
     tx_begin();

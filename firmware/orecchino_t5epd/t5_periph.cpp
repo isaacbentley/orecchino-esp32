@@ -62,11 +62,25 @@ static bool pca_rmw(uint8_t reg, uint8_t clear, uint8_t set) {
 }
 static void rail_on() {
   s_pca = dev_add(0x20);
-  if (!s_pca) return;
+  if (!s_pca) {
+    Serial.println("[T5] ERROR: dev_add(0x20) PCA9535 failed!");
+    return;
+  }
+  // LoRa and SD share the SPI bus: pull both CS high before powering rail on
+  pinMode(PIN_LORA_CS, OUTPUT); digitalWrite(PIN_LORA_CS, HIGH);
+  pinMode(PIN_SD_CS, OUTPUT);   digitalWrite(PIN_SD_CS, HIGH);
+
   pca_rmw(0x06, 0x01, 0x00);   // config port 0: bit 0 output
   pca_rmw(0x02, 0x00, 0x01);   // output port 0: LORA_EN high -> LoRa + GPS 3V3
   pca_rmw(0x07, 0x00, 0x04);   // config port 1: bit 2 input (PCA_PIN_PC12 = S3 button)
-  delay(100);
+
+  uint8_t p0_out = 0, p0_cfg = 0;
+  uint8_t r_out = 0x02, r_cfg = 0x06;
+  wrrd(s_pca, &r_out, 1, &p0_out, 1);
+  wrrd(s_pca, &r_cfg, 1, &p0_cfg, 1);
+  Serial.printf("[T5] PCA9535 Rail ON: out=0x%02X cfg=0x%02X (LORA_EN=%d)\n",
+                p0_out, p0_cfg, (p0_out & 1));
+  delay(150);
 }
 
 

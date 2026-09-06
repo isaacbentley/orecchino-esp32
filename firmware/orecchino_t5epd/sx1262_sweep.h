@@ -10,6 +10,7 @@
 
 /// One-time bring-up (idempotent; latches failure). False = no/dead radio.
 bool sx1262_sweep_begin();
+void sx1262_sweep_reset_tried();
 /// Retune the sweep span (defaults to the full 850-930 MHz). Picks the
 /// widest GFSK RX bandwidth that fits the resulting bin width, down to
 /// 4.8 kHz — resolution scales freely with span at constant sweep time.

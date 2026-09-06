@@ -21,23 +21,30 @@
 
 static bool s_ok = false, s_tried = false;
 static uint32_t s_lo = SX_SWEEP_LO_HZ, s_hi = SX_SWEEP_HI_HZ;
-static SPIClass s_spi(HSPI);
-static const SPISettings SPI_CFG(8000000, MSBFIRST, SPI_MODE0);
+static SPIClass s_spi(FSPI);
+static const SPISettings SPI_CFG(4000000, MSBFIRST, SPI_MODE0);
+static uint8_t s_last_op_status = 0;
 
 static bool wait_busy(uint32_t timeout_ms = 10) {
   uint32_t t0 = millis();
   while (digitalRead(PIN_LORA_BUSY) == HIGH) {
-    if (millis() - t0 > timeout_ms) return false;
+    if (millis() - t0 > timeout_ms) {
+      Serial.printf("[SX1262] wait_busy TIMEOUT (%u ms, BUSY=1)\n", timeout_ms);
+      return false;
+    }
   }
   return true;
 }
 
 static bool xfer(uint8_t op, const uint8_t* args, int n_args,
                  uint8_t* out, int n_out, bool wait = true) {
-  if (wait && !wait_busy()) return false;
+  if (wait && !wait_busy()) {
+    Serial.printf("[SX1262] BUSY wait failed before op 0x%02X\n", op);
+    return false;
+  }
   digitalWrite(PIN_LORA_CS, LOW);
   s_spi.beginTransaction(SPI_CFG);
-  s_spi.transfer(op);
+  s_last_op_status = s_spi.transfer(op);
   for (int i = 0; i < n_args; i++) s_spi.transfer(args[i]);
   for (int i = 0; i < n_out; i++) out[i] = s_spi.transfer(0);
   s_spi.endTransaction();
@@ -50,31 +57,60 @@ static bool cmd(uint8_t op, const uint8_t* args, int n) {
 
 static void hard_reset() {
   digitalWrite(PIN_LORA_RST, LOW);
-  delay(2);
-  digitalWrite(PIN_LORA_RST, HIGH);
   delay(5);
-  wait_busy(50);
+  digitalWrite(PIN_LORA_RST, HIGH);
+  delay(10);
+  wait_busy(100);
 }
 
 static const uint8_t STDBY_RC[1]   = {0x00};
 static const uint8_t STDBY_XOSC[1] = {0x01};
 
+void sx1262_sweep_reset_tried() {
+  s_tried = false;
+  s_ok = false;
+}
+
 bool sx1262_sweep_begin() {
   if (s_tried) return s_ok;
   s_tried = true;
 
-  pinMode(PIN_SD_CS, OUTPUT);   digitalWrite(PIN_SD_CS, HIGH);
-  pinMode(PIN_LORA_CS, OUTPUT); digitalWrite(PIN_LORA_CS, HIGH);
+  Serial.println("[SX1262] Initializing LoRa RF sweep driver...");
+
+  // Disengage ESP32-S3 RTC pad hold on reset line if waking from sleep
+  gpio_hold_dis((gpio_num_t)PIN_LORA_RST);
+  gpio_deep_sleep_hold_dis();
+
+  pinMode(PIN_SD_CS, OUTPUT);    digitalWrite(PIN_SD_CS, HIGH);
+  pinMode(PIN_LORA_CS, OUTPUT);  digitalWrite(PIN_LORA_CS, HIGH);
   pinMode(PIN_LORA_RST, OUTPUT); digitalWrite(PIN_LORA_RST, HIGH);
   pinMode(PIN_LORA_BUSY, INPUT);
   pinMode(PIN_LORA_IRQ, INPUT);
+
   s_spi.begin(PIN_SPI_SCLK, PIN_SPI_MISO, PIN_SPI_MOSI, -1);
 
+  Serial.printf("[SX1262] Pre-reset: BUSY=%d, IRQ=%d\n",
+                digitalRead(PIN_LORA_BUSY), digitalRead(PIN_LORA_IRQ));
+
   hard_reset();
-  if (!cmd(OP_SET_STANDBY, STDBY_RC, 1)) return false;
+
+  Serial.printf("[SX1262] Post-reset: BUSY=%d, IRQ=%d\n",
+                digitalRead(PIN_LORA_BUSY), digitalRead(PIN_LORA_IRQ));
+
+  bool stdby_cmd = cmd(OP_SET_STANDBY, STDBY_RC, 1);
   uint8_t st = 0;
-  if (!xfer(OP_GET_STATUS, nullptr, 0, &st, 1)) return false;
-  if (st == 0x00 || st == 0xFF) return false;  // MISO dead — no radio fitted
+  bool st_ok = xfer(OP_GET_STATUS, nullptr, 0, &st, 1);
+  Serial.printf("[SX1262] Probe: stdby_cmd=%d, get_st_ok=%d, st_data=0x%02X, op_ret=0x%02X\n",
+                stdby_cmd, st_ok, st, s_last_op_status);
+
+  // In SX126x, status may be returned during NOP data byte (st) or during opcode (s_last_op_status)
+  uint8_t chip_status = (st != 0x00 && st != 0xFF) ? st : s_last_op_status;
+  if (chip_status == 0x00 || chip_status == 0xFF) {
+    Serial.printf("[SX1262] No radio response detected (status=0x%02X)\n", chip_status);
+    return false;
+  }
+  Serial.printf("[SX1262] Radio detected! Status: 0x%02X (mode=%d, cmd=%d)\n",
+                chip_status, (chip_status >> 4) & 0x07, (chip_status >> 1) & 0x07);
 
   // LoRa modules on this board carry a TCXO on DIO3; try that first and
   // fall back to a crystal on an XOSC start error, like the Indicator.
@@ -86,7 +122,9 @@ bool sx1262_sweep_begin() {
   wait_busy(50);
   uint8_t err[3] = {0};  // status, errors MSB, errors LSB
   xfer(OP_GET_DEV_ERRORS, nullptr, 0, err, 3);
+  Serial.printf("[SX1262] Device errors after TCXO cal: 0x%02X 0x%02X 0x%02X\n", err[0], err[1], err[2]);
   if (err[2] & 0x20) {  // XOSC_START_ERR
+    Serial.println("[SX1262] TCXO failed, falling back to crystal (XTAL)...");
     hard_reset();
     cmd(OP_SET_STANDBY, STDBY_RC, 1);
     cmd(OP_CALIBRATE, CAL_ALL, 1);
@@ -110,6 +148,7 @@ bool sx1262_sweep_begin() {
 
   // Park in XOSC standby: per-bin hops then skip the oscillator restart.
   s_ok = cmd(OP_SET_STANDBY, STDBY_XOSC, 1);
+  Serial.printf("[SX1262] Sweep initialization %s!\n", s_ok ? "COMPLETE (READY)" : "FAILED at XOSC standby");
   return s_ok;
 }
 
