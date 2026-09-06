@@ -74,6 +74,8 @@ static bool    s_radio_ok;
 static uint32_t s_last_frame;
 static uint8_t  s_zoom;                      // 0..ZOOM_MAX
 static uint32_t s_center_hz = 890000000UL;
+static bool     s_paused = false;
+static int      s_cursor_bin = -1;
 
 // Auto-ranging reference levels: narrower RBW drops the noise floor ~6 dB
 // per zoom level, so a fixed display window buries the trace. Each
@@ -96,6 +98,7 @@ static void clear_sub_data() {
   s_wfb_head = 0;
   s_sweep_cursor = 0;
   s_ref_snap = true;
+  s_cursor_bin = -1;
 }
 
 static void build_lut() {
@@ -141,23 +144,58 @@ static void apply_span() {
   clear_sub_data();
 }
 
+void spectrum_clear_peaks() {
+  memset(s_pk24, 0, sizeof(s_pk24));
+  for (int i = 0; i < N_BIN; i++) s_pkb[i] = -127.0f;
+}
+
+void spectrum_toggle_pause() {
+  s_paused = !s_paused;
+}
+
+bool spectrum_is_paused() {
+  return s_paused;
+}
+
 void spectrum_tap(int x, int y) {
   if (!s_on || !s_radio_ok) return;
-  // [-] control in the sub-GHz header: zoom back out
-  if (x >= 414 && y >= 246 && y <= 276) {
+  // [PAUSE] button in header
+  if (x >= 165 && x <= 232 && y >= 0 && y <= 26) {
+    spectrum_toggle_pause();
+    return;
+  }
+  // [CLR PK] button in header
+  if (x >= 235 && x <= 302 && y >= 0 && y <= 26) {
+    spectrum_clear_peaks();
+    return;
+  }
+  // [+] zoom in control in sub-GHz header
+  if (x >= 376 && x <= 418 && y >= 246 && y <= 276) {
+    if (s_zoom < ZOOM_MAX) {
+      if (s_cursor_bin >= 0 && s_cursor_bin < N_BIN) {
+        uint32_t sp = span_hz();
+        uint32_t lo = s_center_hz - sp / 2;
+        s_center_hz = lo + (uint32_t)((uint64_t)s_cursor_bin * sp / N_BIN);
+      }
+      s_zoom++;
+      apply_span();
+    }
+    return;
+  }
+  // [-] zoom out control in sub-GHz header
+  if (x >= 420 && x <= 464 && y >= 246 && y <= 276) {
     if (s_zoom) {
       s_zoom--;
       apply_span();
     }
     return;
   }
-  // tap in the trace: zoom in x4 on that frequency (re-center at max zoom)
+  // tap in trace: place cursor
   if (y >= B_BASE - B_H && y <= B_BASE && x >= PX0 && x < PX0 + PW) {
-    uint32_t sp = span_hz();
-    uint32_t lo = s_center_hz - sp / 2;
-    s_center_hz = lo + (uint32_t)((uint64_t)(x - PX0) * sp / PW);
-    if (s_zoom < ZOOM_MAX) s_zoom++;
-    apply_span();
+    s_cursor_bin = (x - PX0) * N_BIN / PW;
+    if (s_cursor_bin < 0) s_cursor_bin = 0;
+    if (s_cursor_bin >= N_BIN) s_cursor_bin = N_BIN - 1;
+    return;
   }
 }
 
@@ -177,6 +215,8 @@ void spectrum_reset(uint32_t now) {
   s_radio_ok = sx1262_sweep_begin();
   s_zoom = 0;
   s_center_hz = 890000000UL;
+  s_paused = false;
+  s_cursor_bin = -1;
   if (s_radio_ok) apply_span();
   s_on = true;
   (void)now;
@@ -195,6 +235,7 @@ static inline uint8_t rssi_level(int dbm) {
 }
 
 static void step_live() {
+  if (s_paused) return;
   // 2.4 GHz: drain the accumulators. Rise instantly, fall slowly — the
   // sniffer only hears one channel at a time, so off-dwell bars persist.
   for (int ch = 1; ch <= N_CH; ch++) {
@@ -268,7 +309,21 @@ static void draw(Arduino_Canvas* cv) {
   cv->setTextColor(C_TEXT);
   cv->setCursor(PX0, 4);
   cv->print("RF SPECTRUM");
+
   cv->setTextSize(1);
+  // Pause pill
+  cv->drawRoundRect(168, 3, 62, 20, 4, s_paused ? C_PEAK : C_GRID);
+  if (s_paused) cv->fillRoundRect(169, 4, 60, 18, 3, RGB565(0x40, 0x20, 0x08));
+  cv->setTextColor(s_paused ? C_PEAK : C_TEXT);
+  cv->setCursor(174, 8);
+  cv->print(s_paused ? "PAUSED" : "PAUSE");
+
+  // Peak clear pill
+  cv->drawRoundRect(238, 3, 62, 20, 4, C_GRID);
+  cv->setTextColor(C_MUTED);
+  cv->setCursor(244, 8);
+  cv->print("CLR PK");
+
   cv->setTextColor(C_MUTED);
   cv->setCursor(464 - 19 * 6, 8);
   cv->print("press btn to exit");
@@ -304,11 +359,23 @@ static void draw(Arduino_Canvas* cv) {
   uint32_t lo = s_center_hz - sp / 2;
   float bin_khz = sp / (float)N_BIN / 1000.0f;
   char hb[48];
-  snprintf(hb, sizeof(hb), "%.1f-%.1f MHz  %.*f kHz/bin  tap:zoom",
-           lo / 1e6f, (lo + sp) / 1e6f, bin_khz < 100 ? 1 : 0, bin_khz);
+  if (s_cursor_bin >= 0 && s_cursor_bin < N_BIN) {
+    float cfreq = (lo + (uint64_t)sp * s_cursor_bin / N_BIN) / 1e6f;
+    snprintf(hb, sizeof(hb), "CUR: %.2fM %ddBm (pk:%d)", cfreq, s_swp[s_cursor_bin], (int)s_pkb[s_cursor_bin]);
+  } else {
+    snprintf(hb, sizeof(hb), "%.1f-%.1f MHz  %.*f kHz/bin  tap:inspect",
+             lo / 1e6f, (lo + sp) / 1e6f, bin_khz < 100 ? 1 : 0, bin_khz);
+  }
   cv->setTextColor(C_MUTED);
   cv->setCursor(PX0, 258);
   cv->print(hb);
+
+  // [+] zoom-in control
+  cv->drawRoundRect(380, 253, 36, 17, 3, s_zoom < ZOOM_MAX ? C_TEXT : C_GRID);
+  cv->setTextColor(s_zoom < ZOOM_MAX ? C_TEXT : C_GRID);
+  cv->setCursor(380 + 15, 258);
+  cv->print("+");
+
   // [-] zoom-out control (dim at full span)
   cv->drawRoundRect(424, 253, 36, 17, 3, s_zoom ? C_TEXT : C_GRID);
   cv->setTextColor(s_zoom ? C_TEXT : C_GRID);
@@ -330,6 +397,10 @@ static void draw(Arduino_Canvas* cv) {
       if (h > 0) cv->fillRect(x, B_BASE - h, 3, h, s_lut[8 + (v * 55) / 255]);
       int ph = sub_lvl((int)s_pkb[i]) * B_H / 255;
       if (ph > 1) cv->fillRect(x, B_BASE - ph - 1, 3, 1, C_PEAK);
+    }
+    if (s_cursor_bin >= 0 && s_cursor_bin < N_BIN) {
+      int cx = PX0 + (s_cursor_bin * PW) / N_BIN;
+      cv->drawFastVLine(cx, B_BASE - B_H, B_H, C_PEAK);
     }
     // sweep cursor: where the analyzer is measuring right now
     int cx = PX0 + (s_sweep_cursor * PW) / N_BIN;

@@ -33,6 +33,8 @@ bool ui_spectrum_active();
 /// RX feeds from the sketch's core hooks (Wi-Fi task context).
 void ui_feed_wifi(uint8_t chan, int8_t rssi);
 void ui_set_wifi_channel(uint8_t chan);
+/// Deep sleep power off: cut peripheral rail, backlight off, wake on side key
+void tembed_power_off();
 
 // ---- provided BY THE SKETCH (the sole includer of tx_core.h, so the
 // transmit enable-mask has exactly one definition; the UI reaches it here).

@@ -38,6 +38,12 @@ static void set(int i, uint8_t r, uint8_t g, uint8_t b) {
   s_grb[i * 3] = g; s_grb[i * 3 + 1] = r; s_grb[i * 3 + 2] = b;
 }
 
+static bool s_dim = false;
+
+void ring_set_dim(bool dim) {
+  s_dim = dim;
+}
+
 void ring_off() {
   memset(s_grb, 0, sizeof(s_grb));
   show();
@@ -61,10 +67,11 @@ void ring_tick(uint32_t now, uint8_t alert, float level) {
     phase = 0.15f + 0.85f * phase;
     r = (uint8_t)(40 * phase); g = (uint8_t)(22 * phase); b = 0;
   }
+  float scale = s_dim ? 0.35f : 1.0f;
   for (int i = 0; i < LED_COUNT; i++) {
     float k = lit - i;
     k = k < 0 ? 0 : (k > 1 ? 1 : k);
-    set(i, (uint8_t)(r * k), (uint8_t)(g * k), (uint8_t)(b * k));
+    set(i, (uint8_t)(r * k * scale), (uint8_t)(g * k * scale), (uint8_t)(b * k * scale));
   }
   show();
 }

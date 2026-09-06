@@ -11,7 +11,7 @@
 // or, with no operator position, contacts as a signal-strength ladder. A
 // black header band is the alert bar. E-paper is slow and ghosts, so the
 // board redraws only when its content signature changes: fast DU updates for
-// routine changes, a clean GC16 every dozen updates, on alert changes, and
+// routine changes, a clean GC16 every ten updates, on alert changes, and
 // at least every ten minutes.
 #pragma once
 #include <Arduino.h>
@@ -26,10 +26,12 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files);
 /// Where the map is looking (tile-eviction scoring). False if unknown.
 bool ui_map_center(double* lat, double* lon);
 bool ui_spectrum_active();
+bool ui_diagnostics_active();
 void ui_feed_wifi(uint8_t chan, int8_t rssi);
 void ui_set_wifi_channel(uint8_t chan);
 uint16_t ui_get_vcom();
 bool     ui_set_vcom(uint16_t vcom);
+void     ui_show_shutdown_screen();
 
 // Transmit core accessors provided by main sketch
 int         txui_count();

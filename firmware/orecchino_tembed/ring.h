@@ -11,3 +11,5 @@ void ring_begin();
 /// alert: 0 quiet, 1 contact, 2 danger. level: 0..1 strongest RSSI.
 void ring_tick(uint32_t now, uint8_t alert, float level);
 void ring_off();
+/// Attenuate brightness for dark rooms / solar night mode
+void ring_set_dim(bool dim);

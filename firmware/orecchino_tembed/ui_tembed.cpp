@@ -4,6 +4,9 @@
 #include "ring.h"
 #include "cc1101_sweep.h"
 #include "../common/ui_common.h"
+#include "../common/solar.h"
+#include <time.h>
+#include "esp_sleep.h"
 #include <Arduino_GFX_Library.h>
 #include <Adafruit_GFX.h>  // for its Fonts/ (GFXfont layout is shared)
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -23,6 +26,8 @@ static Arduino_Canvas*  s_cv;
 enum View : uint8_t { V_SCOPE, V_DETAIL, V_SPECTRUM, V_TX, V_MENU };
 static View     s_view = V_SCOPE;
 static uint8_t  s_mode = UI_MODE_RX;
+static bool     s_night_mode = false;
+static uint32_t s_last_solar_eval = 0;
 static int      s_tx_sel = 0;     // row in the TX list (0 master, 1 emg, 2+ paths)
 static int      s_menu_sel = 0;
 static int      s_sel = 0;        // selected row (index into the ordered list)
@@ -432,21 +437,42 @@ static void draw_tx() {
   s_cv->flush();
 }
 
+void tembed_power_off() {
+  s_cv->fillScreen(C_BG);
+  bold(W / 2 - 45, H / 2 - 8, C_TEXT, "POWER OFF");
+  small(W / 2 - 65, H / 2 + 14, C_MUTED, "Side button to wake");
+  s_cv->flush();
+  delay(500);
+
+  ring_off();
+  ledcWrite(PIN_LCD_BL, 0);
+
+  // Cut peripheral power rail (CC1101 + LED ring)
+  pinMode(PIN_PWR_EN, OUTPUT);
+  digitalWrite(PIN_PWR_EN, LOW);
+
+  // Configure wakeups on side key (GPIO 6) and encoder push (GPIO 0)
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_USER_KEY, 0);
+  esp_sleep_enable_ext1_wakeup((1ULL << PIN_USER_KEY) | (1ULL << PIN_ENC_KEY), ESP_EXT1_WAKEUP_ALL_LOW);
+
+  esp_deep_sleep_start();
+}
+
 // ---- mode menu (from either mode; hold the knob to open)
 static void draw_menu() {
   s_cv->fillScreen(C_BG);
   s_cv->fillRect(0, 0, W, TOP, C_BAR);
   bold(6, 15, C_TEXT, "MENU");
   char bl[24]; snprintf(bl, sizeof(bl), "Brightness  %s", s_bl == 0 ? "100%" : s_bl == 1 ? "43%" : "12%");
-  const char* names[4] = { "Receiver", "Test beacon (TX)", bl, "Back" };
-  const char* subs[4]  = { "listen for Remote ID", "transmit test signals", "click to cycle", "return to the screen" };
-  const int RH = 36;
-  for (int i = 0; i < 4; i++) {
-    int y = TOP + 3 + i * RH;
+  const char* names[5] = { "Receiver", "Test beacon (TX)", bl, "Power Off", "Back" };
+  const char* subs[5]  = { "listen for Remote ID", "transmit test signals", "click to cycle", "deep sleep (side btn wakes)", "return to the screen" };
+  const int RH = 28;
+  for (int i = 0; i < 5; i++) {
+    int y = TOP + 2 + i * RH;
     bool sel = i == s_menu_sel, cur = i < 2 && i == s_mode;
-    if (sel) { s_cv->fillRoundRect(6, y, W - 12, RH - 3, 6, C_BAR); s_cv->drawRoundRect(6, y, W - 12, RH - 3, 6, C_ACCENT); }
-    bold(18, y + 17, sel ? C_TEXT : C_MUTED, names[i]);
-    small(18, y + 23, C_MUTED, subs[i]);
+    if (sel) { s_cv->fillRoundRect(6, y, W - 12, RH - 2, 5, C_BAR); s_cv->drawRoundRect(6, y, W - 12, RH - 2, 5, C_ACCENT); }
+    bold(18, y + 14, sel ? C_TEXT : C_MUTED, names[i]);
+    small(18, y + 21, C_MUTED, subs[i]);
     if (cur) small(W - 62, y + 12, C_OK, "current");
   }
   draw_bl_toast();
@@ -505,7 +531,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
       det *= 2; // quick turn acceleration for responsive list navigation
     }
     Serial.printf("{\"type\":\"knob_turn\",\"det\":%d,\"pos\":%ld,\"view\":%d}\n", det, (long)pos, (int)s_view);
-    if (s_view == V_MENU) { s_menu_sel = (s_menu_sel + det + 4) % 4; }
+    if (s_view == V_MENU) { s_menu_sel = (s_menu_sel + det + 5) % 5; }
     else if (s_view == V_TX) { s_tx_sel += det; }   // clamped in draw_tx
     else if (s_view == V_SPECTRUM) s_mark = (s_mark + det + CC_SWEEP_BINS) % CC_SWEEP_BINS;
     else {
@@ -531,9 +557,14 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     Serial.printf("{\"type\":\"knob_click\",\"view\":%d}\n", (int)s_view);
     if (s_view == V_MENU) {
       if (s_menu_sel == 2) {                                     // Brightness: cycle
-        s_bl = (s_bl + 1) % 3; s_dimmed = false; ledcWrite(PIN_LCD_BL, BL_LEVELS[s_bl]);
+        s_bl = (s_bl + 1) % 3; s_dimmed = false;
+        uint8_t bl_val = BL_LEVELS[s_bl];
+        if (s_night_mode) bl_val = (uint8_t)(bl_val * 7 / 10);
+        ledcWrite(PIN_LCD_BL, bl_val);
         s_bl_toast_until = now + 1200;
-      } else if (s_menu_sel == 3 || s_menu_sel == s_mode) {        // Back / no change
+      } else if (s_menu_sel == 3) {                              // Power Off
+        tembed_power_off();
+      } else if (s_menu_sel == 4 || s_menu_sel == s_mode) {        // Back / no change
         s_view = s_mode == UI_MODE_TX ? V_TX : V_SCOPE;
       } else board_switch_mode((uint8_t)s_menu_sel);               // saves + reboots
     } else if (s_view == V_TX) {
@@ -546,26 +577,50 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
   }
   k_was = k;
   // side key: tap = BACK from wherever you are (the board's back button);
-  //           hold 1.5 s = spectrum (RX only). Brightness lives in the menu.
-  static bool u_was = false; static uint32_t u_down = 0; static bool u_fired = false;
+  //           hold 1.5 s = spectrum (RX only); hold 3.5 s = power off.
+  static bool u_was = false; static uint32_t u_down = 0; static bool u_spec_fired = false; static bool u_off_fired = false;
   bool u = digitalRead(PIN_USER_KEY) == LOW;
-  if (u && !u_was) { u_down = now; u_fired = false; s_last_input = now; }
-  if (u && !u_fired && now - u_down > 1500) {
-    u_fired = true;
+  if (u && !u_was) { u_down = now; u_spec_fired = false; u_off_fired = false; s_last_input = now; }
+  if (u && !u_spec_fired && now - u_down > 1500) {
+    u_spec_fired = true;
     if (s_mode == UI_MODE_RX && s_view != V_SPECTRUM && s_view != V_MENU) {
       spectrum_enter(); s_view = V_SPECTRUM; s_dirty = true;
     }
   }
-  if (!u && u_was && !u_fired && now - u_down > 30) {
+  if (u && !u_off_fired && now - u_down > 3500) {
+    u_off_fired = true;
+    tembed_power_off();
+  }
+  if (!u && u_was && !u_spec_fired && !u_off_fired && now - u_down > 30) {
     Serial.printf("{\"type\":\"back_key\",\"view\":%d}\n", (int)s_view);
     if (s_view == V_SPECTRUM) { spectrum_leave(); s_view = V_SCOPE; }
     else if (s_view == V_DETAIL) s_view = V_SCOPE;
     else if (s_view == V_MENU) s_view = s_mode == UI_MODE_TX ? V_TX : V_SCOPE;
-    else if (s_view == V_TX) { s_menu_sel = 3; s_view = V_MENU; }     // beacon list -> menu
+    else if (s_view == V_TX) { s_menu_sel = 4; s_view = V_MENU; }     // beacon list -> menu
     s_dirty = true;
   }
   u_was = u;
   if (s_now < s_bl_toast_until) s_dirty = true;
+
+  // ---- Solar ambient night mode evaluation
+  if (now - s_last_solar_eval >= 10000 || s_last_solar_eval == 0) {
+    s_last_solar_eval = now;
+    time_t t_now = time(nullptr);
+    if (t_now > 1700000000) {
+      struct tm tm_utc;
+      gmtime_r(&t_now, &tm_utc);
+      double elev = solar_elevation_deg(37.7749, -122.4194, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
+                                        tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
+      bool night = (elev <= SOLAR_SUNDOWN_ELEVATION_DEG);
+      if (night != s_night_mode) {
+        s_night_mode = night;
+        ring_set_dim(s_night_mode);
+        uint8_t bl_val = s_dimmed ? BL_LEVELS[2] : BL_LEVELS[s_bl];
+        if (s_night_mode) bl_val = (uint8_t)(bl_val * 7 / 10);
+        ledcWrite(PIN_LCD_BL, bl_val);
+      }
+    }
+  }
 
   // ---- idle dimming (both modes): 60 s without input drops the backlight to
   //      its lowest step (25%, still plainly lit); any input restores it; a
@@ -575,7 +630,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     bool want_dim = now - s_last_input > 120000 && !sm.danger && s_view != V_SPECTRUM;
     if (want_dim != s_dimmed) {
       s_dimmed = want_dim;
-      ledcWrite(PIN_LCD_BL, want_dim ? BL_LEVELS[2] : BL_LEVELS[s_bl]);
+      uint8_t bl_val = want_dim ? BL_LEVELS[2] : BL_LEVELS[s_bl];
+      if (s_night_mode) bl_val = (uint8_t)(bl_val * 7 / 10);
+      ledcWrite(PIN_LCD_BL, bl_val);
     }
   }
 

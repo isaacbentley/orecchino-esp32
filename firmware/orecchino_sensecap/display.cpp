@@ -31,6 +31,8 @@ void display_force_redraw() {}
 #include <Adafruit_GFX.h>  // for its Fonts/ (GFXfont layout is shared)
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSansBold9pt7b.h>
+#include <time.h>
+#include "../common/solar.h"
 
 #define GFX_BL     45
 #define BTN_PIN    38
@@ -63,7 +65,11 @@ static double s_lat = HOME_LAT, s_lon = HOME_LON;
 static int    s_z = 12;
 
 // interaction / view state
-#define SPEC_HOLD_MS 10000  // button hold that unlocks the spectrum easter egg
+#define STANDBY_HOLD_MS 1500
+#define SPEC_HOLD_MS    6000  // button hold that unlocks the spectrum easter egg
+static bool     s_standby = false;
+static uint8_t  s_bl_target = 255;
+static uint32_t s_last_solar_eval = 0;
 static bool     s_spec_mode = false;
 static bool     s_list_mode = false;
 static char     s_sel_uas[41] = "";
@@ -719,6 +725,16 @@ static void touch_tick(uint32_t now) {
   int n = tp_points(&x0, &y0, &x1, &y1);
   if (n < 0) return;  // touch controller absent/unhappy: stay quiet
 
+  if (s_standby) {
+    if (n >= 1) {
+      s_standby = false;
+      analogWrite(GFX_BL, s_bl_target);
+      s_dirty = 1;
+      render_frame();
+    }
+    return;
+  }
+
   if (n == 2 && !s_list_mode) {
     double d = sqrt((double)(x1 - x0) * (x1 - x0) + (double)(y1 - y0) * (y1 - y0));
     if (!pinching) {
@@ -849,7 +865,7 @@ bool display_begin() {
   s_cv->print("SCANNING");
   s_cv->setFont(nullptr);
   s_cv->flush();
-  digitalWrite(GFX_BL, HIGH);  // first frame is clean — lights on
+  analogWrite(GFX_BL, s_bl_target);  // first frame is clean — lights on
   return true;
 }
 
@@ -932,12 +948,46 @@ void display_sync_status(uint32_t files_done) {
 void display_tick(uint32_t now) {
   if (!s_gfx) return;
 
-  // Side button: short press acts on release (toggle map/list, or leave the
-  // spectrum view); a 10 s hold fires the spectrum easter egg while held.
+  // Solar ambient night-mode auto-dimming
+  if (now - s_last_solar_eval >= 10000 || s_last_solar_eval == 0) {
+    s_last_solar_eval = now;
+    time_t t_now = time(nullptr);
+    if (t_now > 1700000000) {
+      struct tm tm_utc;
+      gmtime_r(&t_now, &tm_utc);
+      double lat = g_home_set ? g_home_lat : HOME_LAT;
+      double lon = g_home_set ? g_home_lon : HOME_LON;
+      double elev = solar_elevation_deg(lat, lon, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
+                                        tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
+      bool night = (elev <= SOLAR_SUNDOWN_ELEVATION_DEG);
+      s_bl_target = night ? 90 : 255;
+    } else {
+      s_bl_target = 255;
+    }
+    if (!s_standby) {
+      analogWrite(GFX_BL, s_bl_target);
+    }
+  }
+
+  // Side button: short press acts on release (toggle map/list, or leave spectrum);
+  // hold 1.5-5s enters standby; hold 6s unlocks the spectrum easter egg.
   static bool     btn_was = false;
   static uint32_t btn_down_ms = 0;
   static bool     hold_fired = false;
   bool btn = digitalRead(BTN_PIN) == LOW;
+
+  // If in standby, any button press wakes up immediately
+  if (s_standby) {
+    if (btn && !btn_was) {
+      s_standby = false;
+      analogWrite(GFX_BL, s_bl_target);
+      s_dirty = 1;
+      render_frame();
+    }
+    btn_was = btn;
+    return;
+  }
+
   if (btn && !btn_was) {
     btn_down_ms = now;
     hold_fired = false;
@@ -949,18 +999,26 @@ void display_tick(uint32_t now) {
   } else if (btn && !hold_fired && now - btn_down_ms >= 400 && !s_spec_mode) {
     int prog_w = (int)(480L * (now - btn_down_ms) / SPEC_HOLD_MS);
     if (prog_w > 480) prog_w = 480;
-    s_cv->fillRect(0, 0, prog_w, 4, C_ACCENT);
+    uint16_t bar_col = (now - btn_down_ms >= STANDBY_HOLD_MS) ? C_AMBER : C_ACCENT;
+    s_cv->fillRect(0, 0, prog_w, 4, bar_col);
     s_cv->flush();
   }
   if (!btn && btn_was && !hold_fired) {
-    if (s_spec_mode) {
-      s_spec_mode = false;
-      spectrum_stop();
+    if (now - btn_down_ms >= STANDBY_HOLD_MS) {
+      // Standby / screen blanking
+      s_standby = true;
+      analogWrite(GFX_BL, 0);
     } else {
-      s_list_mode = !s_list_mode;
+      // Short click
+      if (s_spec_mode) {
+        s_spec_mode = false;
+        spectrum_stop();
+      } else {
+        s_list_mode = !s_list_mode;
+      }
+      s_dirty = 1;
+      render_frame();
     }
-    s_dirty = 1;
-    render_frame();
   }
   btn_was = btn;
 

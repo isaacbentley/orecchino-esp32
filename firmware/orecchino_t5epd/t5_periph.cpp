@@ -1,15 +1,18 @@
 #include "t5_periph.h"
 #include "board_t5.h"
+#include "ui_epd.h"
 #include "driver/i2c_master.h"
 #include "../common/ui_common.h"   // g_home_*
 #include "../common/solar.h"
 #include <Preferences.h>
+#include <esp_sleep.h>
 #include <sys/time.h>
 #include <time.h>
 
 static i2c_master_bus_handle_t s_bus = nullptr;
-static i2c_master_dev_handle_t s_pca = nullptr, s_tp = nullptr, s_gauge = nullptr;
+static i2c_master_dev_handle_t s_pca = nullptr, s_tp = nullptr, s_gauge = nullptr, s_charger = nullptr;
 static bool s_have_gauge = false;
+static bool s_have_charger = false;
 enum TpKind : uint8_t { TP_NONE, TP_GT911, TP_GT6972P };
 static TpKind s_tp_kind = TP_NONE;
 static uint32_t s_tp_data_addr = 0;   // GT6972P: from its IC-info block
@@ -17,6 +20,8 @@ static int s_tp_max_x = 0, s_tp_max_y = 0;
 static bool s_gps_fix = false;
 static int  s_gps_sats = 0;
 static uint32_t s_gps_fix_ms = 0;
+
+static const uint8_t BQ25896_ADDR = 0x6B;
 
 // ---- bus helpers
 static i2c_master_dev_handle_t dev_add(uint8_t addr) {
@@ -36,6 +41,17 @@ static bool wrrd(i2c_master_dev_handle_t d, const uint8_t* w, size_t wl, uint8_t
 }
 static bool present(uint8_t addr) { return i2c_master_probe(s_bus, addr, 30) == ESP_OK; }
 
+// ---- BQ25896 Battery Charger
+static bool bq25896_read(uint8_t reg, uint8_t* val) {
+  if (!s_charger) return false;
+  return wrrd(s_charger, &reg, 1, val, 1);
+}
+static bool bq25896_write(uint8_t reg, uint8_t val) {
+  if (!s_charger) return false;
+  uint8_t w[2] = { reg, val };
+  return wr(s_charger, w, 2);
+}
+
 // ---- PCA9555: read-modify-write on port 0 only; port 1 belongs to epdiy
 static bool pca_rmw(uint8_t reg, uint8_t clear, uint8_t set) {
   uint8_t v = 0;
@@ -49,8 +65,10 @@ static void rail_on() {
   if (!s_pca) return;
   pca_rmw(0x06, 0x01, 0x00);   // config port 0: bit 0 output
   pca_rmw(0x02, 0x00, 0x01);   // output port 0: LORA_EN high -> LoRa + GPS 3V3
+  pca_rmw(0x07, 0x00, 0x04);   // config port 1: bit 2 input (PCA_PIN_PC12 = S3 button)
   delay(100);
 }
+
 
 // ---- Goodix GT911 (16-bit registers, big-endian)
 static bool s_home_key = false;
@@ -516,6 +534,7 @@ void periph_begin() {
   rail_on();
   touch_begin();
   if (present(BQ27220_ADDR)) { s_gauge = dev_add(BQ27220_ADDR); s_have_gauge = s_gauge != nullptr; }
+  if (present(BQ25896_ADDR)) { s_charger = dev_add(BQ25896_ADDR); s_have_charger = s_charger != nullptr; }
   if (present(PCF8563_ADDR)) {
     s_rtc = dev_add(PCF8563_ADDR);
     s_have_rtc = (s_rtc != nullptr);
@@ -529,8 +548,9 @@ void periph_begin() {
   periph_bl_init();
   Serial1.begin(GPS_BAUDS[0], SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
   s_gps_baud_since = millis();
-  Serial.printf("{\"type\":\"periph\",\"touch\":\"%s\",\"touch_range\":[%d,%d],\"gauge\":%s,\"rtc\":%s,\"rail\":%s,\"bl\":\"%s\"}\n",
+  Serial.printf("{\"type\":\"periph\",\"touch\":\"%s\",\"touch_range\":[%d,%d],\"gauge\":%s,\"charger\":%s,\"rtc\":%s,\"rail\":%s,\"bl\":\"%s\"}\n",
                 periph_touch_kind(), s_tp_max_x, s_tp_max_y, s_have_gauge ? "true" : "false",
+                s_have_charger ? "true" : "false",
                 s_have_rtc ? "true" : "false", s_pca ? "true" : "false",
                 s_bl_mode == BL_AUTO ? "auto" : s_bl_mode == BL_ON ? "on" : "off");
 }
@@ -567,3 +587,68 @@ void periph_tick(uint32_t now) {
     bl_eval(now);
   }
 }
+
+bool periph_pwr_btn_down() {
+  if (!s_pca) return false;
+  uint8_t reg = 0x01; // PCA9535 Input port 1
+  uint8_t val = 0xFF;
+  if (wrrd(s_pca, &reg, 1, &val, 1)) {
+    // PCA_PIN_PC12 is bit 2 (0x04). Active LOW when button pressed.
+    return (val & 0x04) == 0;
+  }
+  return false;
+}
+
+bool periph_is_charging() {
+  if (!s_have_charger) return false;
+  uint8_t status = 0;
+  if (bq25896_read(0x0B, &status)) {
+    uint8_t chg = (status >> 3) & 0x03;
+    return (chg == 1 || chg == 2);
+  }
+  return false;
+}
+
+bool periph_on_vbus() {
+  if (!s_have_charger) return true; // Default to true if charger chip not detected
+  uint8_t status = 0;
+  if (bq25896_read(0x0B, &status)) {
+    return (status & 0x04) != 0; // Bit 2: PG_STAT (Power Good)
+  }
+  return false;
+}
+
+void periph_power_off() {
+  Serial.println("[ORECCHINO] Powering off device...");
+
+  // 1. Draw persistent power-off screen on E-paper display and power down TPS65185
+  ui_show_shutdown_screen();
+
+  // 2. Turn off backlight PT4103 boost converter
+  periph_bl_set_duty(0);
+  digitalWrite(PIN_BL_EN, LOW);
+
+  // 3. Cut LoRa & GPS 3V3 power rail via PCA9535 (Port 0 Bit 0 = 0)
+  if (s_pca) {
+    pca_rmw(0x02, 0x01, 0x00);
+  }
+
+  // 4. If running on battery (not connected to USB), command BQ25896 to disconnect battery (Ship mode)
+  if (s_have_charger && !periph_on_vbus()) {
+    Serial.println("[ORECCHINO] Disconnecting battery FET (Ship mode shutdown)...");
+    delay(50);
+    uint8_t reg9 = 0;
+    bq25896_read(0x09, &reg9);
+    reg9 |= (1 << 5);  // BATFET_DIS = 1
+    reg9 &= ~(1 << 3); // BATFET_DLY = 0 (immediate)
+    bq25896_write(0x09, reg9);
+    delay(200);
+  }
+
+  // 5. Fallback or if USB is connected: enter ESP32-S3 Deep Sleep
+  Serial.println("[ORECCHINO] Entering deep sleep (wake via BOOT button or USB)...");
+  delay(50);
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0); // Wake on side BOOT button (active low)
+  esp_deep_sleep_start();
+}
+

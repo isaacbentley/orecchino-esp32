@@ -45,3 +45,9 @@ bool    periph_has_utc_time();
 void    periph_get_utc_time(uint16_t* y, uint8_t* m, uint8_t* d, uint8_t* h, uint8_t* min, uint8_t* s);
 void    periph_set_utc_time(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s);
 
+// Power management & hardware button (BQ25896 charger, PCA9535 S3 button, power off)
+bool    periph_is_charging();
+bool    periph_on_vbus();
+bool    periph_pwr_btn_down();
+void    periph_power_off();
+

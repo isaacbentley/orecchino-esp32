@@ -15,3 +15,5 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct);
 bool ui_spectrum_active();
 void ui_feed_wifi(uint8_t chan, int8_t rssi);
 void ui_set_wifi_channel(uint8_t chan);
+/// Hardware power-off via AXP2101 PMU / TCA9554 / deep sleep
+void amoled_power_off();

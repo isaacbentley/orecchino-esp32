@@ -2,6 +2,7 @@
 #include "board_amoled.h"
 #include "../common/ui_common.h"
 #include <Wire.h>
+#include "esp_sleep.h"
 #include <Arduino_GFX_Library.h>
 #include <Adafruit_GFX.h>  // for its Fonts/ (GFXfont layout is shared)
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -208,6 +209,45 @@ static void draw_list() {
   s_dirty = false;
 }
 
+void amoled_power_off() {
+  if (s_gfx) {
+    s_gfx->startWrite();
+    s_gfx->fillScreen(C_BG);
+    s_gfx->setTextColor(C_TEXT);
+    s_gfx->setFont(&FreeSansBold12pt7b);
+    s_gfx->setCursor(80, 200);
+    s_gfx->print("POWER OFF");
+    s_gfx->setFont(&FreeSansBold9pt7b);
+    s_gfx->setTextColor(C_MUTED);
+    s_gfx->setCursor(70, 240);
+    s_gfx->print("Hold BOOT to wake");
+    s_gfx->endWrite();
+    s_gfx->flush();
+    delay(500);
+  }
+
+  // Blank panel
+  if (s_panel) s_panel->setBrightness(0);
+
+  // Turn off display power and touch power via TCA9554
+  Wire.beginTransmission(TCA9554_ADDR);
+  Wire.write(0x01); // Output Port register
+  Wire.write(0x00); // clear P4 (LCD) and P5 (TP)
+  Wire.endTransmission();
+
+  // Send power off command to AXP2101 PMU
+  Wire.beginTransmission(AXP2101_ADDR);
+  Wire.write(0x10);
+  Wire.write(0x01); // POWER_OFF bit
+  Wire.endTransmission();
+
+  delay(200);
+
+  // Fallback if USB power is connected or PMU power off not triggered
+  esp_sleep_enable_ext1_wakeup(1ULL << PIN_BOOT_BTN, ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_deep_sleep_start();
+}
+
 static void draw_detail() {
   if (!s_n) { s_view = V_LIST; s_dirty = true; return; }
   const Track* t = &g_tracks[s_order[s_sel]];
@@ -235,15 +275,27 @@ static void draw_detail() {
   y += 44;
   meter(16, y, W - 32, t->rssi, danger ? C_DANGER : C_ACCENT); y += 22;
   snprintf(b, sizeof(b), "%d dBm  (peak %d)", t->rssi, t->peak_rssi); txt(&FreeSansBold9pt7b, 16, y, C_MUTED, b); y += 26;
-  char hb[10] = "--", sb[12] = "--";
+  char hb[10] = "--", sb[12] = "--", mb[12] = "--";
   if (!isnan(t->height)) snprintf(hb, sizeof(hb), "%d m", (int)t->height);
   if (!isnan(t->speed))  snprintf(sb, sizeof(sb), "%.1f m/s", t->speed);
+  if (!isnan(t->max_height)) snprintf(mb, sizeof(mb), "%d m", (int)t->max_height);
   snprintf(b, sizeof(b), "height %s   speed %s", hb, sb); txt(&FreeSansBold9pt7b, 16, y, C_TEXT, b); y += 22;
+  if (!isnan(t->heading)) {
+    snprintf(b, sizeof(b), "hdg %d*   max alt %s", (int)t->heading, mb);
+  } else {
+    snprintf(b, sizeof(b), "max alt %s", mb);
+  }
+  txt(&FreeSansBold9pt7b, 16, y, C_MUTED, b); y += 22;
   snprintf(b, sizeof(b), "status %s", ui_status_name(t->status)); txt(&FreeSansBold9pt7b, 16, y, t->status == 3 ? C_DANGER : C_TEXT, b); y += 22;
   if (t->has_pos) {
     snprintf(b, sizeof(b), "%.6f, %.6f", t->lat, t->lon); txt(&FreeSansBold9pt7b, 16, y, C_MUTED, b); y += 22;
   }
-  if (t->auth_state) { txt(&FreeSansBold9pt7b, 16, y, ui_auth_color(t->auth_state), ui_auth_text(t->auth_state)); y += 22; }
+  if (t->auth_state) {
+    uint16_t acol = ui_auth_color(t->auth_state);
+    s_gfx->drawRoundRect(14, y - 14, 140, 18, 4, acol);
+    txt(&FreeSansBold9pt7b, 20, y, acol, ui_auth_text(t->auth_state));
+    y += 24;
+  }
   if (t->in_tfr) { snprintf(b, sizeof(b), "INSIDE TFR %s", t->tfr_id); txt(&FreeSansBold9pt7b, 16, y, C_DANGER, b); y += 22; }
   snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5]);
   txt(&FreeSansBold9pt7b, 16, y, C_MUTED, b); y += 22;
@@ -388,12 +440,21 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     if (t) s_last_touch = now;
     t_was = t;
   }
-  // BOOT button: tap = back to the list, hold 1.5 s = spectrum
-  static bool k_was = false; static uint32_t k_down = 0; static bool k_fired = false;
+  // BOOT button: tap = back to list; hold 1.5s = spectrum; hold 3s = power off
+  static bool k_was = false; static uint32_t k_down = 0;
+  static bool k_spec_fired = false; static bool k_pwr_fired = false;
   bool k = digitalRead(PIN_BOOT_BTN) == LOW;
-  if (k && !k_was) { k_down = now; k_fired = false; }
-  if (k && !k_fired && now - k_down > 1500) {
-    k_fired = true;
+  if (k && !k_was) { k_down = now; k_spec_fired = false; k_pwr_fired = false; }
+  if (k && !k_pwr_fired && now - k_down >= 400) {
+    int prog_w = (int)(W * (now - k_down) / 3000);
+    if (prog_w > W) prog_w = W;
+    uint16_t col = (now - k_down >= 1500) ? C_DANGER : C_ACCENT;
+    s_gfx->startWrite();
+    s_gfx->fillRect(0, 0, prog_w, 3, col);
+    s_gfx->endWrite();
+  }
+  if (k && !k_spec_fired && now - k_down > 1500) {
+    k_spec_fired = true;
     if (s_view != V_SPECTRUM) {
       memset((void*)s_wsum, 0, sizeof(s_wsum)); memset((void*)s_wcnt, 0, sizeof(s_wcnt));
       memset(s_a24, 0, sizeof(s_a24)); memset(s_wf, 0, sizeof(s_wf));
@@ -402,7 +463,13 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     } else { s_spec = false; s_view = V_LIST; }
     s_dirty = true; s_last_touch = now;
   }
-  if (!k && k_was && !k_fired && now - k_down > 30) { s_view = V_LIST; s_spec = false; s_dirty = true; s_last_touch = now; }
+  if (k && !k_pwr_fired && now - k_down > 3000) {
+    k_pwr_fired = true;
+    amoled_power_off();
+  }
+  if (!k && k_was && !k_spec_fired && !k_pwr_fired && now - k_down > 30) {
+    s_view = V_LIST; s_spec = false; s_dirty = true; s_last_touch = now;
+  }
   k_was = k;
 
   // idle dimming (a live danger keeps the panel bright)

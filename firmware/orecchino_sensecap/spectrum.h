@@ -25,3 +25,10 @@ bool spectrum_active();
 void spectrum_feed_wifi(uint8_t chan, int8_t rssi);
 /// Current promiscuous dwell channel (so a silent channel decays fast).
 void spectrum_set_wifi_channel(uint8_t chan);
+
+/// Clear peak hold buffers (both 2.4 GHz and Sub-GHz).
+void spectrum_clear_peaks();
+/// Toggle sweep freeze/pause.
+void spectrum_toggle_pause();
+/// Check if sweep is currently paused.
+bool spectrum_is_paused();
