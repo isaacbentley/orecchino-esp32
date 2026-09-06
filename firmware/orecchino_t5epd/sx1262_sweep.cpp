@@ -177,27 +177,34 @@ void sx1262_sweep_chunk(int8_t* bins, int n, int* cursor, int steps) {
   if (!s_ok || n <= 0 || !cursor || !bins) return;
   static const uint8_t RX_CONT[3] = {0xFF, 0xFF, 0xFF};
   const uint64_t span = s_hi - s_lo;
-  if (!wait_busy()) return;  // one health check per chunk is plenty
+
   for (int s = 0; s < steps; s++) {
     int i = *cursor;
     uint32_t hz = s_lo + (uint32_t)((span * i + span / 2) / n);
     uint32_t frf = (uint32_t)(((uint64_t)hz << 25) / 32000000ULL);
     uint8_t fr[4] = {(uint8_t)(frf >> 24), (uint8_t)(frf >> 16),
                      (uint8_t)(frf >> 8), (uint8_t)frf};
-    // Config-command BUSY pulses are sub-microsecond; skip the BUSY reads
-    // in the hop path and let the RX-start delay below cover them.
-    xfer(OP_SET_STANDBY, STDBY_XOSC, 1, nullptr, 0, false);
-    xfer(OP_SET_RF_FREQ, fr, 4, nullptr, 0, false);
-    xfer(OP_SET_RX, RX_CONT, 3, nullptr, 0, false);
-    delayMicroseconds(260);  // RX start (~127 us BUSY) + settle
-    // Two RSSI reads ~230 us apart, max-held: catches FHSS/TDMA bursts a
-    // single instantaneous sample would miss.
+
+    // On high-speed ESP32-S3 (240MHz), wait for BUSY so radio PLL locks and settles
+    xfer(OP_SET_STANDBY, STDBY_XOSC, 1, nullptr, 0, true);
+    xfer(OP_SET_RF_FREQ, fr, 4, nullptr, 0, true);
+    xfer(OP_SET_RX, RX_CONT, 3, nullptr, 0, true);
+    delayMicroseconds(200);  // RX start + settle
+
+    // Two RSSI reads ~150 us apart, max-held: catches FHSS/TDMA bursts
     uint8_t r1[2] = {0}, r2[2] = {0};  // status, rssi
-    xfer(OP_GET_RSSI_INST, nullptr, 0, r1, 2, false);
-    xfer(OP_GET_RSSI_INST, nullptr, 0, r2, 2, false);
+    xfer(OP_GET_RSSI_INST, nullptr, 0, r1, 2, true);
+    delayMicroseconds(150);
+    xfer(OP_GET_RSSI_INST, nullptr, 0, r2, 2, true);
+
+    if (s == 0) {
+      Serial.printf("[SWEEP] bin %d (%u MHz): r1=[st=0x%02X, raw=%u], r2=[st=0x%02X, raw=%u]\n",
+                    i, hz / 1000000UL, r1[0], r1[1], r2[0], r2[1]);
+    }
+
     uint8_t raw = r1[1] < r2[1] ? r1[1] : r2[1];  // lower raw = stronger
     int dbm = -(int)raw / 2;
-    bins[i] = (int8_t)(dbm < -127 ? -127 : dbm);
+    bins[i] = (int8_t)(dbm < -127 ? -127 : dbm > 0 ? 0 : dbm);
     *cursor = (i + 1) % n;
   }
 }
