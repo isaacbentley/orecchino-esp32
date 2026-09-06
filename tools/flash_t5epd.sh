@@ -33,5 +33,28 @@ else
   echo "Warning: esptool not found to trigger auto-reboot; manual reset may be needed."
 fi
 
+# Synchronize onboard RTC with current computer time over serial
+echo "Synchronizing onboard RTC to current UTC time..."
+sleep 2.0
+python3 -c '
+import serial, sys, time
+port = sys.argv[1]
+epoch = int(time.time())
+for attempt in range(3):
+    try:
+        s = serial.Serial(port, 115200, timeout=1)
+        time.sleep(0.5)
+        s.write(f"{{\"cmd\":\"set_time\",\"utc\":{epoch}}}\n".encode())
+        time.sleep(0.3)
+        res = s.read(s.in_waiting or 100).decode("utf-8", errors="ignore")
+        s.close()
+        if "time" in res or "utc" in res:
+            print(f"RTC successfully synchronized to {epoch} ({time.strftime(\"%Y-%m-%d %H:%M:%SZ\", time.gmtime(epoch))})")
+            sys.exit(0)
+    except Exception as e:
+        time.sleep(1.0)
+print(f"RTC sync command sent (epoch {epoch}).")
+' "$PORT" 2>/dev/null || true
+
 echo "Reopen the app with: open app/build/Orecchino.app"
 

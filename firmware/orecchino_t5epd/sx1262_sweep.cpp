@@ -112,43 +112,92 @@ bool sx1262_sweep_begin() {
   Serial.printf("[SX1262] Radio detected! Status: 0x%02X (mode=%d, cmd=%d)\n",
                 chip_status, (chip_status >> 4) & 0x07, (chip_status >> 1) & 0x07);
 
-  // LoRa modules on this board carry a TCXO on DIO3; try that first and
-  // fall back to a crystal on an XOSC start error, like the Indicator.
-  static const uint8_t TCXO[4] = {0x04 /* 2.4 V */, 0x00, 0x01, 0x40 /* 5 ms */};
-  static const uint8_t CAL_ALL[1] = {0x7F};
-  cmd(OP_SET_DIO3_TCXO, TCXO, 4);
-  cmd(OP_CALIBRATE, CAL_ALL, 1);
-  delay(5);
-  wait_busy(50);
-  uint8_t err[3] = {0};  // status, errors MSB, errors LSB
-  xfer(OP_GET_DEV_ERRORS, nullptr, 0, err, 3);
-  Serial.printf("[SX1262] Device errors after TCXO cal: 0x%02X 0x%02X 0x%02X\n", err[0], err[1], err[2]);
-  if (err[2] & 0x20) {  // XOSC_START_ERR
-    Serial.println("[SX1262] TCXO failed, falling back to crystal (XTAL)...");
-    hard_reset();
-    cmd(OP_SET_STANDBY, STDBY_RC, 1);
-    cmd(OP_CALIBRATE, CAL_ALL, 1);
-    delay(5);
-    wait_busy(50);
-  }
-  static const uint8_t CLR[2] = {0, 0};
+  // 1. Set regulator to DCDC (LilyGO T5 S3 has DCDC inductor)
+  static const uint8_t REG_DCDC[1] = {0x01};
+  cmd(0x96 /* OP_SET_REGULATOR_MODE */, REG_DCDC, 1);
+
+  // 2. Clear sticky errors before configuring oscillator
+  static const uint8_t CLR[2] = {0x00, 0x00};
   cmd(OP_CLR_DEV_ERRORS, CLR, 2);
 
+  // 3. Try configuring TCXO on DIO3 (10 ms startup delay = 640 * 15.625 us = 0x000280)
+  // LilyGO factory examples use RadioLib default tcxoVoltage = 1.6V (code 0x00).
+  // We test 1.6V, 1.8V (0x02), and 2.4V (0x04) to guarantee oscillator lock.
+  const uint8_t tcxo_voltages[] = {0x00 /* 1.6V */, 0x02 /* 1.8V */, 0x04 /* 2.4V */};
+  bool xosc_ready = false;
+  uint8_t cur_mode = 0;
+
+  for (uint8_t v_code : tcxo_voltages) {
+    cmd(OP_SET_STANDBY, STDBY_RC, 1);
+    uint8_t tcxo_cmd[4] = {v_code, 0x00, 0x02, 0x80};
+    cmd(OP_SET_DIO3_TCXO, tcxo_cmd, 4);
+    cmd(OP_SET_STANDBY, STDBY_XOSC, 1);
+    delay(15);
+    wait_busy(50);
+
+    uint8_t chk_st = 0;
+    xfer(OP_GET_STATUS, nullptr, 0, &chk_st, 1);
+    cur_mode = (chk_st >> 4) & 0x07;
+    Serial.printf("[SX1262] TCXO test (voltage code 0x%02X): status=0x%02X (mode=%d, cmd=%d)\n",
+                  v_code, chk_st, cur_mode, (chk_st >> 1) & 0x07);
+    if (cur_mode == 3 /* STDBY_XOSC */) {
+      xosc_ready = true;
+      Serial.printf("[SX1262] TCXO locked successfully with voltage code 0x%02X!\n", v_code);
+      break;
+    }
+  }
+
+  if (!xosc_ready) {
+    // If TCXO did not start on any voltage, try standard crystal (XTAL)
+    Serial.println("[SX1262] TCXO failed to lock; attempting XTAL fallback...");
+    hard_reset();
+    cmd(OP_SET_STANDBY, STDBY_RC, 1);
+    cmd(OP_SET_STANDBY, STDBY_XOSC, 1);
+    delay(15);
+    wait_busy(50);
+    uint8_t chk_st = 0;
+    xfer(OP_GET_STATUS, nullptr, 0, &chk_st, 1);
+    cur_mode = (chk_st >> 4) & 0x07;
+    Serial.printf("[SX1262] XTAL fallback status: 0x%02X (mode=%d)\n", chk_st, cur_mode);
+  }
+
+  // 4. Clear any errors accumulated during clock start, then calibrate
+  cmd(OP_CLR_DEV_ERRORS, CLR, 2);
+  static const uint8_t CAL_ALL[1] = {0x7F};
+  cmd(OP_CALIBRATE, CAL_ALL, 1);
+  delay(10);
+  wait_busy(100);
+
+  uint8_t err[3] = {0};  // status, errors MSB, errors LSB
+  xfer(OP_GET_DEV_ERRORS, nullptr, 0, err, 3);
+  Serial.printf("[SX1262] Device errors after cal: 0x%02X 0x%02X 0x%02X\n", err[0], err[1], err[2]);
+
+  // 5. RF Switch on DIO2
   static const uint8_t RFSW[1] = {0x01};  // DIO2 drives the antenna switch
   cmd(OP_SET_DIO2_RF_SW, RFSW, 1);
+
+  // 6. Modulation & Packet Type
   static const uint8_t GFSK[1] = {0x00};
   cmd(OP_SET_PKT_TYPE, GFSK, 1);
-  // 250 kb/s, no shaping, 467 kHz RX bandwidth (~one 625 kHz bin), 50 kHz
-  // fdev (unused in RX — must merely be valid).
+  // 250 kb/s, no shaping, 467 kHz RX bandwidth (~one 625 kHz bin), 50 kHz fdev
   static const uint8_t MOD[8] = {0x00, 0x10, 0x00, 0x00, 0x09, 0x00, 0xCC, 0xCD};
   cmd(OP_SET_MOD_PARAMS, MOD, 8);
-  static const uint8_t IMG[2] = {212, 233};  // image cal 848-932 MHz (MHz/4)
+
+  // 7. Image calibration for 848-932 MHz (MHz/4: 212, 233)
+  static const uint8_t IMG[2] = {212, 233};
   cmd(OP_CAL_IMAGE, IMG, 2);
   wait_busy(50);
 
-  // Park in XOSC standby: per-bin hops then skip the oscillator restart.
-  s_ok = cmd(OP_SET_STANDBY, STDBY_XOSC, 1);
-  Serial.printf("[SX1262] Sweep initialization %s!\n", s_ok ? "COMPLETE (READY)" : "FAILED at XOSC standby");
+  // 8. Park in XOSC standby: per-bin hops then skip oscillator restart
+  cmd(OP_CLR_DEV_ERRORS, CLR, 2);
+  cmd(OP_SET_STANDBY, STDBY_XOSC, 1);
+  wait_busy(20);
+
+  uint8_t final_st = 0;
+  xfer(OP_GET_STATUS, nullptr, 0, &final_st, 1);
+  s_ok = (((final_st >> 4) & 0x07) == 3);
+  Serial.printf("[SX1262] Sweep initialization %s! (status=0x%02X, mode=%d)\n",
+                s_ok ? "COMPLETE (READY)" : "FAILED (not in XOSC)", final_st, (final_st >> 4) & 0x07);
   return s_ok;
 }
 

@@ -334,6 +334,27 @@ static bool rtc_write_time(uint16_t yr, uint8_t mo, uint8_t d, uint8_t h, uint8_
   return wr(s_rtc, w, 8);
 }
 
+static bool parse_build_time(uint16_t* yr, uint8_t* mo, uint8_t* d, uint8_t* h, uint8_t* mi, uint8_t* s) {
+  const char* date = __DATE__;     // "Sep  5 2026"
+  const char* time_str = __TIME__; // "21:30:24"
+  char s_month[5] = {0};
+  int day = 0, year = 0, hour = 0, minute = 0, second = 0;
+  if (sscanf(date, "%3s %d %d", s_month, &day, &year) != 3) return false;
+  if (sscanf(time_str, "%d:%d:%d", &hour, &minute, &second) != 3) return false;
+
+  const char* months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+  *mo = 1;
+  for (uint8_t i = 0; i < 12; i++) {
+    if (strcmp(s_month, months[i]) == 0) { *mo = i + 1; break; }
+  }
+  *yr = (uint16_t)year;
+  *d  = (uint8_t)day;
+  *h  = (uint8_t)hour;
+  *mi = (uint8_t)minute;
+  *s  = (uint8_t)second;
+  return (*yr >= 2024 && *mo >= 1 && *mo <= 12 && *d >= 1 && *d <= 31);
+}
+
 static inline time_t utc_to_epoch(int y, int m, int d, int h, int min, int s) {
   if (m <= 2) y--;
   int era = (y >= 0 ? y : y - 399) / 400;
@@ -556,6 +577,13 @@ void periph_begin() {
       uint16_t yr; uint8_t mo, d, h, mi, s;
       if (rtc_read_time(&yr, &mo, &d, &h, &mi, &s)) {
         periph_set_utc_time(yr, mo, d, h, mi, s);
+        Serial.printf("[RTC] Valid time restored: %04u-%02u-%02uT%02u:%02u:%02uZ\n", yr, mo, d, h, mi, s);
+      } else {
+        if (parse_build_time(&yr, &mo, &d, &h, &mi, &s)) {
+          periph_set_utc_time(yr, mo, d, h, mi, s);
+          Serial.printf("[RTC] Clock integrity lost / uninitialized; seeded from build time: %04u-%02u-%02uT%02u:%02u:%02uZ\n",
+                        yr, mo, d, h, mi, s);
+        }
       }
     }
   }
