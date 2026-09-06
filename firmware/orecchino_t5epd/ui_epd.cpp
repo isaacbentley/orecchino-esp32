@@ -1811,8 +1811,27 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       if (!t_was) { tx0 = sx; ty0 = sy; Serial.printf("{\"type\":\"touch\",\"raw\":[%d,%d],\"xy\":[%d,%d]}\n", rx, ry, sx, sy); }
       txl = sx; tyl = sy;
     } else if (t_was) {
-      if (abs(txl - tx0) < 25 && abs(tyl - ty0) < 25) { tap_x = tx0; tap_y = ty0; }
-      else { drag_dx = txl - tx0; drag_dy = tyl - ty0; }
+      // Slop and drag discrimination:
+      // Only the open map canvas supports drag/pan. In table, spectrum, modals, diag,
+      // and on controls (header tabs, footer buttons, zoom buttons, HUD), any touch release is an instant tap!
+      bool is_map_drag_area = (s_map && !s_spec && !s_diag && !s_confirm_switch && !s_inspector &&
+                               ty0 > 92 && ty0 < 485 && tx0 < W - 65);
+      if (!is_map_drag_area) {
+        tap_x = tx0;
+        tap_y = ty0;
+        Serial.printf("{\"type\":\"tap\",\"xy\":[%d,%d],\"slop\":[%d,%d]}\n", tap_x, tap_y, abs(txl - tx0), abs(tyl - ty0));
+      } else {
+        // Map canvas: 55-pixel slop (~6mm on 4.7" panel) before treating as pan
+        if (abs(txl - tx0) < 55 && abs(tyl - ty0) < 55) {
+          tap_x = tx0;
+          tap_y = ty0;
+          Serial.printf("{\"type\":\"tap\",\"xy\":[%d,%d]}\n", tap_x, tap_y);
+        } else {
+          drag_dx = txl - tx0;
+          drag_dy = tyl - ty0;
+          Serial.printf("{\"type\":\"drag\",\"dxy\":[%d,%d]}\n", drag_dx, drag_dy);
+        }
+      }
     }
     t_was = t;
   }

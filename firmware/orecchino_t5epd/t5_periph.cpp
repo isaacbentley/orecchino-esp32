@@ -103,7 +103,8 @@ void periph_touch_reset() {
   digitalWrite(TOUCH_RST_PIN, HIGH); // release RST while INT is still LOW
   delay(10);
   pinMode(PIN_TOUCH_INT, INPUT);     // release INT to high-Z (GT911 drives it now)
-  pinMode(TOUCH_RST_PIN, INPUT);     // high-Z so epdiy can claim GPIO9 for LCD D8
+  pinMode(TOUCH_RST_PIN, OUTPUT);    // GPIO 9 is dedicated touch reset (NOT epdiy LCD)
+  digitalWrite(TOUCH_RST_PIN, HIGH); // Keep GT911 reset firmly HIGH to prevent floating resets
   delay(60);                         // wait out GT911 firmware boot
 }
 
@@ -230,17 +231,17 @@ static bool gt6_read(int* x, int* y) {
 }
 
 static void touch_begin() {
-  if (!present(0x5D) && !present(0x14)) {
-    periph_touch_reset();
-  }
-  for (uint8_t addr : { (uint8_t)0x5D, (uint8_t)0x14 }) {
-    if (!present(addr)) continue;
-    s_tp = dev_add(addr);
-    if (!s_tp) continue;
-    if (gt911_probe()) { s_tp_kind = TP_GT911; return; }
-    if (gt6_probe())   { s_tp_kind = TP_GT6972P; return; }
-    i2c_master_bus_rm_device(s_tp);
-    s_tp = nullptr;
+  for (int retry = 0; retry < 2 && s_tp_kind == TP_NONE; retry++) {
+    if (retry > 0) periph_touch_reset();
+    for (uint8_t addr : { (uint8_t)0x5D, (uint8_t)0x14 }) {
+      if (!present(addr)) continue;
+      s_tp = dev_add(addr);
+      if (!s_tp) continue;
+      if (gt911_probe()) { s_tp_kind = TP_GT911; return; }
+      if (gt6_probe())   { s_tp_kind = TP_GT6972P; return; }
+      i2c_master_bus_rm_device(s_tp);
+      s_tp = nullptr;
+    }
   }
 }
 
