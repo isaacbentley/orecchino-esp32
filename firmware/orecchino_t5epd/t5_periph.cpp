@@ -588,8 +588,113 @@ bool periph_gps_detected() { return s_gps_detected && (millis() - s_gps_last_sen
 bool periph_gps_fix() { return s_gps_fix; }
 int  periph_gps_sats() { return s_gps_sats; }
 
+bool periph_poll_touch_event(TouchEvent* evt) {
+  if (!s_touch_queue || !evt) return false;
+  return xQueueReceive(s_touch_queue, evt, 0) == pdTRUE;
+}
+
+static void periph_input_task(void* arg) {
+  Serial.printf("[T5] Async Input & Touch Task running on Core %d (PRO_CPU)\n", xPortGetCoreID());
+
+  static bool s_touching = false;
+  static int s_x0 = 0, s_y0 = 0, s_xl = 0, s_yl = 0;
+  static uint32_t s_down_ms = 0;
+
+  for (;;) {
+    uint32_t now = millis();
+
+    // 1. Drain GPS UART (Serial1) continuously so FIFO never overflows during display redraws
+    while (Serial1.available()) {
+      char c = (char)Serial1.read();
+      if (c == '\n' || c == '\r') {
+        if (s_nmea_n > 0) {
+          s_nmea[s_nmea_n] = 0;
+          nmea_line(s_nmea, now);
+          s_nmea_n = 0;
+        }
+      } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) {
+        s_nmea[s_nmea_n++] = c;
+      } else {
+        s_nmea_n = 0;
+      }
+    }
+
+    // Hunt baud rate if silent
+    uint32_t hunt_interval = periph_gps_detected() ? 10000 : 4000;
+    if (now - s_gps_last_sentence > hunt_interval && now - s_gps_baud_since > hunt_interval) {
+      s_gps_baud_i = (s_gps_baud_i + 1) % 3;
+      Serial1.updateBaudRate(GPS_BAUDS[s_gps_baud_i]);
+      s_gps_baud_since = now;
+    }
+    if (s_gps_fix && now - s_gps_fix_ms > 30000) s_gps_fix = false;
+
+    // 2. Poll Touch Controller (GT911 / GT6972P)
+    int rx = 0, ry = 0;
+    bool down = periph_touch(&rx, &ry);
+
+    if (down) {
+      int mx = s_tp_max_x, my = s_tp_max_y;
+      int sx = 0, sy = 0;
+      if (mx && my && mx < my) {
+        sx = (int)((long)ry * 960 / my);
+        sy = (int)((long)(mx - rx) * 540 / mx);
+      } else if (mx && my) {
+        sx = (int)((long)rx * 960 / mx);
+        sy = (int)((long)ry * 540 / my);
+      } else {
+        sx = rx; sy = ry;
+      }
+      if (sx < 0) sx = 0; else if (sx >= 960) sx = 959;
+      if (sy < 0) sy = 0; else if (sy >= 540) sy = 539;
+
+      if (!s_touching) {
+        s_touching = true;
+        s_x0 = sx;
+        s_y0 = sy;
+        s_down_ms = now;
+        Serial.printf("{\"type\":\"touch\",\"core\":0,\"raw\":[%d,%d],\"xy\":[%d,%d]}\n", rx, ry, sx, sy);
+      }
+      s_xl = sx;
+      s_yl = sy;
+    } else if (s_touching) {
+      // Finger released
+      s_touching = false;
+      int dx = s_xl - s_x0;
+      int dy = s_yl - s_y0;
+
+      TouchEvent evt;
+      evt.x = (int16_t)s_x0;
+      evt.y = (int16_t)s_y0;
+      evt.dx = (int16_t)dx;
+      evt.dy = (int16_t)dy;
+      evt.ms = now;
+
+      // Tap vs drag slop discrimination
+      if (abs(dx) < 50 && abs(dy) < 50) {
+        evt.type = TOUCH_EVT_TAP;
+      } else {
+        evt.type = TOUCH_EVT_DRAG;
+      }
+
+      if (s_touch_queue) {
+        if (xQueueSend(s_touch_queue, &evt, 0) != pdTRUE) {
+          TouchEvent drop;
+          xQueueReceive(s_touch_queue, &drop, 0);
+          xQueueSend(s_touch_queue, &evt, 0);
+        }
+      }
+    }
+
+    // 15ms sampling period (~66 Hz)
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
+}
+
 void periph_begin() {
   if (i2c_master_get_bus_handle(0, &s_bus) != ESP_OK || !s_bus) return;
+  if (!s_i2c_mutex) s_i2c_mutex = xSemaphoreCreateMutex();
+  if (!s_touch_queue) s_touch_queue = xQueueCreate(16, sizeof(TouchEvent));
+
   rail_on();
   touch_begin();
   if (present(BQ27220_ADDR)) { s_gauge = dev_add(BQ27220_ADDR); s_have_gauge = s_gauge != nullptr; }
@@ -614,6 +719,19 @@ void periph_begin() {
   periph_bl_init();
   Serial1.begin(GPS_BAUDS[0], SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
   s_gps_baud_since = millis();
+
+  // Launch asynchronous input & touch task on Core 0 (PRO_CPU)
+  xTaskCreatePinnedToCore(
+    periph_input_task,
+    "t5_input_core0",
+    4096,
+    nullptr,
+    3,
+    &s_input_task_handle,
+    0   // Pin to Core 0 (PRO_CPU)
+  );
+  Serial.println("[T5] Multi-core input & touch task launched on Core 0 (PRO_CPU)");
+
   Serial.printf("{\"type\":\"periph\",\"touch\":\"%s\",\"touch_range\":[%d,%d],\"gauge\":%s,\"charger\":%s,\"rtc\":%s,\"rail\":%s,\"bl\":\"%s\"}\n",
                 periph_touch_kind(), s_tp_max_x, s_tp_max_y, s_have_gauge ? "true" : "false",
                 s_have_charger ? "true" : "false",
@@ -622,21 +740,17 @@ void periph_begin() {
 }
 
 void periph_tick(uint32_t now) {
-  while (Serial1.available()) {
-    char c = (char)Serial1.read();
-    if (c == '\n' || c == '\r') {
-      if (s_nmea_n > 0) { s_nmea[s_nmea_n] = 0; nmea_line(s_nmea, now); s_nmea_n = 0; }
-    } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) s_nmea[s_nmea_n++] = c;
-    else s_nmea_n = 0;
+  // If input task is not running for some reason, fallback to reading Serial1 here
+  if (!s_input_task_handle) {
+    while (Serial1.available()) {
+      char c = (char)Serial1.read();
+      if (c == '\n' || c == '\r') {
+        if (s_nmea_n > 0) { s_nmea[s_nmea_n] = 0; nmea_line(s_nmea, now); s_nmea_n = 0; }
+      } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) s_nmea[s_nmea_n++] = c;
+      else s_nmea_n = 0;
+    }
   }
-  // If no GPS detected, hunt baud rate every 4 s; if detected, only hunt after 10 s silence.
-  uint32_t hunt_interval = periph_gps_detected() ? 10000 : 4000;
-  if (now - s_gps_last_sentence > hunt_interval && now - s_gps_baud_since > hunt_interval) {
-    s_gps_baud_i = (s_gps_baud_i + 1) % 3;
-    Serial1.updateBaudRate(GPS_BAUDS[s_gps_baud_i]);
-    s_gps_baud_since = now;
-  }
-  if (s_gps_fix && now - s_gps_fix_ms > 30000) s_gps_fix = false;
+
   static uint32_t last_rep = 0;
   if (s_gps_fix && now - last_rep >= 10000) {
     last_rep = now;
@@ -686,6 +800,12 @@ bool periph_on_vbus() {
 
 void periph_power_off() {
   Serial.println("[ORECCHINO] Powering off device...");
+
+  // Stop background input task
+  if (s_input_task_handle) {
+    vTaskDelete(s_input_task_handle);
+    s_input_task_handle = nullptr;
+  }
 
   // 1. Draw persistent power-off screen on E-paper display and power down TPS65185
   ui_show_shutdown_screen();

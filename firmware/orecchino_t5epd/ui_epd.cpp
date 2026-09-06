@@ -1792,48 +1792,27 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     return;
   }
 
-  // touch: tap or drag-release (fast 15ms sampling)
-  static bool t_was = false; static int tx0 = 0, ty0 = 0, txl = 0, tyl = 0;
-  static uint32_t t_poll = 0;
+  // Asynchronous touch event consumption (produced on Core 0)
   int tap_x = -1, tap_y = -1, drag_dx = 0, drag_dy = 0;
-  if (now - t_poll >= 15) {
-    t_poll = now;
-    int rx, ry;
-    bool t = periph_touch(&rx, &ry);
-    if (t) {
-      int mx, my; periph_touch_range(&mx, &my);
-      int sx, sy;
-      if (mx && my && mx < my) { sx = (int)((long)ry * W / my); sy = (int)((long)(mx - rx) * H / mx); }  // portrait-native panel
-      else if (mx && my)       { sx = (int)((long)rx * W / mx); sy = (int)((long)ry * H / my); }
-      else                     { sx = rx; sy = ry; }
-      if (sx < 0) sx = 0; else if (sx >= W) sx = W - 1;
-      if (sy < 0) sy = 0; else if (sy >= H) sy = H - 1;
-      if (!t_was) { tx0 = sx; ty0 = sy; Serial.printf("{\"type\":\"touch\",\"raw\":[%d,%d],\"xy\":[%d,%d]}\n", rx, ry, sx, sy); }
-      txl = sx; tyl = sy;
-    } else if (t_was) {
-      // Slop and drag discrimination:
-      // Only the open map canvas supports drag/pan. In table, spectrum, modals, diag,
-      // and on controls (header tabs, footer buttons, zoom buttons, HUD), any touch release is an instant tap!
-      bool is_map_drag_area = (s_map && !s_spec && !s_diag && !s_confirm_switch && !s_inspector &&
-                               ty0 > 92 && ty0 < 485 && tx0 < W - 65);
-      if (!is_map_drag_area) {
-        tap_x = tx0;
-        tap_y = ty0;
-        Serial.printf("{\"type\":\"tap\",\"xy\":[%d,%d],\"slop\":[%d,%d]}\n", tap_x, tap_y, abs(txl - tx0), abs(tyl - ty0));
-      } else {
-        // Map canvas: 55-pixel slop (~6mm on 4.7" panel) before treating as pan
-        if (abs(txl - tx0) < 55 && abs(tyl - ty0) < 55) {
-          tap_x = tx0;
-          tap_y = ty0;
-          Serial.printf("{\"type\":\"tap\",\"xy\":[%d,%d]}\n", tap_x, tap_y);
-        } else {
-          drag_dx = txl - tx0;
-          drag_dy = tyl - ty0;
-          Serial.printf("{\"type\":\"drag\",\"dxy\":[%d,%d]}\n", drag_dx, drag_dy);
-        }
-      }
+  TouchEvent evt;
+  if (periph_poll_touch_event(&evt)) {
+    // Slop and drag discrimination:
+    // Only the open map canvas supports drag/pan. In table, spectrum, modals, diag,
+    // inspector, and on controls (header tabs, footer buttons, zoom buttons, HUD),
+    // any touch release is an instant tap!
+    bool is_map_drag_area = (s_map && !s_spec && !s_diag && !s_confirm_switch && !s_inspector &&
+                             evt.y > 92 && evt.y < 485 && evt.x < W - 65);
+
+    if (evt.type == TOUCH_EVT_TAP || !is_map_drag_area) {
+      tap_x = evt.x;
+      tap_y = evt.y;
+      Serial.printf("{\"type\":\"tap\",\"xy\":[%d,%d],\"dxy\":[%d,%d],\"core\":1}\n",
+                    tap_x, tap_y, evt.dx, evt.dy);
+    } else if (evt.type == TOUCH_EVT_DRAG && is_map_drag_area) {
+      drag_dx = evt.dx;
+      drag_dy = evt.dy;
+      Serial.printf("{\"type\":\"drag\",\"dxy\":[%d,%d],\"core\":1}\n", drag_dx, drag_dy);
     }
-    t_was = t;
   }
 
   // Confirmation Modal Touch Routing

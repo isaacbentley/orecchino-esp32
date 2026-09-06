@@ -260,4 +260,5 @@ void sx1262_sweep_chunk(int8_t* bins, int n, int* cursor, int steps) {
 
 void sx1262_sweep_stop() {
   if (s_ok) cmd(OP_SET_STANDBY, STDBY_RC, 1);
+  digitalWrite(PIN_LORA_CS, HIGH);
 }

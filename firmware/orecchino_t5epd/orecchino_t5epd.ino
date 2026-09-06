@@ -22,7 +22,9 @@
 static uint8_t g_mode = UI_MODE_RX;
 
 // ---- receiver hooks (unused in beacon mode; the core just never calls them)
-void rx_hook_wifi_frame(uint8_t chan, int8_t rssi) { ui_feed_wifi(chan, rssi); }
+void rx_hook_wifi_frame(uint8_t chan, int8_t rssi) {
+  if (ui_spectrum_active()) ui_feed_wifi(chan, rssi);
+}
 bool rx_hook_paused() { return ui_spectrum_active(); }
 
 // ---- transmit interface for the UI (this file is the sole includer of tx_core.h)
