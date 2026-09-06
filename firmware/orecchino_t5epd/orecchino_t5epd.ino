@@ -17,15 +17,12 @@
 #include "board_t5.h"
 #include "ui_epd.h"
 #include "t5_periph.h"
-#include "sx1262_sweep.h"
 
 static uint8_t g_mode = UI_MODE_RX;
 
 // ---- receiver hooks (unused in beacon mode; the core just never calls them)
-void rx_hook_wifi_frame(uint8_t chan, int8_t rssi) {
-  if (ui_spectrum_active()) ui_feed_wifi(chan, rssi);
-}
-bool rx_hook_paused() { return ui_spectrum_active(); }
+void rx_hook_wifi_frame(uint8_t chan, int8_t rssi) {}
+bool rx_hook_paused() { return false; }
 
 // ---- transmit interface for the UI (this file is the sole includer of tx_core.h)
 int         txui_count() { return tx_path_count(); }
@@ -130,21 +127,7 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
   if (!strcmp(cmd, "status")) { print_t5_status(); return true; }
   if (!strcmp(cmd, "reboot")) { ESP.restart(); return true; }
   if (!strcmp(cmd, "lora") || !strcmp(cmd, "spec")) {
-    sx1262_sweep_reset_tried();
-    bool ok = sx1262_sweep_begin();
-    if (ok) {
-      sx1262_sweep_set_span(SX_SWEEP_LO_HZ, SX_SWEEP_HI_HZ, 16);
-      int8_t test_bins[16];
-      for (int i = 0; i < 16; i++) test_bins[i] = -127;
-      int cur = 0;
-      sx1262_sweep_chunk(test_bins, 16, &cur, 16);
-      sx1262_sweep_stop();
-      Serial.printf("{\"type\":\"lora\",\"detected\":true,\"rssi_sample\":[%d,%d,%d,%d,%d,%d,%d,%d]}\n",
-                    test_bins[0], test_bins[2], test_bins[4], test_bins[6],
-                    test_bins[8], test_bins[10], test_bins[12], test_bins[14]);
-    } else {
-      Serial.println("{\"type\":\"lora\",\"detected\":false}");
-    }
+    Serial.println("{\"type\":\"lora\",\"detected\":false,\"info\":\"spectrum mode removed\"}");
     return true;
   }
 
@@ -338,10 +321,6 @@ void setup() {
                 g_mode == UI_MODE_TX ? "TX (Test Beacon)" : "RX (Receiver)");
   periph_begin();   // after epdiy owns the I2C bus
 
-  bool sx_ok = sx1262_sweep_begin();
-  if (sx_ok) sx1262_sweep_stop(); // Park in standby until spectrum view is opened
-  Serial.printf("[ORECCHINO] SX1262 LoRa sweep hardware: %s\n", sx_ok ? "READY" : "NOT DETECTED");
-
   if (g_mode == UI_MODE_TX) {
     tx_begin();
   } else {
@@ -385,14 +364,6 @@ void loop() {
     return;
   }
 
-  static uint32_t last_spec_hop = 0;
-  static uint8_t spec_ch = 13;
-  if (ui_spectrum_active() && now - last_spec_hop >= 110) {
-    last_spec_hop = now;
-    spec_ch = (uint8_t)(spec_ch % 13) + 1;
-    rx_set_channel(spec_ch);
-    ui_set_wifi_channel(spec_ch);
-  }
   rx_tick(now);
   periph_tick(now);
   static int batt = -1;

@@ -1,6 +1,5 @@
 #include "ui_epd.h"
 #include "board_t5.h"
-#include "sx1262_sweep.h"
 #include "t5_periph.h"
 #include "../common/ui_common.h"
 #include <epdiy.h>
@@ -36,7 +35,6 @@ static uint32_t s_now;
 static bool s_ble_ok = true;
 static int  s_batt = -1;
 static int  s_sel = 0, s_n = 0, s_order[TRK_MAX];
-static bool s_spec = false, s_sx_ok = false;
 static bool s_map = false;        // table (false) or map (true) board
 static bool s_map_touched = false; // first-use guidance
 static int  s_cam_z = 13;         // map camera: zoom and centre in world px
@@ -56,8 +54,6 @@ static uint8_t s_target_mode = UI_MODE_RX;
 static int s_table_page = 0;       // 0 for rows 0..7, 1 for rows 8..15
 static bool s_inspector = false;    // Contact detail modal
 static bool s_diag = false;         // System diagnostics & hardware calibration screen
-static bool s_spec_paused = false;  // Pause spectrum sweep
-static int s_spec_cursor_x = -1;   // Touch measurement cursor on spectrum
 #define DEFAULT_VCOM 1560
 static uint16_t s_vcom = DEFAULT_VCOM;
 
@@ -117,19 +113,10 @@ static void text_r(const GFXfont* f, const char* s, int xr, int y, uint8_t color
 static void rect(int x, int y, int w, int h, uint8_t c) { EpdRect r = {x, y, w, h}; epd_fill_rect(r, c, s_fb); }
 static void box(int x, int y, int w, int h, uint8_t c) { EpdRect r = {x, y, w, h}; epd_draw_rect(r, c, s_fb); }
 
-// ---- spectrum feeds
-#define N_CH 13
-#define N_BIN 128
-static volatile int32_t  s_wsum[N_CH + 1];
-static volatile uint16_t s_wcnt[N_CH + 1];
-static volatile uint8_t  s_dwell = 0;
-static float  s_a24[N_CH];
-static int8_t s_swp[N_BIN];
-static float  s_pk[N_BIN];
-static int    s_cursor = 0;
-void ui_feed_wifi(uint8_t chan, int8_t rssi) { if (s_spec && !s_spec_paused && chan >= 1 && chan <= N_CH) { s_wsum[chan] += rssi; s_wcnt[chan]++; } }
-void ui_set_wifi_channel(uint8_t chan) { s_dwell = chan; }
-bool ui_spectrum_active() { return s_spec; }
+// Stubs for common radio hooks
+void ui_feed_wifi(uint8_t, int8_t) {}
+void ui_set_wifi_channel(uint8_t) {}
+bool ui_spectrum_active() { return false; }
 
 static void build_order() {
   s_n = 0;
@@ -158,7 +145,6 @@ static uint32_t signature() {
   mix(s_confirm_switch);
   mix(s_inspector);
   mix(s_diag);
-  mix(s_spec_paused);
   if (s_mode == UI_MODE_TX) {
     mix(txui_running());
     mix(txui_emergency());
@@ -192,68 +178,55 @@ static void draw_header(const UiSummary& sm, const char* title) {
   if (title) snprintf(b, sizeof(b), "%s", title); else ui_headline(b, sizeof(b), &sm);
   if (!title && sm.tracked == 0) b[0] = 0;  // an empty sky needs no headline
 
-  // The title must stay clear of the view switcher at x=310: step down
+  // The title must stay clear of the view switcher at x=330: step down
   // 18 -> 12 -> 9 pt before trimming, so "EMERGENCY N CONTACTS" stays whole.
   if (b[0]) {
-    if (text_w(&FreeSansBold18pt7b, b) <= 280) {
+    if (text_w(&FreeSansBold18pt7b, b) <= 290) {
       text(&FreeSansBold18pt7b, b, TABLE_X, 48, fg);
-    } else if (text_w(&FreeSansBold12pt7b, b) <= 280) {
+    } else if (text_w(&FreeSansBold12pt7b, b) <= 290) {
       text(&FreeSansBold12pt7b, b, TABLE_X, 44, fg);
     } else {
-      if (text_w(&FreeSansBold9pt7b, b) > 280) {
+      if (text_w(&FreeSansBold9pt7b, b) > 290) {
         size_t n = strlen(b);
-        while (n > 3 && text_w(&FreeSansBold9pt7b, b) > 265) b[--n] = 0;
+        while (n > 3 && text_w(&FreeSansBold9pt7b, b) > 275) b[--n] = 0;
         if (n + 2 < sizeof(b)) strcat(b, "..");
       }
       text(&FreeSansBold9pt7b, b, TABLE_X, 42, fg);
     }
   }
 
-  // Persistent Segmented View Switcher: [ TABLE | MAP | SPECTRUM ]
+  // Persistent Segmented View Switcher: [ TABLE | MAP ]
   // (Available whenever in RX mode and not in modal diagnostics)
   if (s_mode != UI_MODE_TX && !s_diag) {
-    const int bx = 310, by = 12, bw = 260, bh = 46;
+    const int bx = 330, by = 12, bw = 200, bh = 46;
     uint8_t border_col = loud ? WHITE : BLACK;
     box(bx, by, bw, bh, border_col);
     box(bx + 1, by + 1, bw - 2, bh - 2, border_col);
-    rect(bx + 76 - 1, by, 2, bh, border_col);
-    rect(bx + 148 - 1, by, 2, bh, border_col);
+    rect(bx + 100 - 1, by, 2, bh, border_col);
 
-    bool is_table = !s_map && !s_spec;
-    bool is_map = s_map && !s_spec;
-    bool is_spec = s_spec;
+    bool is_table = !s_map;
+    bool is_map = s_map;
 
-    // Tab 1: TABLE (bx .. bx + 76)
+    // Tab 1: TABLE (bx .. bx + 100)
     int tw_table = text_w(&FreeSansBold12pt7b, "TABLE");
-    int tx_table = bx + (76 - tw_table) / 2;
+    int tx_table = bx + (100 - tw_table) / 2;
     if (is_table) {
-      rect(bx + 2, by + 2, 73, bh - 4, loud ? WHITE : BLACK);
+      rect(bx + 2, by + 2, 97, bh - 4, loud ? WHITE : BLACK);
       text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, loud ? BLACK : WHITE);
     } else {
-      rect(bx + 2, by + 2, 73, bh - 4, loud ? BLACK : WHITE);
+      rect(bx + 2, by + 2, 97, bh - 4, loud ? BLACK : WHITE);
       text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, loud ? WHITE : BLACK);
     }
 
-    // Tab 2: MAP (bx + 76 .. bx + 148)
+    // Tab 2: MAP (bx + 100 .. bx + 200)
     int tw_map = text_w(&FreeSansBold12pt7b, "MAP");
-    int tx_map = bx + 76 + (72 - tw_map) / 2;
+    int tx_map = bx + 100 + (100 - tw_map) / 2;
     if (is_map) {
-      rect(bx + 76 + 1, by + 2, 71, bh - 4, loud ? WHITE : BLACK);
+      rect(bx + 100 + 1, by + 2, 97, bh - 4, loud ? WHITE : BLACK);
       text(&FreeSansBold12pt7b, "MAP", tx_map, 41, loud ? BLACK : WHITE);
     } else {
-      rect(bx + 76 + 1, by + 2, 71, bh - 4, loud ? BLACK : WHITE);
+      rect(bx + 100 + 1, by + 2, 97, bh - 4, loud ? BLACK : WHITE);
       text(&FreeSansBold12pt7b, "MAP", tx_map, 41, loud ? WHITE : BLACK);
-    }
-
-    // Tab 3: SPECTRUM (bx + 148 .. bx + 260)
-    int tw_spec = text_w(&FreeSansBold9pt7b, "SPECTRUM");
-    int tx_spec = bx + 148 + (112 - tw_spec) / 2;
-    if (is_spec) {
-      rect(bx + 148 + 1, by + 2, 110, bh - 4, loud ? WHITE : BLACK);
-      text(&FreeSansBold9pt7b, "SPECTRUM", tx_spec, 40, loud ? BLACK : WHITE);
-    } else {
-      rect(bx + 148 + 1, by + 2, 110, bh - 4, loud ? BLACK : WHITE);
-      text(&FreeSansBold9pt7b, "SPECTRUM", tx_spec, 40, loud ? WHITE : BLACK);
     }
   }
 
@@ -684,8 +657,8 @@ static void draw_plot() {
       text(&FreeSansBold12pt7b, "WAITING FOR TARGETS", PLOT_CX - tw1 / 2, 230, BLACK);
       int tw2 = text_w(&FreeSansBold9pt7b, "Listening on BLE4, BLE5, Wi-Fi Beacon & NAN");
       text(&FreeSansBold9pt7b, "Listening on BLE4, BLE5, Wi-Fi Beacon & NAN", PLOT_CX - tw2 / 2, 260, GREY);
-      int tw3 = text_w(&FreeSansBold9pt7b, "RF Spectrum: 2.4 GHz & 850-930 MHz");
-      text(&FreeSansBold9pt7b, "RF Spectrum: 2.4 GHz & 850-930 MHz", PLOT_CX - tw3 / 2, 286, GREY);
+      int tw3 = text_w(&FreeSansBold9pt7b, "Remote ID: Wi-Fi Beacon, NAN & BLE");
+      text(&FreeSansBold9pt7b, "Remote ID: Wi-Fi Beacon, NAN & BLE", PLOT_CX - tw3 / 2, 286, GREY);
     }
   }
 }
@@ -970,15 +943,14 @@ static void draw_map() {
 
   UiSummary sm; ui_summarize(&sm, s_now);
   draw_header(sm, nullptr);
-  draw_footer(sm, !s_map_touched ? "tap marker: select | tap: recentre | drag: pan" : "tap or button: table | hold: spectrum");
+  draw_footer(sm, !s_map_touched ? "tap marker: select | tap: recentre | drag: pan" : "tap or button: table | hold BOOT: power off");
 }
 
 static void refresh_area(EpdRect area, bool force_full, bool fast_mode = false) {
   // E-Paper Best Practice: Full DC-balanced GC16 refresh on view changes,
   // alert state transitions, or periodically every 10 partial cycles / 3 minutes
   // to eliminate residual charge and ghosting.
-  bool full = force_full || (!s_spec && (s_partials >= 10 || (s_now - s_last_full > 180000UL)))
-                         || (s_spec && (s_now - s_last_full > 300000UL));
+  bool full = force_full || (s_partials >= 10 || (s_now - s_last_full > 180000UL));
   epd_poweron();
   if (full) {
     epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
@@ -1533,123 +1505,6 @@ static void draw_board(bool force_full) {
   s_alert_prev = sm.alert;
 }
 
-static void draw_spectrum(bool full = false) {
-  epd_hl_set_all_white(&s_hl);
-  UiSummary sm = {}; sm.alert = UI_QUIET; sm.newest_age_s = UINT32_MAX;
-  draw_header(sm, s_sx_ok ? "SPECTRUM" : "SPECTRUM 2.4G");
-  // 2.4 GHz bars
-  if (!s_spec_paused) {
-    for (int c = 1; c <= 13; c++) {
-      uint16_t cnt = s_wcnt[c];
-      int32_t sum = s_wsum[c];
-      s_wcnt[c] = 0;
-      s_wsum[c] = 0;
-      if (cnt) s_a24[c - 1] = s_a24[c - 1] * 0.5f + ((float)sum / cnt) * 0.5f;
-      else s_a24[c - 1] -= 1.0f;
-      if (s_a24[c - 1] < -115) s_a24[c - 1] = -115;
-    }
-  }
-  text(&FreeSansBold9pt7b, "2.4 GHz CHANNELS", 20, 100, BLACK);
-  for (int c = 0; c < 13; c++) {
-    float v = (s_a24[c] + 115) / 70.0f; v = v < 0 ? 0 : v > 1 ? 1 : v;
-    int h = (int)(80 * v), x = 20 + c * 70;
-    // Channel meter frame (height 80px, base at y=200)
-    box(x, 120, 56, 80, GREY);
-    if (h > 0) {
-      rect(x + 2, 200 - h, 52, h, BLACK);
-    }
-    char b[4]; snprintf(b, sizeof(b), "%d", c + 1);
-    int tw_c = text_w(&FreeSansBold9pt7b, b);
-    text(&FreeSansBold9pt7b, b, x + (56 - tw_c) / 2, 220, BLACK);
-  }
-  // sub-GHz trace
-  int lo = 0, hi = -127;
-  for (int i = 0; i < N_BIN; i++) { if (s_swp[i] < lo) lo = s_swp[i]; if (s_swp[i] > hi) hi = s_swp[i]; }
-  int top = hi + 6, bot = lo - 2; if (top - bot < 30) top = bot + 30;
-  const int X0 = 20, PW = 920, Y0 = 250, PH = 220;
-  box(X0, Y0, PW, PH, BLACK);
-  box(X0 + 1, Y0 + 1, PW - 2, PH - 2, BLACK);
-  int px = -1, py = -1;
-  for (int i = 0; i < N_BIN; i++) {
-    int x = X0 + i * PW / N_BIN;
-    float v = (float)(s_swp[i] - bot) / (top - bot); v = v < 0 ? 0 : v > 1 ? 1 : v;
-    int y = Y0 + PH - (int)(PH * v);
-    float vp = (float)(s_pk[i] - bot) / (top - bot); vp = vp < 0 ? 0 : vp > 1 ? 1 : vp;
-    int y_pk = Y0 + PH - (int)(PH * vp);
-    epd_draw_pixel(x, y_pk, BLACK, s_fb);
-    if (y_pk > Y0 + 1) epd_draw_pixel(x, y_pk - 1, BLACK, s_fb);
-    if (px >= 0) epd_draw_line(px, py, x, y, BLACK, s_fb);
-    px = x; py = y;
-  }
-  char b[32];
-  snprintf(b, sizeof(b), "%d dBm", top); text(&FreeSansBold9pt7b, b, X0 + 6, Y0 + 18, BLACK);
-  snprintf(b, sizeof(b), "%d dBm", bot); text(&FreeSansBold9pt7b, b, X0 + 6, Y0 + PH - 8, BLACK);
-  struct FreqMark { int freq; const char* label; } FREQS[] = {
-    { 850, "850" }, { 868, "868" }, { 890, "890" }, { 915, "915" }, { 930, "930" }
-  };
-  for (const auto& fm : FREQS) {
-    int fx = X0 + (fm.freq - 850) * PW / 80;
-    // Tick mark inside the plot box
-    epd_draw_line(fx, Y0 + PH - 6, fx, Y0 + PH, BLACK, s_fb);
-    // Light grid line through the spectrum box
-    if (fx > X0 && fx < X0 + PW) {
-      for (int gy = Y0 + 4; gy < Y0 + PH - 6; gy += 6) {
-        epd_draw_pixel(fx, gy, LIGHT, s_fb);
-      }
-    }
-    int tw = text_w(&FreeSansBold9pt7b, fm.label);
-    int lx = fx - tw / 2;
-    if (lx < X0) lx = X0;
-    if (lx + tw > X0 + PW) lx = X0 + PW - tw;
-    text(&FreeSansBold9pt7b, fm.label, lx, Y0 + PH + 18, BLACK);
-  }
-
-  // Touch frequency measurement cursor:
-  if (s_spec_cursor_x >= X0 && s_spec_cursor_x <= X0 + PW) {
-    for (int cy = Y0 + 2; cy < Y0 + PH - 2; cy += 4) {
-      epd_draw_pixel(s_spec_cursor_x, cy, BLACK, s_fb);
-    }
-    int bin = (s_spec_cursor_x - X0) * N_BIN / PW;
-    if (bin < 0) bin = 0; if (bin >= N_BIN) bin = N_BIN - 1;
-    float cur_freq = 850.0f + ((float)(s_spec_cursor_x - X0) / PW) * 80.0f;
-    char cur_b[48];
-    snprintf(cur_b, sizeof(cur_b), "%.2f MHz: %d dBm (Pk %d)", cur_freq, s_swp[bin], (int)s_pk[bin]);
-    int cw = text_w(&FreeSansBold9pt7b, cur_b);
-    rect(X0 + PW - cw - 18, Y0 + 6, cw + 14, 22, WHITE);
-    box(X0 + PW - cw - 18, Y0 + 6, cw + 14, 22, BLACK);
-    text(&FreeSansBold9pt7b, cur_b, X0 + PW - cw - 11, Y0 + 22, BLACK);
-  }
-
-  // Spectrum Footer & Action Buttons
-  rect(0, 496, W, 44, WHITE);
-  rect(0, 496, W, 2, BLACK);
-  const GFXfont* f9 = &FreeSansBold9pt7b;
-  text(f9, s_spec_paused ? "SPECTRUM PAUSED | TAP TRACE FOR CURSOR" : "SX1262 SWEEP ACTIVE | TAP TRACE FOR CURSOR", TABLE_X, 524, BLACK);
-
-  int btn_y = 502, btn_h = 32;
-  // Button: [ PAUSE / RESUME ]
-  int p_w = 110, p_x = W - 20 - 90 - 12 - 120 - 12 - p_w;
-  if (s_spec_paused) {
-    rect(p_x, btn_y, p_w, btn_h, BLACK);
-    text(f9, "RESUME", p_x + (p_w - text_w(f9, "RESUME")) / 2, btn_y + 22, WHITE);
-  } else {
-    box(p_x, btn_y, p_w, btn_h, BLACK);
-    text(f9, "PAUSE", p_x + (p_w - text_w(f9, "PAUSE")) / 2, btn_y + 22, BLACK);
-  }
-
-  // Button: [ PEAK CLR ]
-  int pk_w = 120, pk_x = W - 20 - 90 - 12 - pk_w;
-  box(pk_x, btn_y, pk_w, btn_h, BLACK);
-  text(f9, "PEAK CLR", pk_x + (pk_w - text_w(f9, "PEAK CLR")) / 2, btn_y + 22, BLACK);
-
-  // Button: [ EXIT ]
-  int ex_w = 90, ex_x = W - 20 - ex_w;
-  box(ex_x, btn_y, ex_w, btn_h, BLACK);
-  text(f9, "EXIT", ex_x + (ex_w - text_w(f9, "EXIT")) / 2, btn_y + 22, BLACK);
-
-  refresh(full);
-}
-
 uint16_t ui_get_vcom() {
   Preferences p;
   p.begin("orecchino", true);
@@ -1668,11 +1523,7 @@ bool ui_set_vcom(uint16_t vcom) {
   s_vcom = vcom;
   if (s_ok) {
     epd_set_vcom(s_vcom);
-    if (s_spec) {
-      draw_spectrum(true);
-    } else {
-      draw_board(true);
-    }
+    draw_board(true);
   }
   return true;
 }
@@ -1711,39 +1562,12 @@ bool ui_begin(uint8_t mode) {
   return true;
 }
 
-// One entry / exit path for the spectrum view, so every way in or out
-// resets the same state (pause, cursor, accumulators) and refreshes once.
-static void spectrum_enter() {
-  s_spec = true;
-  s_spec_cursor_x = -1;
-  s_spec_paused = false;
-  memset((void*)s_wsum, 0, sizeof(s_wsum)); memset((void*)s_wcnt, 0, sizeof(s_wcnt));
-  for (int i = 0; i < N_BIN; i++) { s_swp[i] = -127; s_pk[i] = -127; }
-  s_sx_ok = sx1262_sweep_begin();
-  if (s_sx_ok) sx1262_sweep_set_span(SX_SWEEP_LO_HZ, SX_SWEEP_HI_HZ, N_BIN);
-  draw_spectrum(true);
-}
-
-static void spectrum_exit(bool to_map) {
-  s_spec = false;
-  s_map = to_map;
-  s_spec_cursor_x = -1;
-  s_spec_paused = false;
-  sx1262_sweep_stop();
-  draw_board(true);
-  s_sig_prev = signature();
-}
-
 void ui_set_view(const char* view) {
   if (!view) return;
   if (!strcmp(view, "table")) {
-    if (s_spec) spectrum_exit(false);
-    else if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); }
+    if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); }
   } else if (!strcmp(view, "map")) {
-    if (s_spec) spectrum_exit(true);
-    else if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); }
-  } else if (!strcmp(view, "spectrum") || !strcmp(view, "spec")) {
-    if (!s_spec) spectrum_enter();
+    if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); }
   }
 }
 
@@ -1764,22 +1588,27 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   }
   pwr_was = pwr_k;
 
-  // BOOT button: tap = next contact, hold 1.5 s = spectrum in/out, hold 3.0 s = power off
+  // BOOT button: tap = next contact / toggle TX, hold 2.0 s = power off (RX) or return to RX (TX)
   static bool was = false; static uint32_t down = 0; static uint8_t hold_level = 0;
   bool k = digitalRead(PIN_BOOT_BTN) == LOW;
   bool tap = false, hold = false;
   if (k && !was) { down = now; hold_level = 0; }
-  if (k && hold_level == 0 && (now - down > 1500)) { hold_level = 1; hold = true; }
-  if (k && hold_level == 1 && (now - down > 3000)) {
-    hold_level = 2;
-    periph_power_off();
-    return;
+  if (k && hold_level == 0 && (now - down > 2000)) {
+    hold_level = 1;
+    hold = true;
+    if (s_mode == UI_MODE_TX) {
+      board_switch_mode(UI_MODE_RX);
+      return;
+    } else {
+      periph_power_off();
+      return;
+    }
   }
   if (!k && was && hold_level == 0 && (now - down > 30)) tap = true;
   was = k;
 
   // Capacitive round home button below display
-  if (periph_home_key() && !s_spec && !s_diag && !s_inspector && !s_confirm_switch) {
+  if (periph_home_key() && !s_diag && !s_inspector && !s_confirm_switch) {
     if (s_mode == UI_MODE_TX) {
       txui_set_running(!txui_running());
       s_sig_prev = 0;
@@ -1797,10 +1626,10 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   TouchEvent evt;
   if (periph_poll_touch_event(&evt)) {
     // Slop and drag discrimination:
-    // Only the open map canvas supports drag/pan. In table, spectrum, modals, diag,
+    // Only the open map canvas supports drag/pan. In table, modals, diag,
     // inspector, and on controls (header tabs, footer buttons, zoom buttons, HUD),
     // any touch release is an instant tap!
-    bool is_map_drag_area = (s_map && !s_spec && !s_diag && !s_confirm_switch && !s_inspector &&
+    bool is_map_drag_area = (s_map && !s_diag && !s_confirm_switch && !s_inspector &&
                              evt.y > 92 && evt.y < 485 && evt.x < W - 65);
 
     if (evt.type == TOUCH_EVT_TAP || !is_map_drag_area) {
@@ -2048,16 +1877,13 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   }
 
   // ===================== RX MODE UI & INPUT =====================
-  if (tap_x >= 0 && !s_spec) {
-    // Top bar view switcher tabs:
-    if (tap_y <= 92 && tap_x >= 280 && tap_x <= 590) {
-      if (tap_x < 386) {
+  if (tap_x >= 0) {
+    // Top bar view switcher tabs: [ TABLE | MAP ] (bx = 330, width = 200, divider at 430)
+    if (tap_y <= 92 && tap_x >= 300 && tap_x <= 560) {
+      if (tap_x < 430) {
         if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); return; }
-      } else if (tap_x < 460) {
-        if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
       } else {
-        spectrum_enter();
-        return;
+        if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
       }
     }
     if (!s_map) {
@@ -2221,7 +2047,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       }
     }
   }
-  if ((drag_dx || drag_dy) && s_map && !s_spec) {
+  if ((drag_dx || drag_dy) && s_map) {
     s_map_touched = true;
     s_cam_wx -= drag_dx; s_cam_wy -= drag_dy; s_cam_manual = true; s_cam_manual_ms = now;
     draw_map();
@@ -2230,51 +2056,6 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     return;
   }
   if (s_cam_manual && now - s_cam_manual_ms > 120000) { s_cam_manual = false; s_sig_prev = 0; }
-
-  if (hold) {
-    if (s_spec) spectrum_exit(s_map); else spectrum_enter();
-    return;
-  }
-  if (s_spec) {
-    const int X0 = 20, PW = 920, Y0 = 250, PH = 220;
-    // Header navigation tabs in Spectrum:
-    if (tap_y <= 92 && tap_x >= 280 && tap_x <= 590) {
-      if (tap_x < 386) {
-        spectrum_exit(false); return;
-      } else if (tap_x < 460) {
-        spectrum_exit(true); return;
-      }
-    }
-    // Touch on trace moves measurement cursor:
-    if (tap_x >= X0 && tap_x <= X0 + PW && tap_y >= Y0 && tap_y <= Y0 + PH) {
-      s_spec_cursor_x = tap_x;
-      draw_spectrum();
-      return;
-    }
-    // Footer action buttons:
-    if (tap_y >= 485) {
-      if (tap_x >= W - 20 - 90 - 12 - 120 - 12 - 110 && tap_x <= W - 20 - 90 - 12 - 120 - 12) {
-        s_spec_paused = !s_spec_paused;
-        if (!s_spec_paused) { memset((void*)s_wsum, 0, sizeof(s_wsum)); memset((void*)s_wcnt, 0, sizeof(s_wcnt)); }
-        draw_spectrum();
-        return;
-      } else if (tap_x >= W - 20 - 90 - 12 - 120 && tap_x <= W - 20 - 90 - 12) {
-        for (int i = 0; i < N_BIN; i++) s_pk[i] = -127;
-        draw_spectrum();
-        return;
-      } else if (tap_x >= W - 20 - 90 && tap_x <= W - 20) {
-        spectrum_exit(s_map); return;
-      }
-    }
-    if (tap) { spectrum_exit(s_map); return; }
-    if (s_sx_ok && !s_spec_paused) sx1262_sweep_chunk(s_swp, N_BIN, &s_cursor, 32);
-    for (int i = 0; i < N_BIN; i++) s_pk[i] = s_swp[i] > s_pk[i] ? s_swp[i] : s_pk[i] - 0.02f;
-    static uint32_t last = 0;
-    // Throttled refresh budget to eliminate ghosting and screen flashing
-    uint32_t spec_interval = 4000;
-    if (now - last >= spec_interval) { last = now; draw_spectrum(); }
-    return;
-  }
 
   // tap: step through the contacts on the table, then over to the map,
   // then back to the table's first row.
