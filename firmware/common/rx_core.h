@@ -51,6 +51,7 @@ typedef struct {
   int8_t  rssi;
   uint8_t chan;
   uint8_t phy;   // BLE only: 1 = 1M, 2 = 2M, 3 = coded (long range), 0 = n/a
+  char    ssid[33];   // beacon SSID (DJI puts "RID-" + serial there); empty for NAN and BLE
   uint8_t len;
   uint8_t data[232];
 } RidEvt;
@@ -107,7 +108,8 @@ void rx_hook_track(Track*, bool, bool) {}
 
 // Callbacks run in the WiFi / Bluedroid task context: copy out and return.
 static void enqueue_rid(uint8_t src, const uint8_t* mac, int8_t rssi,
-                        uint8_t chan, uint8_t phy, const uint8_t* odid, int len) {
+                        uint8_t chan, uint8_t phy, const uint8_t* odid, int len,
+                        const char* ssid) {
   if (len < 25 || !s_q || rx_hook_paused()) return;
   if (src == SRC_WIFI_BEACON) s_cnt_rid_wifi++;
   else if (src == SRC_WIFI_NAN) s_cnt_rid_nan++;
@@ -118,6 +120,8 @@ static void enqueue_rid(uint8_t src, const uint8_t* mac, int8_t rssi,
   e.rssi = rssi;
   e.chan = chan;
   e.phy  = phy;
+  e.ssid[0] = 0;
+  if (ssid) { strncpy(e.ssid, ssid, sizeof(e.ssid) - 1); e.ssid[sizeof(e.ssid) - 1] = 0; }
   if (len > (int)sizeof(e.data)) len = sizeof(e.data);
   e.len  = len;
   memcpy(e.data, odid, len);
@@ -150,17 +154,20 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (stype == 0x80 || stype == 0x50) {
     // Beacon or probe response: 24 B header + 12 B fixed params, then IEs.
     int off = 36;
+    char ssid[33];         // the SSID element comes first, so it is known by the vendor element
+    ssid[0] = 0;
     while (off + 2 <= len) {
       uint8_t id = d[off], l = d[off + 1];
       if (off + 2 + l > len) break;
       const uint8_t* ie = d + off + 2;
-      // Vendor specific, type 0x0D, then [counter][ODID].
+      if (id == 0 && l <= 32) { memcpy(ssid, ie, l); ssid[l] = 0; }
+      // Vendor specific, type 0x0D, then [counter][ODID pack or GB 46750 packet].
       // OUIs: FA:0B:BC (ASD-STAN) and 90:3A:E6 (Parrot), same payload.
       if (id == 221 && l >= 30 && ie[3] == 0x0D &&
           ((ie[0] == 0xFA && ie[1] == 0x0B && ie[2] == 0xBC) ||
            (ie[0] == 0x90 && ie[1] == 0x3A && ie[2] == 0xE6))) {
         enqueue_rid(SRC_WIFI_BEACON, sa, p->rx_ctrl.rssi, p->rx_ctrl.channel,
-                    0, ie + 5, l - 5);
+                    0, ie + 5, l - 5, ssid);
       }
       off += 2 + l;
     }
@@ -182,7 +189,7 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
       int avail = blen - (i + 11);
       if (n > avail) n = avail;
       enqueue_rid(SRC_WIFI_NAN, sa, p->rx_ctrl.rssi, p->rx_ctrl.channel,
-                  0, b + i + 11, n);
+                  0, b + i + 11, n, nullptr);
       break;
     }
   }
@@ -220,7 +227,7 @@ static void handle_adv(const uint8_t* addr, int rssi, uint8_t phy,
       bool mfg = t == 0xFF && sd[0] == 0x00 && sd[1] == 0x02 && sd[2] == 0x0D;
       if (svc || mfg) {
         // sd[3] = message counter, sd+4 = ODID message or pack
-        enqueue_rid(SRC_BLE, addr, rssi, 0, phy, sd + 4, l - 5);
+        enqueue_rid(SRC_BLE, addr, rssi, 0, phy, sd + 4, l - 5, nullptr);
       }
     }
     i += 1 + l;
@@ -288,7 +295,7 @@ static void jput(const char* fmt, ...) {
   if (n > 0) s_jl = min(s_jl + n, (int)sizeof(s_jb) - 1);
 }
 
-static void emit_rid(const RidEvt* e, const OdidUas* u) {
+static void emit_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
   s_jl = 0;
   jput("{\"type\":\"rid\",\"src\":\"%s\",\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
        "\"rssi\":%d", SRC_NAMES[e->src], e->mac[0], e->mac[1], e->mac[2],
@@ -296,6 +303,15 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
   if (e->chan) jput(",\"ch\":%u", e->chan);
   if (e->src == SRC_BLE && e->phy)
     jput(",\"phy\":\"%s\"", e->phy == 3 ? "coded" : (e->phy == 2 ? "2m" : "1m"));
+  // Which wire format spoke, and for a beacon its SSID -- with the verdict
+  // when that SSID names a serial (DJI's "RID-" convention).
+  if (u->gb46750) jput(",\"fmt\":\"gb46750\"");
+  else jput(",\"proto\":%u", u->proto_ver);
+  if (e->ssid[0]) {
+    char s[33]; odid_copy_text(s, sizeof(s), (const uint8_t*)e->ssid, strlen(e->ssid));
+    jput(",\"ssid\":\"%s\"", s);
+    if (t->ssid_check) jput(",\"ssid_id_match\":%s", t->ssid_check == 1 ? "true" : "false");
+  }
 
   if (u->has_basic[0] || u->has_basic[1]) {
     jput(",\"basic_id\":[");
@@ -328,10 +344,11 @@ static void emit_rid(const RidEvt* e, const OdidUas* u) {
   if (u->has_op)
     jput(",\"op_id\":{\"id_type\":%u,\"id\":\"%s\"}", u->op_id_type, u->op_id);
   if (u->has_auth) {
-    OdidAuthState st = odid_verify_auth(u);
+    // The verdict comes from the track: pages are assembled there across
+    // frames, and verified once per change rather than once per line.
     jput(",\"auth\":{\"type\":%u,\"len\":%u,\"pages\":%u,\"state\":\"%s\"}",
          u->auth_type, u->auth_len, u->auth_last_page + 1,
-         odid_auth_state_name(st));
+         odid_auth_state_name((OdidAuthState)t->auth_state));
   }
   jput("}");
   Serial.println(s_jb);
@@ -359,7 +376,11 @@ static void emit_heartbeat() {
 bool   g_home_set = false;
 double g_home_lat = 0, g_home_lon = 0;
 static TfrPoly s_tfrs[TFR_MAX];
-static uint8_t s_tfr_n = 0;
+// Exposed so a screen can tell "no TFR data has ever arrived" from "no
+// match in what the host pushed": an empty table must not read as clear sky.
+uint8_t  g_tfr_n      = 0;      // polygons currently held
+bool     g_tfr_loaded = false;  // a host has pushed TFR context at least once
+uint32_t g_tfr_ms     = 0;      // when it last did (millis)
 
 static bool poly_contains(const TfrPoly* p, double lat, double lon) {
   bool in = false;
@@ -373,7 +394,7 @@ static bool poly_contains(const TfrPoly* p, double lat, double lon) {
 }
 
 static bool tfr_lookup(double lat, double lon, char* id, size_t idsz) {
-  for (int i = 0; i < s_tfr_n; i++) {
+  for (int i = 0; i < g_tfr_n; i++) {
     if (poly_contains(&s_tfrs[i], lat, lon)) {
       strncpy(id, s_tfrs[i].id, idsz - 1);
       id[idsz - 1] = 0;
@@ -451,12 +472,12 @@ static void inject_test_pack() {
   wr_i32(m + 20, 238000000);  // system timestamp
 
   const uint8_t mac[6] = {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x01};
-  enqueue_rid(SRC_WIFI_BEACON, mac, -42, s_cur_chan, 0, d, sizeof(d));
+  enqueue_rid(SRC_WIFI_BEACON, mac, -42, s_cur_chan, 0, d, sizeof(d), nullptr);
 }
 
 // ------------------------------------------------------ track ingest + host
 
-static void tracker_ingest(const RidEvt* e, const OdidUas* u, uint32_t now) {
+static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
   const char* uas = (u->has_basic[0] && u->uas_id[0][0]) ? u->uas_id[0] : nullptr;
   bool created = false;
   Track* t = tracker_upsert(e->mac, uas, now, &created);
@@ -465,18 +486,105 @@ static void tracker_ingest(const RidEvt* e, const OdidUas* u, uint32_t now) {
   t->rssi = e->rssi;
   if (e->rssi > t->peak_rssi) t->peak_rssi = e->rssi;
   t->src_mask |= (uint8_t)(1u << e->src);
-  // Only overwrite when this frame actually carried auth: pages can be
-  // spread across frames, and a plain Location must not erase a verdict.
-  if (u->has_auth) t->auth_state = (uint8_t)odid_verify_auth(u);
+  t->fmt |= u->gb46750 ? 2 : 1;
+  // The beacon SSID, kept for the details view and checked: DJI puts
+  // "RID-" + serial there, so an SSID serial that disagrees with the Basic
+  // ID is a broadcast at odds with itself.
+  if (e->ssid[0]) {
+    strncpy(t->ssid, e->ssid, sizeof(t->ssid) - 1);
+    t->ssid[sizeof(t->ssid) - 1] = 0;
+    size_t sl = strlen(e->ssid);
+    if (!strncmp(e->ssid, "RID-", 4) && sl >= 8 && sl <= 24 &&   // RID- plus a 4..20 character serial
+        u->has_basic[0] && u->id_type[0] == 1) {
+      bool alnum = true;
+      for (const char* q = e->ssid + 4; *q; q++)
+        if (!((*q >= '0' && *q <= '9') || (*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z'))) alnum = false;
+      if (alnum) t->ssid_check = strcmp(e->ssid + 4, u->uas_id[0]) == 0 ? 1 : 2;
+    }
+  }
+
+  // Authentication pages arrive together in a pack or one per frame (BLE4
+  // legacy rotates a single message per advertisement), so they are
+  // collected per contact. The signature covers the Basic ID bytes, and
+  // page 0's timestamp and type name one signature set: a different ID
+  // drops everything collected, a new set drops the pages of the old one.
+  OdidAuthAssembly* a = &t->auth_asm;
+  bool changed = false;
+  if (u->has_basic_raw) {
+    if (a->has_basic_raw && memcmp(a->basic_raw, u->basic_raw, 25) != 0) {
+      memset(a, 0, sizeof(*a));
+      t->auth_state = ODID_AUTH_NONE;
+    }
+    if (!a->has_basic_raw) {
+      a->has_basic_raw = true;
+      memcpy(a->basic_raw, u->basic_raw, 25);
+      changed = true;
+    }
+  }
+  if (u->has_auth) {
+    if (u->auth_pages_seen & 1) {
+      if ((a->auth_pages_seen & 1) &&
+          (a->auth_ts != u->auth_ts || a->auth_type != u->auth_type)) {
+        a->auth_pages_seen = 0;
+        a->verified = false;
+      }
+      a->auth_type      = u->auth_type;
+      a->auth_last_page = u->auth_last_page;
+      a->auth_len       = u->auth_len;
+      a->auth_ts        = u->auth_ts;
+      memcpy(a->auth_data, u->auth_data, u->auth_len < 17 ? u->auth_len : 17);
+    } else if (a->verified) {
+      // Pages after a complete, verified set can only belong to the next
+      // one, even though its page 0 has not arrived yet: start over, so
+      // the page 0 that follows does not discard them.
+      a->auth_pages_seen = 0;
+      a->verified = false;
+    }
+    for (int p = 1; p <= 15; p++) {
+      if (!(u->auth_pages_seen & (1u << p))) continue;
+      int off = 17 + (p - 1) * 23;
+      int n = off + 23 > ODID_AUTH_MAX_BYTES ? ODID_AUTH_MAX_BYTES - off : 23;
+      if (n > 0) memcpy(a->auth_data + off, u->auth_data + off, n);
+    }
+    a->has_auth = true;
+    a->auth_pages_seen |= u->auth_pages_seen;
+    changed = true;
+  }
+  if (a->has_auth) {
+    // Hand the assembled picture back so the JSON line reports it, and
+    // verify only when something new arrived: Ed25519 costs milliseconds
+    // on an ESP32, which a plain Location frame should not pay.
+    u->has_auth        = true;
+    u->auth_type       = a->auth_type;
+    u->auth_last_page  = a->auth_last_page;
+    u->auth_len        = a->auth_len;
+    u->auth_ts         = a->auth_ts;
+    u->auth_pages_seen = a->auth_pages_seen;
+    memcpy(u->auth_data, a->auth_data, sizeof(u->auth_data));
+    if (a->has_basic_raw) {
+      u->has_basic_raw = true;
+      memcpy(u->basic_raw, a->basic_raw, 25);
+    }
+    if (changed) {
+      uint8_t v = (uint8_t)odid_verify_auth(u);
+      if (v >= ODID_AUTH_UNKNOWN_KEY) a->verified = true;   // a complete set, whatever it proved
+      // While the next set is still arriving, keep the verdict of the last
+      // complete one rather than flapping back to "partial" every rotation.
+      if (v == ODID_AUTH_PARTIAL && t->auth_state >= ODID_AUTH_UNKNOWN_KEY)
+        v = t->auth_state;
+      t->auth_state = v;
+    }
+  }
   if (u->has_loc) {
     t->status = u->status;
-    if (u->lat != 0 || u->lon != 0) {
+    if (odid_coord_plausible(u->lat, u->lon)) {
       t->has_pos = true;
       t->lat = u->lat;
       t->lon = u->lon;
     }
     if (u->height > -999) {
       t->height = u->height;
+      t->height_ref = u->height_ref;
       if (isnan(t->max_height) || u->height > t->max_height)
         t->max_height = u->height;
     }
@@ -490,6 +598,7 @@ static void tracker_ingest(const RidEvt* e, const OdidUas* u, uint32_t now) {
     }
   }
   rx_hook_track(t, created, entered);
+  return t;
 }
 
 static void tracker_expire_emit(uint32_t now) {
@@ -526,10 +635,12 @@ static void handle_host_line(char* line, uint32_t now) {
         json_field_dbl(line, "lon", &g_home_lon))
       g_home_set = true;
   } else if (!strcmp(cmd, "tfr_clear")) {
-    s_tfr_n = 0;
+    g_tfr_n = 0;
+    g_tfr_loaded = true;
+    g_tfr_ms = now;
   } else if (!strcmp(cmd, "tfr_add")) {
-    if (s_tfr_n >= TFR_MAX) return;
-    TfrPoly* poly = &s_tfrs[s_tfr_n];
+    if (g_tfr_n >= TFR_MAX) return;
+    TfrPoly* poly = &s_tfrs[g_tfr_n];
     poly->n = 0;
     json_field_str(line, "id", poly->id, sizeof(poly->id));
     const char* q = strstr(line, "\"pts\":[");
@@ -554,7 +665,11 @@ static void handle_host_line(char* line, uint32_t now) {
       if (!q) break;
       q++;
     }
-    if (poly->n >= 3) s_tfr_n++;
+    if (poly->n >= 3) {
+      g_tfr_n++;
+      g_tfr_loaded = true;
+      g_tfr_ms = now;
+    }
   }
 }
 
@@ -657,8 +772,8 @@ static void rx_tick(uint32_t now) {
     OdidUas u;
     if (odid_decode_payload(e.data, e.len, &u)) {
       s_cnt_rid++;
-      emit_rid(&e, &u);
-      tracker_ingest(&e, &u, now);
+      Track* t = tracker_ingest(&e, &u, now);
+      emit_rid(&e, &u, t);
     } else {
       s_cnt_pfail++;
     }

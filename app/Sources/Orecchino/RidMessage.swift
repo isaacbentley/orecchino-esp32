@@ -15,6 +15,10 @@ struct RidMessage: Decodable {
     var system: SystemMsg? = nil
     var op_id: OpId? = nil
     var auth: AuthInfo? = nil
+    var fmt: String? = nil        // "gb46750" when the frame was GB 46750-2025; absent for ODID
+    var proto: Int? = nil         // ODID protocol version from the message header
+    var ssid: String? = nil       // Wi-Fi beacon SSID, when the frame had one
+    var ssid_id_match: Bool? = nil   // the SSID's "RID-" serial agrees with the Basic ID
 
     // tile-sync replies (fs_f / fs_ls_done / ack / fs_ok / fs_err / fs_info)
     var q: Int? = nil
@@ -93,7 +97,10 @@ enum RidNames {
         "Airship", "Parachute", "Rocket", "Tethered", "Ground obstacle", "Other",
     ]
     static let idTypes = ["None", "Serial", "CAA Reg.", "UTM UUID", "Session ID"]
-    static let statuses = ["Undeclared", "On ground", "Airborne", "Emergency", "RID failure"]
+    /// Status 3 is always "Emergency reported": it is what the aircraft
+    /// broadcast, never a verified fact, and it must not collapse to one word.
+    static let statuses = ["Undeclared", "On ground", "Airborne", "Emergency reported",
+                           "RID failure"]
 
     static func uaType(_ i: Int?) -> String {
         guard let i, i >= 0, i < uaTypes.count else { return "Unknown" }

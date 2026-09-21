@@ -214,10 +214,11 @@ static void test_pack_bounds(void) {
   CHECK(odid_decode_payload(d, 3 + 25, &u), "bounds: truncated pack decodes");
   CHECK(u.has_basic[0] && !u.has_loc, "bounds: only complete message");
 
-  // Auth-only content yields no useful fields -> false
+  // Auth-only frame decodes and sets has_auth for cross-frame assembly
   memset(d, 0, sizeof(d));
   d[0] = 0x22;  // Auth message
-  CHECK(!odid_decode_payload(d, 25, &u), "bounds: auth-only rejected");
+  CHECK(odid_decode_payload(d, 25, &u), "bounds: auth-only accepted");
+  CHECK(u.has_auth, "bounds: auth flag set");
 
   // Pack message-count clamp: claims 200, buffer has 1
   memset(d, 0, sizeof(d));
@@ -442,13 +443,148 @@ static void test_single_message_rotation(void) {
   }
 }
 
+// Standalone Authentication messages (e.g. from single-message rotation or individual frames)
+// must decode cleanly.
+static void test_standalone_auth_decoding(void) {
+  OdidTxState s;
+  memset(&s, 0, sizeof(s));
+  s.proto_ver = 2;
+  uint8_t m[25];
+  uint8_t sig[64] = {0};
+  odid_build_auth_page(m, &s, 1, 0, sig, sizeof(sig), 12345);
+
+  OdidUas u;
+  CHECK(odid_decode_payload(m, sizeof(m), &u), "standalone auth: decodes payload");
+  CHECK(u.has_auth, "standalone auth: has_auth true");
+  CHECK(u.auth_type == 1, "standalone auth: auth_type 1");
+  CHECK(u.auth_ts == 12345, "standalone auth: timestamp preserved");
+  CHECK(u.auth_pages_seen == 1, "standalone auth: page 0 seen");
+}
+
+static void unhex(const char* h, uint8_t* out) {
+  for (int i = 0; h[i] && h[i + 1]; i += 2) {
+    char t[3] = { h[i], h[i + 1], 0 };
+    out[i / 2] = (uint8_t)strtoul(t, NULL, 16);
+  }
+}
+
+// A real DJI beacon (Light RID Scanner's capture, GPL-3.0): protocol v1
+// pack of Basic ID, Location and System from a Matrice 400, SSID
+// "RID-1581F8DBW25B800B3417".
+static void test_dji_v1_capture(void) {
+  uint8_t d[78];
+  unhex("f11903011231353831463844425732354238303042333431370000001120ac1600a3d4ea11cbfe3c48"
+        "e2089e0879082c04c6250a004109ffeeea1199b73d4801000000000000020008d774da0d00", d);
+  OdidUas u;
+  CHECK(odid_decode_payload(d, 78, &u), "dji: pack decodes");
+  CHECK(u.proto_ver == 1 && !u.gb46750, "dji: protocol v1, not GB");
+  CHECK(u.has_basic[0] && u.id_type[0] == 1 && u.ua_type[0] == 2, "dji: serial-number basic id, multirotor");
+  CHECK_S(u.uas_id[0], "1581F8DBW25B800B3417", "dji: serial");
+  CHECK(u.has_loc && u.status == 2, "dji: airborne location");
+  CHECK_F(u.dir, 172.0, 0.01, "dji: direction");
+  CHECK_F(u.speed, 5.5, 0.01, "dji: speed");
+  CHECK_F(u.vspeed, 0.0, 0.01, "dji: vertical speed");
+  CHECK_F(u.lat, 30.0602531, 1e-7, "dji: latitude");
+  CHECK_F(u.lon, 121.1956939, 1e-7, "dji: longitude");
+  CHECK_F(u.alt_baro, 137.0, 0.01, "dji: baro altitude");
+  CHECK_F(u.alt_geo, 103.0, 0.01, "dji: geodetic altitude");
+  CHECK_F(u.height, 84.5, 0.01, "dji: height");
+  CHECK(u.height_ref == 0, "dji: height above take-off");
+  CHECK(u.h_acc == 12 && u.v_acc == 2 && u.ts_acc == 10, "dji: accuracies");
+  CHECK_F(u.ts, 967.0, 0.01, "dji: timestamp");
+  CHECK(u.has_sys && u.op_loc_type == 1 && u.area_count == 1, "dji: system message");
+  CHECK_F(u.op_lat, 30.0609279, 1e-7, "dji: operator latitude");
+  CHECK_F(u.op_lon, 121.2004249, 1e-7, "dji: operator longitude");
+  CHECK_F(u.op_alt, 24.0, 0.01, "dji: operator altitude");
+  CHECK(u.sys_ts == 232420567, "dji: system timestamp");
+  CHECK(!u.has_self && !u.has_op && !u.has_auth, "dji: nothing else claimed");
+}
+
+// GB 46750-2025 standard packet from a DJI Mini 5 Pro (Light RID Scanner's
+// capture): every one of the 21 items present.
+static void test_gb46750_standard_packet(void) {
+  uint8_t d[78];
+  unhex("ff2048fffffe3135383146414e4c433235385530323952544e363030303030303030000101d1823b48"
+        "3bf2eb11ed0769833b4822f0eb1105001c00284700c2083d0902000c050478acc5529e0103", d);
+  OdidUas u;
+  CHECK(odid_decode_payload(d, 78, &u), "gb: packet decodes");
+  CHECK(u.gb46750, "gb: flagged as GB 46750");
+  CHECK(u.has_basic[0] && u.id_type[0] == 1, "gb: serial-number basic id");
+  CHECK_S(u.uas_id[0], "1581FANLC258U029RTN6", "gb: serial");
+  CHECK(!u.has_basic[1], "gb: an all-zero registration mark is not an id");
+  CHECK(u.has_loc && u.status == 2, "gb: airborne location");
+  CHECK_F(u.lat, 30.0675106, 1e-7, "gb: aircraft latitude");
+  CHECK_F(u.lon, 121.1859817, 1e-7, "gb: aircraft longitude");
+  CHECK_F(u.dir, 0.5, 0.01, "gb: track");
+  CHECK_F(u.speed, 2.8, 0.01, "gb: ground speed");
+  CHECK_F(u.height, 108.0, 0.01, "gb: relative altitude");
+  CHECK(u.height_ref == 0, "gb: relative altitude is above take-off");
+  CHECK_F(u.vspeed, 0.0, 0.01, "gb: vertical speed");
+  CHECK_F(u.alt_geo, 121.0, 0.01, "gb: geodetic altitude");
+  CHECK_F(u.alt_baro, 182.5, 0.01, "gb: barometric altitude");
+  CHECK(u.h_acc == 12 && u.v_acc == 5 && u.spd_acc == 4 && u.ts_acc == 3, "gb: accuracies");
+  CHECK_F(u.ts, 3547.0, 0.01, "gb: seconds into the hour");
+  CHECK(u.sys_ts == 233204347, "gb: timestamp since 2019");
+  CHECK(u.has_sys && u.op_loc_type == 1, "gb: live remote-station position");
+  CHECK_F(u.op_lat, 30.0675643, 1e-7, "gb: operator latitude");
+  CHECK_F(u.op_lon, 121.1859665, 1e-7, "gb: operator longitude");
+  CHECK_F(u.op_alt, 14.5, 0.01, "gb: operator altitude");
+}
+
+// The Light RID Scanner project's synthetic GB packet: a registration mark
+// that counts, a content length longer than the frame, unknown altitudes.
+static void test_gb46750_registration_and_truncation(void) {
+  uint8_t d[67];
+  unhex("ff2048fffffe31353831463844425732354238303042333431375541534944313233000000cbfe3c48"
+        "a3d4ea11000099b73d48ffeeea11000000000000000000000000", d);
+  OdidUas u;
+  CHECK(odid_decode_payload(d, 67, &u), "gb2: truncated packet still decodes what arrived");
+  CHECK_S(u.uas_id[0], "1581F8DBW25B800B3417", "gb2: serial");
+  CHECK(u.has_basic[1] && u.id_type[1] == 2, "gb2: registration mark as a CAA-type id");
+  CHECK_S(u.uas_id[1], "UASID123", "gb2: registration mark");
+  CHECK_F(u.op_lat, 30.0602531, 1e-7, "gb2: operator latitude from item 6");
+  CHECK_F(u.op_lon, 121.1956939, 1e-7, "gb2: operator longitude");
+  CHECK_F(u.lat, 30.0609279, 1e-7, "gb2: aircraft latitude from item 8");
+  CHECK_F(u.lon, 121.2004249, 1e-7, "gb2: aircraft longitude");
+  CHECK(u.alt_geo == -1000.0f && u.height == -1000.0f, "gb2: zero altitudes stay unknown");
+  CHECK(u.status == 0, "gb2: status undeclared");
+  // A six-byte item bitmap (three extension bytes carrying nothing) must
+  // be consumed whole, not read as content.
+  uint8_t e[81];
+  unhex("ff2048ffffff0101003135383146414e4c433235385530323952544e363030303030303030000101d1823b48"
+        "3bf2eb11ed0769833b4822f0eb1105001c00284700c2083d0902000c050478acc5529e0103", e);
+  CHECK(odid_decode_payload(e, 81, &u) && !strcmp(u.uas_id[0], "1581FANLC258U029RTN6") &&
+        fabs(u.lat - 30.0675106) < 1e-7, "gb2: a longer bitmap still lands on the content");
+  uint8_t f[9];
+  unhex("ff2048ffffffffffff", f);        // bitmap never terminates
+  CHECK(!odid_decode_payload(f, 9, &u), "gb2: an unterminated bitmap is rejected");
+  // Not a GB packet: an ODID pack header with a bad message size still fails.
+  uint8_t bad[25] = {0xF2, 0x20, 0x01};
+  CHECK(!odid_decode_payload(bad, 25, &u), "gb2: ODID pack with wrong size still rejected");
+}
+
+static void test_coord_plausibility(void) {
+  CHECK(!odid_coord_plausible(0, 0), "coord: 0,0 is no fix");
+  CHECK(!odid_coord_plausible(1e-7, -1e-7), "coord: sentinel near zero is no fix");
+  CHECK(!odid_coord_plausible(4.9, 4.9), "coord: inside the 5-degree band");
+  CHECK(odid_coord_plausible(5.6, -0.2), "coord: Accra is a real place");
+  CHECK(odid_coord_plausible(37.8, -122.4), "coord: San Francisco");
+  CHECK(!odid_coord_plausible(91, 0) && !odid_coord_plausible(0, 181), "coord: off the globe");
+  CHECK(!odid_coord_plausible(0.0 / 0.0, 10), "coord: NaN");
+}
+
 int main(void) {
+  test_dji_v1_capture();
+  test_gb46750_standard_packet();
+  test_gb46750_registration_and_truncation();
+  test_coord_plausibility();
   test_golden_pack();
   test_tx_roundtrip();
   test_auth_pages();
   test_version_gating();
   test_dual_basic_and_pack_limit();
   test_single_message_rotation();
+  test_standalone_auth_decoding();
   test_location_scales();
   test_basic_id_utm_uuid();
   test_text_sanitization();

@@ -7,13 +7,10 @@ import Foundation
 /// possible by design: FAA registration data is private and the UAS DOC
 /// portal has no public API.
 enum MfrLookup {
-    private static let codes: [String: String] = [
-        "1581": "DJI",
-    ]
-
     /// Manufacturer name for a serial-number UAS ID, if the code is known.
+    /// The table itself is generated into UasModels.swift from
+    /// tools/uas_models.json, shared with the firmware.
     static func manufacturer(serial: String) -> String? {
-        guard serial.count >= 5 else { return nil }
-        return codes[String(serial.prefix(4)).uppercased()]
+        UasModels.manufacturer(serial: serial)
     }
 }

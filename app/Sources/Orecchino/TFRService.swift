@@ -32,6 +32,7 @@ final class TFRService {
 
     var zones: [TFRZone] = []
     var status: Status = .idle
+    @ObservationIgnored var onUpdate: (() -> Void)?
 
     private static let url = URL(string:
         "https://tfr.faa.gov/geoserver/TFR/ows?service=WFS&version=1.1.0" +
@@ -63,6 +64,7 @@ final class TFRService {
                 await MainActor.run {
                     self?.zones = zones
                     self?.status = .loaded(zones.count, Date())
+                    self?.onUpdate?()
                 }
             } catch {
                 await MainActor.run {

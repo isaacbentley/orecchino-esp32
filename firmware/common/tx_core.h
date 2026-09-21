@@ -129,6 +129,8 @@ static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
 
   memset(s, 0, sizeof(*s));
   s->uas_id    = p->uas_id;
+  s->caa_id    = p->caa_id;
+  s->proto_ver = p->proto_ver;
   s->ua_type   = 2;                                  // multirotor
   s->status    = s_emergency ? 3 : 2;                // emergency / airborne
   s->lat       = s_home_lat + (cy + ORBIT_M * sin(ang)) / m_lat;
@@ -150,6 +152,8 @@ static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
 // Basic ID message plus the page-0 timestamp, made with a published test
 // key (see odid_auth.h). AUTHBAD corrupts it on purpose.
 
+static uint8_t s_single_idx[P_COUNT] = {0};
+
 // Build the ODID payload this path transmits: a message pack, optionally
 // with Authentication pages appended, or a single rotating message.
 static int build_payload(int pid, uint8_t* out, uint32_t now) {
@@ -159,7 +163,7 @@ static int build_payload(int pid, uint8_t* out, uint32_t now) {
 
   if (p->format == F_SINGLE) {
     // Rotate through the message types, one per transmission.
-    return odid_build_single(out, &s, now / 1000, (int)(now / 400));
+    return odid_build_single(out, &s, now / 1000, s_single_idx[pid]++);
   }
 
   int n = odid_build_pack(out, &s, now / 1000);
@@ -201,8 +205,8 @@ static int build_payload(int pid, uint8_t* out, uint32_t now) {
 static uint8_t s_frame[320];
 
 // 802.11 beacon carrying the ODID vendor IE.
-static int build_beacon(const uint8_t* pack, int pack_len, uint8_t counter) {
-  const TxPath* p = &PATHS[P_WIFI];
+static int build_beacon(int pid, const uint8_t* pack, int pack_len, uint8_t counter) {
+  const TxPath* p = &PATHS[pid];
   static const char* SSID_STR = "ORECCHINO-TEST";
   uint8_t* f = s_frame;
   int i = 0;
@@ -346,6 +350,10 @@ static void tx_wifi_frame(int pid, int len) {
 #endif
 
 static NimBLEExtAdvertising* s_adv = nullptr;
+// Which path each advertising set is carrying right now, -1 when quiet. A
+// started set repeats its last payload for ever (duration 0), so whoever
+// switches a path off has to stop its set as well -- see tx_set_enabled().
+static int s_inst_path[2] = {-1, -1};
 // The precompiled BLE controller only grants two advertising sets, so the
 // three BLE flavours time-share them: 1M keeps set 0, while coded (long
 // range) and legacy alternate on set 1. Each transmission fully
@@ -399,10 +407,13 @@ static void tx_ble(int pid, const uint8_t* payload, int payload_len,
   ad_len = build_ble_ad(ad, payload, payload_len, s_counter[pid]);
   adv.setData(ad, ad_len);
 
-  s_adv->stop(inst);
+  // A live set must stop before it can be reconfigured; a cleared one must
+  // not be told to (NimBLE logs an error for an unconfigured instance).
+  if (s_inst_path[inst] >= 0) s_adv->stop(inst);
   bool set_ok = s_adv->setInstanceData(inst, adv);
   bool start_ok = set_ok && s_adv->start(inst);
   if (start_ok) {
+    s_inst_path[inst] = pid;
     s_tx[pid]++;
     s_counter[pid]++;
   } else {
@@ -449,7 +460,9 @@ static void handle_line(char* line) {
     Serial.println("{\"type\":\"tx_evt\",\"msg\":\"transmitting\"}");
   } else if (!strcmp(line, "stop")) {
     s_running = false;
-    s_adv->stop();
+    if (s_adv) s_adv->stop();
+    s_inst_path[0] = -1;
+    s_inst_path[1] = -1;
     Serial.println("{\"type\":\"tx_evt\",\"msg\":\"paused\"}");
   } else if (!strcmp(line, "e")) {
     s_emergency = !s_emergency;
@@ -549,7 +562,7 @@ static void tx_tick(uint32_t now) {
       int n = build_payload(pid, payload, now);
       switch (PATHS[pid].carrier) {
         case C_BEACON:
-          tx_wifi_frame(pid, build_beacon(payload, n, s_counter[pid]++));
+          tx_wifi_frame(pid, build_beacon(pid, payload, n, s_counter[pid]++));
           break;
         case C_NAN:
           // The reference transmitter emits a sync beacon alongside the
@@ -579,10 +592,33 @@ static int         tx_path_count() { return P_COUNT; }
 static const char* tx_path_id(int i) { return PATHS[i].uas_id; }
 static const char* tx_path_desc(int i) { return PATHS[i].self_desc; }
 static bool        tx_enabled(int i) { return s_enabled[i]; }
-static void        tx_set_enabled(int i, bool on) { s_enabled[i] = on; }
+// Switching a BLE path off must also silence its advertising set: the
+// scheduler merely stops refreshing it, and NimBLE keeps repeating the last
+// payload. Set 0 is BLE5's own; set 1 is shared, so it only goes quiet when
+// it is carrying the path just switched off, or when neither coded nor
+// legacy wants it any more.
+static void        tx_set_enabled(int i, bool on) {
+  s_enabled[i] = on;
+  if (on || !s_adv) return;
+  if (i == P_BLE5 && s_inst_path[0] >= 0) {
+    s_adv->stop(0);
+    s_inst_path[0] = -1;
+  } else if ((i == P_BLELR || i == P_BLE4) && s_inst_path[1] >= 0 &&
+             (s_inst_path[1] == i || (!s_enabled[P_BLELR] && !s_enabled[P_BLE4]))) {
+    s_adv->stop(1);
+    s_inst_path[1] = -1;
+  }
+}
 static uint32_t    tx_count(int i) { return s_tx[i]; }
 static bool        tx_running() { return s_running; }
-static void        tx_set_running(bool on) { s_running = on; }
+static void        tx_set_running(bool on) {
+  s_running = on;
+  if (!on && s_adv) {      // pause clears every set, like the serial `stop`
+    s_adv->stop();
+    s_inst_path[0] = -1;
+    s_inst_path[1] = -1;
+  }
+}
 static bool        tx_emergency() { return s_emergency; }
 static void        tx_set_emergency(bool on) { s_emergency = on; }
 /// Carrier label for a path: "WiFi", "NAN", "BLE5", "BLE LR", "BLE4".

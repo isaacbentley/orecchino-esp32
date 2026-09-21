@@ -37,8 +37,10 @@ is sent over USB as one line of JSON. The Mac app reads that stream and
 draws it.
 
 The radio core lives in one place, `firmware/common/rx_core.h`: Wi-Fi and
-BLE capture, the ASTM F3411 decoder, Authentication signature checks, the
-on-device track table, and the serial protocol. A board sketch names
+BLE capture, the ASTM F3411 decoder (plus GB 46750-2025, China's 2025
+Remote ID standard, which DJI's 2026 firmware sends in the same Wi-Fi
+element), Authentication signature checks, the on-device track table, and
+the serial protocol. A board sketch names
 itself, includes the core, and calls `rx_begin()` / `rx_tick()`. Anything
 the board adds — a screen, a buzzer, a spectrum view, a tile store — hangs
 off four small hook functions, so a new board is a display driver and a
@@ -152,10 +154,16 @@ tools/flash_tembed.sh /dev/cu.usbmodemXXXX
 The LilyGO T5 E-Paper S3 Pro has a 4.7-inch, 960×540 e-paper panel you
 can read in full sun, plus an SX1262 LoRa radio. Its console is a tactical
 board: a contact table on the left — ranked danger, then active, then
-history — and on the right a range-ring plot centred on you, rings scaling
-to the farthest contact, each aircraft drawn with its heading. Without a
-pushed operator position the plot becomes a signal-strength ladder
-instead. The header turns solid black as the alert bar.
+history, in order of arrival within each group so a busy sky never
+reshuffles under your finger — and on the right a range-ring plot centred
+on you, rings scaling to the farthest contact, each aircraft drawn with its
+heading. Long IDs are shortened from the front (`1581F20..9A03`) so the
+tail that tells a fleet apart survives, and plot labels are placed only
+where they fit, the selected aircraft's and any alert's first. A loud row
+says why in words — `EMERGENCY REPORTED`, `ID SIG INVALID`, `TFR MATCH` —
+never one word for all three. Without a pushed operator position the plot
+becomes a selected-contact card instead. The header turns solid black as
+the alert bar.
 
 It also carries an offline map — the same tiles the SenseCAP uses, pushed
 by the Mac app's "Sync Map Tiles" button over USB. There is no second tile
@@ -171,15 +179,18 @@ the Mac app supplied the position instead, or `NO POS`. Battery percentage
 comes from the board's gauge.
 
 It has touch. The header has TABLE and MAP tabs. On the table, tap a row
-to select it and tap it again for a full contact card; tap an aircraft on
+to select it and tap it again for its details card; tap an aircraft on
 the plot to select it, or an empty spot on the plot to open the map. With
 more than eight contacts, a PAGE button in the footer turns the pages. On
 the map, tap a marker to select it (a banner shows its vitals, with
 DETAILS and X buttons), tap anywhere else to re-centre there, drag to pan,
 and use the + / − boxes to zoom; the view stays where you put it until you
-tap the reticle (or two minutes pass), then auto-follow resumes. E-paper is
-slow, so gestures are whole taps and drag-releases rather than live
-tracking.
+tap the reticle or the `MANUAL PAN - TAP TO FOLLOW` button (or two minutes
+pass), then auto-follow resumes. The footer always says what a tap does on
+the current board. The selection follows the aircraft, not the row: a
+packet from another drone can reorder the table without changing what you
+have selected. E-paper is slow, so gestures are whole taps and
+drag-releases rather than live tracking.
 
 E-paper is slow and ghosts, so the board only redraws when its content
 actually changes: fast partial updates for routine table and map changes,
@@ -188,10 +199,15 @@ switch views, and at least every five minutes. The BOOT button steps
 through contacts on the table, then over to the map, then back; hold it
 for two seconds to power the board off (the side power button does the
 same after a short hold; in test beacon mode the hold returns to receiver
-mode instead). The SYSTEM button in the footer opens a service screen for
-panel voltage (VCOM) tuning, a greyscale test strip, backlight control,
-and hardware readouts; from there you can switch into test beacon mode or
-power off, each after a confirmation.
+mode instead). The SYSTEM button in the footer opens a settings screen:
+backlight control first, then the mode switch and power-off (each behind a
+confirmation), hardware readouts, and the engineering controls last (panel
+voltage (VCOM) trim and a greyscale test strip). The details card
+qualifies its airspace line by what TFR data the app has actually pushed —
+it never calls the sky clear on an empty table — labels height by the
+reference the aircraft transmitted (AGL or above take-off), names the
+model for DJI serials, shows the beacon SSID, and says when that SSID
+names a different serial than the broadcast ID.
 
 The touch controller differs between production batches — a Goodix GT911
 on some, a GT6972P on others — and the firmware probes for both at boot.
@@ -248,15 +264,36 @@ open app/build/Orecchino.app
 What it does:
 
 - Live dark map with color-coded drones, heading arrows, flight trails,
-  and operator positions
+  and operator positions. Labels hide where they would cover another
+  label or marker; the selected and any alerting aircraft are always
+  labelled and drawn on top
 - Active FAA flight restrictions (TFRs) drawn on the map, refreshed every
-  15 minutes
+  15 minutes and pushed to the receiver on every refresh
 - A sidebar list and a detail card for each drone; missing data is shown
-  as blank, never as fake zeros
-- Flags a drone whose claimed operator position is more than 15 km away
+  as blank, never as fake zeros. An emergency or a failed ID signature is
+  a complete label that never truncates (`EMERGENCY REPORTED`,
+  `ID SIGNATURE INVALID`) and a distinct marker shape on the map, never
+  colour alone
+- The detail card leads with status, last heard, range from this Mac,
+  height with the reference the aircraft transmitted (AGL or above
+  take-off), speed and the aircraft-to-operator distance; radio details
+  (RSSI, transports, MACs, evidence, counters) sit behind a collapsed
+  "Technical details" section. The card is height-bounded and scrolls,
+  and map fitting keeps aircraft out from under it
+- One receiver-health state drives the toolbar badge, the status strip and
+  the empty sidebar (no receiver / waiting for data / receiving / no
+  heartbeat); with no receiver the sidebar offers a port picker and
+  "Retry auto-detect". Tracks go stale after 60 s on every surface, the
+  same minute the receivers use
+- Names the model for DJI serial numbers (`DJI Mini 4 Pro`) from a table
+  shared with the firmware, and flags a beacon whose SSID names a
+  different serial than its Basic ID
+- Flags a drone whose claimed operator position is more than 15 km away,
+  and restarts a trail rather than drawing a jump no aircraft could make
 - Finds the receiver's USB port by itself and reconnects after unplugs
 - A demo mode with two simulated drones, so the UI can be tried with no
-  hardware
+  hardware: a persistent SIMULATION ACTIVE banner, a SIMULATED badge on
+  every simulated row, marker and card, and "(N simulated)" in the count
 
 ## Data format
 
@@ -264,6 +301,7 @@ Each decoded broadcast is one JSON object per line:
 
 ```json
 {"type":"rid","src":"ble","mac":"AA:BB:CC:DD:EE:FF","rssi":-61,"phy":"coded",
+ "proto":2,
  "basic_id":[{"id_type":1,"ua_type":2,"uas_id":"1581F..."}],
  "loc":{"status":2,"lat":37.1234567,"lon":-122.1234567,"alt_geo":82.0,
         "alt_baro":80.5,"height":60.0,"height_ref":0,"speed":8.0,
@@ -277,12 +315,25 @@ Each decoded broadcast is one JSON object per line:
 Any device that speaks this format over a serial port can feed the app —
 an SDR pipeline works just as well as the ESP32 receivers.
 
+Every line says which wire format spoke: `"proto"` is the ASTM F3411
+protocol version from the message header, and `"fmt":"gb46750"` replaces
+it for a GB 46750-2025 packet, which the receivers decode into the same
+fields (its registration mark becomes a second, CAA-type `basic_id`). A
+Wi-Fi beacon's SSID rides along as `"ssid"`; when it follows DJI's
+`RID-<serial>` convention, `"ssid_id_match"` says whether that serial
+agrees with the Basic ID message, so a broadcast at odds with itself is
+visible. Positions in the no-fix band DJI encoders emit around 0,0 are
+dropped before they reach the track.
+
 When a drone sends signed Authentication messages, the receiver adds an
 `"auth"` field with a `state` of `id_valid`, `invalid`, `partial`,
 `unknown_key`, or `none`. Read `id_valid` narrowly: it means the drone's
 **ID** was signed by a key the receiver trusts. The position is not
 signed, and old signatures are not rejected, so a valid state is never a
-reason to trust where a drone claims to be.
+reason to trust where a drone claims to be. Pages are collected per
+aircraft, so a signature spread over several single-message advertisements
+(BLE4 legacy) still verifies; from then on every line for that aircraft
+carries the `auth` field with the verdict of the last complete set.
 
 ## Test beacon — `firmware/orecchino_tx`
 
@@ -341,10 +392,26 @@ round-trip tested against the decoder in the suite below.
 tests/run_tests.sh
 ```
 
-Both firmware targets share one Remote ID decoder
-(`firmware/common/odid_decode.h`). It is tested on the host against real
-over-the-air captures from the official OpenDroneID reference tools. App
-tests cover the serial format, checksums, and tile math.
+Every receiver shares one Remote ID decoder (`firmware/common/odid_decode.h`,
+with `gb46750_decode.h` for GB 46750-2025) and one radio core
+(`rx_core.h`, `tracker.h`); the transmitters share `tx_core.h`. The
+decoder is tested on the host against real over-the-air captures from the
+official OpenDroneID reference tools, a real DJI beacon, and a real GB
+46750-2025 packet. The make/model tables in `firmware/common/uas_models.h`
+and the app are generated from `tools/uas_models.json` by
+`tools/gen_uas_models.py`, and the suite fails if they drift. The cores are tested
+on the host too, against the shims in `tests/host_shim`: one aircraft staying
+one contact across its Wi-Fi and BLE addresses, Authentication pages
+assembled across frames, the beacon's format variants reaching the encoder,
+and the transmitter's off switches actually silencing its BLE advertising
+sets. The T5 board's drawing code is rendered on the host too, with the
+real font bitmaps, against a stress fixture of twelve contacts sharing a
+serial prefix: every scene must come out with no two text runs colliding,
+and the selection must survive a re-sort, an alert and an expiry (the
+scenes are written to `/tmp/t5_*.pgm` for eyes). That check needs the
+Adafruit GFX library's `Fonts/` in `~/Documents/Arduino/libraries` and is
+skipped without it. App tests cover the serial format, checksums, tile
+math, identity conflicts between tracks, and tile-sync state.
 
 ## License
 

@@ -55,6 +55,14 @@ static int s_table_page = 0;       // 0 for rows 0..7, 1 for rows 8..15
 static bool s_inspector = false;    // Contact detail modal
 static bool s_diag = false;         // System diagnostics & hardware calibration screen
 #define DEFAULT_VCOM 1560
+// Service screen rows (drawing and touch routing use the same numbers):
+// everyday controls first, engineering last.
+#define DG_BL_BTN_Y   110    // 1. backlight mode / brightness buttons
+#define DG_BL_BTN_H   34
+#define DG_MODE_BTN_Y 188    // 2. mode switch / power off
+#define DG_MODE_BTN_H 38
+#define DG_VCOM_BTN_Y 352    // 4. VCOM trim buttons
+#define DG_VCOM_BTN_H 36
 static uint16_t s_vcom = DEFAULT_VCOM;
 
 // PMIC rail hold: avoid repeated TPS65185 power-up/down (~90 ms each).
@@ -75,10 +83,6 @@ static void epd_idle_check(uint32_t now) {
   }
 }
 
-// Track dirty flag: skip build_order()/signature() when no new data arrived.
-static volatile bool s_tracks_dirty = true;
-void ui_mark_tracks_dirty() { s_tracks_dirty = true; }
-
 // 8-pixel aligned bounding boxes for sub-screen updates (eliminates sub-byte boundary artifacts)
 static const EpdRect RECT_BODY = { 0, 72, 960, 468 };   // table + plot + footer
 static const EpdRect RECT_TABLE  = { 16, 72, 552, 424 };
@@ -89,26 +93,6 @@ static const EpdRect RECT_FOOTER = { 0, 496, 960, 44 };
 
 uint8_t ui_get_mode() { return s_mode; }
 bool ui_diagnostics_active() { return s_diag; }
-
-static const char* uas_manufacturer(const char* uas) {
-  if (!uas || !*uas) return "Unknown";
-  if (!strncmp(uas, "1596", 4)) return "DJI Innovations";
-  if (!strncmp(uas, "1689", 4)) return "Autel Robotics";
-  if (!strncmp(uas, "1585", 4)) return "Parrot";
-  if (!strncmp(uas, "1647", 4)) return "Skydio";
-  if (!strncmp(uas, "1710", 4)) return "Yuneec";
-  if (!strncmp(uas, "1711", 4)) return "Teal Drones";
-  if (!strncmp(uas, "1738", 4)) return "Wingtra";
-  if (!strncmp(uas, "1198", 4)) return "Freefly Systems";
-  return "ASTM Standard RID";
-}
-
-static const char* uas_tail(const char* s, size_t max_len = 8) {
-  if (!s || !*s) return "?";
-  size_t len = strlen(s);
-  if (len <= max_len) return s;
-  return s + (len - max_len);
-}
 
 // ---- GFXfont blitter onto the epdiy framebuffer
 static int glyph_run(const GFXfont* f, const char* s, int x, int y, uint8_t color, bool draw) {
@@ -129,7 +113,14 @@ static int glyph_run(const GFXfont* f, const char* s, int x, int y, uint8_t colo
   }
   return x - x0;
 }
-static void text(const GFXfont* f, const char* s, int x, int y, uint8_t color = BLACK) { glyph_run(f, s, x, y, color, true); }
+// UI_TEXT_HOOK is a seam for the host-side render check (tests/t5_render_test.cpp):
+// it sees every text run, so runs that collide are caught before they reach glass.
+static void text(const GFXfont* f, const char* s, int x, int y, uint8_t color = BLACK) {
+#ifdef UI_TEXT_HOOK
+  UI_TEXT_HOOK(f, s, x, y);
+#endif
+  glyph_run(f, s, x, y, color, true);
+}
 static int  text_w(const GFXfont* f, const char* s) { return glyph_run(f, s, 0, 0, 0, false); }
 static void text_r(const GFXfont* f, const char* s, int xr, int y, uint8_t color = BLACK) { text(f, s, xr - text_w(f, s), y, color); }
 static void rect(int x, int y, int w, int h, uint8_t c) { EpdRect r = {x, y, w, h}; epd_fill_rect(r, c, s_fb); }
@@ -140,22 +131,120 @@ void ui_feed_wifi(uint8_t, int8_t) {}
 void ui_set_wifi_channel(uint8_t) {}
 bool ui_spectrum_active() { return false; }
 
+// Danger first, then live contacts, then history (shared with every board).
+// The selection follows its aircraft: s_selid names the contact, s_sel is
+// merely the row it sits on this time round. s_sel == -1 is the deliberate
+// "nothing selected" state (map HUD [X]); every s_order[s_sel] read is
+// range-guarded.
+static UiSel s_selid = {-1, 0};
+static void select_row(int r) {
+  s_sel = r;
+  ui_sel_set(&s_selid, (r >= 0 && r < s_n) ? s_order[r] : -1);
+  if (r >= 0) s_table_page = r / ROWS;
+}
 static void build_order() {
-  s_n = 0;
-  for (int i = 0; i < TRK_MAX; i++) if (g_tracks[i].used) s_order[s_n++] = i;
-  auto rank = [](const Track* t) {
-    return (ui_danger(t, s_now) ? 0 : ui_stale(t, s_now) ? 2 : 1) * 1000000000ULL + (uint64_t)(s_now - t->last_ms);
-  };
-  for (int a = 1; a < s_n; a++) {
-    int v = s_order[a], b = a - 1;
-    while (b >= 0 && rank(&g_tracks[s_order[b]]) > rank(&g_tracks[v])) { s_order[b + 1] = s_order[b]; b--; }
-    s_order[b + 1] = v;
-  }
-  if (s_n == 0) s_sel = 0;
-  else if (s_sel >= s_n) s_sel = s_n - 1;
-  // s_sel == -1 is the "nothing selected" state (map HUD [X]); every
-  // s_order[s_sel] read is range-guarded.
+  ui_order_build(s_order, &s_n, s_now);
+  if (s_n == 0) { s_sel = 0; ui_sel_set(&s_selid, -1); s_table_page = 0; return; }
+  if (s_sel == -1 && s_selid.slot < 0) { s_table_page = 0; return; }
+  int row = ui_sel_row(&s_selid, s_order, s_n);
+  if (row < 0) { row = 0; ui_sel_set(&s_selid, s_order[0]); }   // first contact, or the chosen one has gone
+  s_sel = row;
   s_table_page = s_sel / ROWS;
+}
+
+// ---- text fitting: nothing may run into the next column or a control
+/// Shorten `b` (capacity n) with ".." until it is at most `max_w` wide.
+static void fit_text(char* b, size_t n, const GFXfont* f, int max_w) {
+  if (text_w(f, b) <= max_w) return;
+  size_t len = strlen(b);
+  char t[96];
+  while (len > 1) {
+    b[--len] = 0;
+    snprintf(t, sizeof(t), "%s..", b);
+    if (text_w(f, t) <= max_w) { snprintf(b, n, "%s", t); return; }
+  }
+}
+/// Draw `s` on one or two lines of `max_w`, breaking at a space; returns
+/// the number of lines used.
+static int text_wrap2(const GFXfont* f, const char* s, int x, int y, int line_h, int max_w, uint8_t color) {
+  char l1[96]; snprintf(l1, sizeof(l1), "%s", s);
+  if (text_w(f, l1) <= max_w) { text(f, l1, x, y, color); return 1; }
+  int cut = -1;
+  for (int i = 1; l1[i]; i++) {
+    if (l1[i] != ' ') continue;
+    l1[i] = 0;
+    bool ok = text_w(f, l1) <= max_w;
+    l1[i] = ' ';
+    if (ok) cut = i; else break;
+  }
+  if (cut < 0) { fit_text(l1, sizeof(l1), f, max_w); text(f, l1, x, y, color); return 1; }
+  l1[cut] = 0;
+  text(f, l1, x, y, color);
+  char l2[96]; snprintf(l2, sizeof(l2), "%s", s + cut + 1);
+  fit_text(l2, sizeof(l2), f, max_w);
+  text(f, l2, x, y + line_h, color);
+  return 2;
+}
+
+/// Table form of the k-th listed ID: the whole thing when it fits `max_w`,
+/// else head + ".." + the tail that tells it from the others on screen --
+/// serials differ at the end, so that is the part that must survive.
+static void short_id(char* out, size_t n, int k, const GFXfont* f, int max_w) {
+  const Track* t = &g_tracks[s_order[k]];
+  if (!t->uas[0]) { snprintf(out, n, "NO ID"); return; }
+  int tail = ui_unique_tail(s_order, s_n, k, 4);
+  for (int chars = 40; chars >= tail + 2; chars--) {
+    ui_short_id(out, n, t->uas, tail, chars);
+    if (text_w(f, out) <= max_w) return;
+  }
+}
+/// Marker label: the distinguishing tail alone (at least five characters).
+static const char* label_id(int k) {
+  const Track* t = &g_tracks[s_order[k]];
+  if (!t->uas[0]) return "?";
+  int tail = ui_unique_tail(s_order, s_n, k, 5);
+  return t->uas + strlen(t->uas) - tail;
+}
+
+// ---- marker labels: the selected aircraft and alerts always get first
+// pick; the rest only where a label fits without covering a marker,
+// another label or a control.
+struct LabelBox { int x, y, w, h; };
+static LabelBox s_lb[TRK_MAX * 2 + 8];
+static int      s_nlb = 0;
+static void lb_reset() { s_nlb = 0; }
+static void lb_block(int x, int y, int w, int h) {
+  if (s_nlb < (int)(sizeof(s_lb) / sizeof(s_lb[0]))) s_lb[s_nlb++] = {x, y, w, h};
+}
+static bool lb_free(const LabelBox& r, int x0, int y0, int x1, int y1) {
+  if (r.x < x0 || r.y < y0 || r.x + r.w > x1 || r.y + r.h > y1) return false;
+  for (int i = 0; i < s_nlb; i++) {
+    const LabelBox& o = s_lb[i];
+    if (r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h) return false;
+  }
+  return true;
+}
+/// A spot for a w x h label beside the marker at (px,py): right, left,
+/// above, below. False when every spot is taken.
+static bool lb_place(int px, int py, int w, int h, int x0, int y0, int x1, int y1, int* ox, int* oy) {
+  const int cand[4][2] = { {px + 10, py - h / 2}, {px - 10 - w, py - h / 2},
+                           {px - w / 2, py - 12 - h}, {px - w / 2, py + 12} };
+  for (int i = 0; i < 4; i++) {
+    LabelBox r = { cand[i][0], cand[i][1], w, h };
+    if (!lb_free(r, x0, y0, x1, y1)) continue;
+    lb_block(r.x, r.y, r.w, r.h);
+    *ox = r.x; *oy = r.y;
+    return true;
+  }
+  return false;
+}
+/// Rows in drawing priority: the selected aircraft, then table order
+/// (danger, live, history).
+static int priority_rows(int* rows) {
+  int n = 0;
+  if (s_sel >= 0 && s_sel < s_n) rows[n++] = s_sel;
+  for (int k = 0; k < s_n; k++) if (k != s_sel) rows[n++] = k;
+  return n;
 }
 
 // Content signature: anything that should move ink. Coarse on the noisy
@@ -311,6 +400,7 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
     strncat(b, count_buf, sizeof(b) - strlen(b) - 1);
   }
   text(f9, b, TABLE_X, 524, BLACK);
+  int left_edge = TABLE_X + text_w(f9, b) + 16;   // where a hint may start
 
   // Pagination button on Table
   if (!s_map && s_n > ROWS) {
@@ -321,6 +411,7 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
     int px = 330, py = 502, ph = 32;
     box(px, py, pw, ph, BLACK);
     text(f9, page_str, px + 12, py + 22, BLACK);
+    left_edge = px + pw + 16;
   }
 
   // Right-side footer action buttons
@@ -329,38 +420,55 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
   int sys_w = 90, sys_x = W - 20 - sys_w;
   box(sys_x, btn_y, sys_w, btn_h, BLACK);
   text(f9, "SYSTEM", sys_x + (sys_w - text_w(f9, "SYSTEM")) / 2, btn_y + 22, BLACK);
+  int right_edge = sys_x - 16;
 
   // Button: [ INSPECT ] (if an aircraft is selected on Table)
   if (!s_map && s_n > 0 && s_sel >= 0 && s_sel < s_n) {
     int ins_w = 100, ins_x = sys_x - 12 - ins_w;
     rect(ins_x, btn_y, ins_w, btn_h, BLACK);
     text(f9, "INSPECT", ins_x + (ins_w - text_w(f9, "INSPECT")) / 2, btn_y + 22, WHITE);
+    right_edge = ins_x - 16;
   }
+
+  // What a tap does here, in whatever room is left between the status and
+  // the buttons -- the board should never rely on the reader discovering it.
+  if (!hint) hint = "tap: select | again: details | plot: map";
+  char h[96]; snprintf(h, sizeof(h), "%s", hint);
+  int max_w = right_edge - left_edge;
+  if (max_w > 80) { fit_text(h, sizeof(h), f9, max_w); text_r(f9, h, right_edge, 524, GREY); }
+}
+
+// Column layout, measured against the actual font so no heading or value
+// can run into its neighbour, and the same whatever the GPS is doing: a
+// missing range or bearing shows as dashes rather than moving the columns.
+// Units sit in the headings; the values are bare numbers.
+struct TableCol { const char* head; const char* widest; int x, w; };
+static TableCol s_cols[5] = {
+  {"HGT m", "1250", 0, 0}, {"SPD m/s", "99.9", 0, 0}, {"RANGE", "99.9km", 0, 0},
+  {"BRG", "359", 0, 0}, {"AUTH", "BAD", 0, 0},
+};
+/// Lay the columns out from the right edge; returns the width left for the ID.
+static int layout_columns(const GFXfont* f) {
+  const int gap = 14;
+  int x = TABLE_X + TABLE_W - 8;
+  for (int i = 4; i >= 0; i--) {
+    int w = max(text_w(f, s_cols[i].head), text_w(f, s_cols[i].widest));
+    if (i == 4) w = max(w, 34);              // the inverted BAD badge
+    x -= w;
+    s_cols[i].x = x; s_cols[i].w = w;
+    x -= gap;
+  }
+  return x - (TABLE_X + 8);
 }
 
 static void draw_table() {
   rect(RECT_TABLE.x, RECT_TABLE.y, RECT_TABLE.width, RECT_TABLE.height, WHITE);
   const int y0 = 80;
   const GFXfont* f9 = &FreeSansBold9pt7b;
-  bool has_gps = periph_gps_detected();
-  bool has_pos = has_gps || g_home_set;
-  struct Col { const char* l; int x; };
-  if (has_gps) {
-    Col cols[] = {
-      {"ID", 28}, {"RSSI", 226}, {"HGT", 286}, {"SPD", 346}, {"RANGE", 406}, {"BRG", 466}, {"AUTH", 512}
-    };
-    for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
-  } else if (has_pos) {
-    Col cols[] = {
-      {"ID", 28}, {"RSSI", 235}, {"HGT", 300}, {"SPD", 365}, {"RANGE", 430}, {"AUTH", 510}
-    };
-    for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
-  } else {
-    Col cols[] = {
-      {"ID", 28}, {"RSSI", 260}, {"HGT", 335}, {"SPD", 410}, {"AUTH", 495}
-    };
-    for (auto& c : cols) text(f9, c.l, c.x, y0 + 16, BLACK);
-  }
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  int id_w = layout_columns(f9);
+  text(f9, "ID", TABLE_X + 8, y0 + 16, BLACK);
+  for (auto& c : s_cols) text(f9, c.head, c.x, y0 + 16, BLACK);
   rect(TABLE_X, y0 + 22, TABLE_W, 2, BLACK);
   rect(565, 76, 1, 416, LIGHT);  // vertical divider between table and right board
 
@@ -373,109 +481,49 @@ static void draw_table() {
     bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now), sel = (k == s_sel);
     uint8_t ink = sel ? WHITE : (stale ? GREY : BLACK);
 
-    if (sel) {
-      // Invert selected row: solid black background with verdict
-      rect(TABLE_X, y, TABLE_W, ROW_H - 2, BLACK);
-    } else {
-      rect(TABLE_X + 8, y + ROW_H - 2, TABLE_W - 8, 1, LIGHT);
-    }
+    if (sel) rect(TABLE_X, y, TABLE_W, ROW_H - 2, BLACK);   // inverted row
+    else rect(TABLE_X + 8, y + ROW_H - 2, TABLE_W - 8, 1, LIGHT);
     if (danger && !sel) box(TABLE_X + 8, y - 2, TABLE_W - 8, ROW_H - 2, BLACK);
 
-    int bx = has_gps ? 226 : (has_pos ? 235 : 260);
-    int bw = has_gps ? 42 : (has_pos ? 45 : 50);
-    int max_id_w = bx - (TABLE_X + 8) - 10;
+    // Line 1: the ID, shortened from the head so the distinguishing tail
+    // survives. Line 2: the literal alert, or the status and when the
+    // aircraft was last heard. Transports and RSSI live in the details.
+    char b[64];
+    short_id(b, sizeof(b), k, f12, id_w);
+    text(f12, b, TABLE_X + 8, y + 20, ink);
+    uint32_t age_s = (s_now - t->last_ms) / 1000;
+    char age[16];
+    if (age_s < 10) snprintf(age, sizeof(age), "now");
+    else if (age_s < 60) snprintf(age, sizeof(age), "%lus ago", (unsigned long)age_s);
+    else snprintf(age, sizeof(age), "%lum ago", (unsigned long)(age_s / 60));
+    char al[48]; ui_alert_text(al, sizeof(al), t, s_now);
+    if (al[0]) snprintf(b, sizeof(b), "%s | %s", al, age);
+    else snprintf(b, sizeof(b), "%s | heard %s", stale ? "history" : ui_status_name(t->status), age);
+    fit_text(b, sizeof(b), f9, TABLE_W - 16);   // the numbers all sit on line one
+    text(f9, b, TABLE_X + 8, y + 36, sel ? WHITE : (al[0] ? BLACK : GREY));
 
-    // Line 1: ID string with pixel-width truncation to guarantee it never overflows into RSSI
-    char id_b[32];
-    const char* src_id = t->uas[0] ? t->uas : "(no id)";
-    strncpy(id_b, src_id, sizeof(id_b) - 1);
-    id_b[sizeof(id_b) - 1] = 0;
-    if (text_w(&FreeSansBold12pt7b, id_b) > max_id_w) {
-      int len = strlen(id_b);
-      while (len > 2) {
-        id_b[len - 1] = 0;
-        char temp[32];
-        snprintf(temp, sizeof(temp), "%s..", id_b);
-        if (text_w(&FreeSansBold12pt7b, temp) <= max_id_w) {
-          strcpy(id_b, temp);
-          break;
-        }
-        len--;
-      }
-    }
-    text(&FreeSansBold12pt7b, id_b, TABLE_X + 8, y + 20, ink);
-
-    // Line 2: Verdict on selected row, or alert/status on unselected
-    if (sel) {
-      char v[64];
-      uint32_t age_s = (s_now - t->last_ms) / 1000;
-      char age_buf[16];
-      if (age_s < 10) snprintf(age_buf, sizeof(age_buf), "now");
-      else if (age_s < 60) snprintf(age_buf, sizeof(age_buf), "%lus", (unsigned long)age_s);
-      else snprintf(age_buf, sizeof(age_buf), "%lum", (unsigned long)(age_s / 60));
-
-      snprintf(v, sizeof(v), "%s%s  %s  %s%s%s  %s",
-               t->in_tfr ? "IN TFR • " : "",
-               ui_status_name(t->status),
-               ui_auth_text(t->auth_state),
-               (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
-               age_buf);
-      if (text_w(f9, v) > max_id_w) {
-        int vlen = strlen(v);
-        while (vlen > 2) {
-          v[vlen - 1] = 0;
-          char vtemp[64];
-          snprintf(vtemp, sizeof(vtemp), "%s..", v);
-          if (text_w(f9, vtemp) <= max_id_w) {
-            strcpy(v, vtemp);
-            break;
-          }
-          vlen--;
-        }
-      }
-      text(f9, v, TABLE_X + 8, y + 36, WHITE);
+    uint8_t dash = sel ? WHITE : GREY;
+    if (!isnan(t->height)) { snprintf(b, sizeof(b), "%d", (int)t->height); text(f9, b, s_cols[0].x, y + 20, ink); }
+    else text(f9, "--", s_cols[0].x, y + 20, dash);
+    if (!isnan(t->speed)) { snprintf(b, sizeof(b), "%.0f", t->speed); text(f9, b, s_cols[1].x, y + 20, ink); }
+    else text(f9, "--", s_cols[1].x, y + 20, dash);
+    if (g_home_set && t->has_pos) {
+      ui_fmt_range(b, sizeof(b), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+      text(f9, b, s_cols[2].x, y + 20, ink);
+      snprintf(b, sizeof(b), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
+      text(f9, b, s_cols[3].x, y + 20, ink);
     } else {
-      if (t->in_tfr) text(f9, "IN TFR", TABLE_X + 8, y + 36, BLACK);
-      else if (t->status == 3) text(f9, "EMERGENCY", TABLE_X + 8, y + 36, BLACK);
-      else {
-        char sub[48];
-        uint32_t age_s = (s_now - t->last_ms) / 1000;
-        const char* stat = ui_status_name(t->status);
-        if (age_s < 60) snprintf(sub, sizeof(sub), "%s | %s%s%s | %lus", stat, (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "", (unsigned long)age_s);
-        else snprintf(sub, sizeof(sub), "%s | %s%s%s | %lum", stat, (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "", (unsigned long)(age_s / 60));
-        text(f9, sub, TABLE_X + 8, y + 36, GREY);
-      }
-    }
-
-    // rssi bar
-    box(bx, y + 6, bw, 8, ink);
-    rect(bx, y + 6, (int)(bw * ui_rssi01(t->rssi)), 8, ink);
-    char rb[16]; snprintf(rb, sizeof(rb), "%d", t->rssi); text(f9, rb, bx, y + 34, ink);
-
-    int hgt_x = has_gps ? 286 : (has_pos ? 300 : 335);
-    if (!isnan(t->height)) { char hb[16]; snprintf(hb, sizeof(hb), "%dm", (int)t->height); text(f9, hb, hgt_x, y + 20, ink); }
-
-    int spd_x = has_gps ? 346 : (has_pos ? 365 : 410);
-    if (!isnan(t->speed))  { char sb[16]; snprintf(sb, sizeof(sb), "%.0f", t->speed);       text(f9, sb, spd_x, y + 20, ink); }
-
-    if (has_pos && t->has_pos) {
-      int rng_x = has_gps ? 406 : 430;
-      char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
-      text(f9, r, rng_x, y + 20, ink);
-      if (has_gps) {
-        char bb[16]; snprintf(bb, sizeof(bb), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
-        text(f9, bb, 466, y + 20, ink);
-      }
+      text(f9, "--", s_cols[2].x, y + 20, dash);
+      text(f9, "--", s_cols[3].x, y + 20, dash);
     }
     if (t->auth_state) {
       const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
                     : t->auth_state == 2 ? "?" : "...";       // column is headed AUTH
-      int auth_x = has_gps ? 512 : (has_pos ? 510 : 495);
       if (!sel && t->auth_state == 4) {
-        rect(auth_x - 4, y + 4, 34, 18, BLACK);
-        text(f9, a, auth_x, y + 17, WHITE);
+        rect(s_cols[4].x - 4, y + 4, text_w(f9, a) + 8, 18, BLACK);
+        text(f9, a, s_cols[4].x, y + 17, WHITE);
       } else {
-        text(f9, a, auth_x, y + 20, ink);
+        text(f9, a, s_cols[4].x, y + 20, ink);
       }
     }
   }
@@ -507,18 +555,21 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   bool stale = ui_stale(t, s_now);
   bool danger = ui_danger(t, s_now);
-  const char* status_badge = danger ? "EMERGENCY" : stale ? "STALE" : "ACTIVE";
+  const char* status_badge = danger ? "ALERT" : stale ? "STALE" : "ACTIVE";
   text_r(f9, status_badge, cx + cw - 12, cy + 22, WHITE);
 
-  // UAS ID / Call sign
+  // UAS ID / Call sign, then the literal reasons it is loud, if any
   int y = cy + 58;
-  snprintf(b, sizeof(b), "%.20s", t->uas[0] ? t->uas : "(UNIDENTIFIED UAS)");
+  snprintf(b, sizeof(b), "%s", t->uas[0] ? t->uas : "(UNIDENTIFIED UAS)");
+  fit_text(b, sizeof(b), f12, cw - 24);
   text(f12, b, cx + 12, y, BLACK);
+  ui_alert_text(b, sizeof(b), t, s_now);
+  if (b[0]) { y += 20; fit_text(b, sizeof(b), f9, cw - 24); text(f9, b, cx + 12, y, BLACK); }
 
   // Subtitle: Manufacturer & Transport
   y += 24;
   snprintf(b, sizeof(b), "%s | %s%s%s",
-           uas_manufacturer(t->uas),
+           ui_uas_type_name(t->uas),
            (t->src_mask & 1) ? "Wi-Fi " : "",
            (t->src_mask & 2) ? "NAN " : "",
            (t->src_mask & 4) ? "BLE" : "");
@@ -530,7 +581,9 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   // Grid Row 1: Altitude & Speed
   y += 22;
-  text(f9, "ALTITUDE (AGL)", cx + 12, y, GREY);
+  if (isnan(t->height)) snprintf(b, sizeof(b), "HEIGHT");
+  else snprintf(b, sizeof(b), "HEIGHT (%s)", ui_height_ref(t->height_ref));
+  text(f9, b, cx + 12, y, GREY);
   text(f9, "SPEED", cx + 200, y, GREY);
 
   y += 20;
@@ -607,13 +660,19 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
   text(f9, b, cx + 12, y, t->auth_state == 4 ? BLACK : GREY);
 
   uint32_t age_s = (s_now - t->last_ms) / 1000;
-  snprintf(b, sizeof(b), "Seen: %lus ago", (unsigned long)age_s);
+  snprintf(b, sizeof(b), "Heard: %lus ago", (unsigned long)age_s);
   text_r(f9, b, cx + cw - 12, y, BLACK);
+
+  // Airspace, qualified by what TFR data the host has actually pushed
+  y += 20;
+  ui_airspace_text(b, sizeof(b), t, s_now);
+  fit_text(b, sizeof(b), f9, cw - 24);
+  text(f9, b, cx + 12, y, t->in_tfr ? BLACK : GREY);
 
   // Footer tap banner
   rect(cx + 1, cy + ch - 24, cw - 2, 23, LIGHT);
-  int tw_tap = text_w(f9, "TAP CARD FOR FULL AUDIT INSPECTOR");
-  text(f9, "TAP CARD FOR FULL AUDIT INSPECTOR", cx + (cw - tw_tap) / 2, cy + ch - 8, BLACK);
+  int tw_tap = text_w(f9, "TAP CARD FOR AIRCRAFT DETAILS");
+  text(f9, "TAP CARD FOR AIRCRAFT DETAILS", cx + (cw - tw_tap) / 2, cy + ch - 8, BLACK);
 }
 
 static void draw_plot() {
@@ -643,31 +702,57 @@ static void draw_plot() {
     }
     epd_fill_circle(PLOT_CX, PLOT_CY, 4, BLACK, s_fb);
 
+    // Markers in reverse priority so the selected aircraft ends on top;
+    // then labels in priority order, each only where one fits.
+    int rows[TRK_MAX]; int nr = priority_rows(rows);
+    int px[TRK_MAX], py[TRK_MAX]; bool on[TRK_MAX];
     for (int k = 0; k < s_n; k++) {
       const Track* t = &g_tracks[s_order[k]];
-      if (!t->has_pos) continue;
+      on[k] = t->has_pos;
+      if (!on[k]) continue;
       double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
       double br = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon) * M_PI / 180;
-      int px = PLOT_CX + (int)(sin(br) * d / scale * PLOT_R);
-      int py = PLOT_CY - (int)(cos(br) * d / scale * PLOT_R);
+      px[k] = PLOT_CX + (int)(sin(br) * d / scale * PLOT_R);
+      py[k] = PLOT_CY - (int)(cos(br) * d / scale * PLOT_R);
+    }
+    for (int i = nr - 1; i >= 0; i--) {
+      int k = rows[i];
+      if (!on[k]) continue;
+      const Track* t = &g_tracks[s_order[k]];
       bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now);
-      if (danger) epd_draw_circle(px, py, 12, BLACK, s_fb);
-      epd_fill_circle(px, py, k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
+      if (danger) epd_draw_circle(px[k], py[k], 12, BLACK, s_fb);
+      epd_fill_circle(px[k], py[k], k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
       if (!isnan(t->heading)) {
         double hr = t->heading * M_PI / 180;
-        epd_draw_line(px, py, px + (int)(sin(hr) * 18), py - (int)(cos(hr) * 18), BLACK, s_fb);
+        epd_draw_line(px[k], py[k], px[k] + (int)(sin(hr) * 18), py[k] - (int)(cos(hr) * 18), BLACK, s_fb);
       }
-      char b[16];
-      if (!isnan(t->height)) snprintf(b, sizeof(b), "%s %dm", uas_tail(t->uas, 5), (int)t->height);
-      else snprintf(b, sizeof(b), "%s", uas_tail(t->uas, 8));
-      int tw = text_w(&FreeSansBold9pt7b, b);
-      int box_w = tw + 6;
-      int bx = px + 8;
-      if (bx + box_w > W - 8) bx = px - 8 - box_w;
-      if (bx < 568) bx = 568;
-      rect(bx, py - 18, box_w, 16, WHITE);
-      box(bx, py - 18, box_w, 16, stale ? GREY : BLACK);
-      text(&FreeSansBold9pt7b, b, bx + 3, py - 6, stale ? GREY : BLACK);
+    }
+    // Labels: compass and ring text are furniture; the selected aircraft
+    // and alerts get theirs first (they may cover a lesser marker), then
+    // markers become obstacles for everyone else.
+    lb_reset();
+    lb_block(PLOT_CX - 10, PLOT_CY - PLOT_R - 22, 20, 18); lb_block(PLOT_CX - 10, PLOT_CY + PLOT_R + 2, 20, 18);
+    lb_block(PLOT_CX - PLOT_R - 22, PLOT_CY - 10, 22, 18); lb_block(PLOT_CX + PLOT_R + 4, PLOT_CY - 10, 20, 18);
+    for (int i = 1; i <= 3; i++) lb_block(PLOT_CX + 4, PLOT_CY + (PLOT_R * i / 3) - 16, 64, 18);
+    for (int pass = 0; pass < 2; pass++) {
+      if (pass == 1) for (int k = 0; k < s_n; k++) if (on[k]) lb_block(px[k] - 12, py[k] - 12, 24, 24);
+      for (int i = 0; i < nr; i++) {
+        int k = rows[i];
+        if (!on[k]) continue;
+        const Track* t = &g_tracks[s_order[k]];
+        bool first = (k == s_sel) || ui_danger(t, s_now);
+        if (first != (pass == 0)) continue;
+        bool stale = ui_stale(t, s_now);
+        char b[24];
+        if (!isnan(t->height)) snprintf(b, sizeof(b), "%s %dm", label_id(k), (int)t->height);
+        else snprintf(b, sizeof(b), "%s", label_id(k));
+        int box_w = text_w(&FreeSansBold9pt7b, b) + 6, lx, ly;
+        if (!lb_place(px[k], py[k], box_w, 16, RECT_PLOT.x + 2, RECT_PLOT.y + 2,
+                      W - 8, RECT_PLOT.y + RECT_PLOT.height - 2, &lx, &ly)) continue;
+        rect(lx, ly, box_w, 16, WHITE);
+        box(lx, ly, box_w, 16, stale ? GREY : BLACK);
+        text(&FreeSansBold9pt7b, b, lx + 3, ly + 12, stale ? GREY : BLACK);
+      }
     }
   } else {
     // No operator fix: Display rich Selected Target Detail Card
@@ -693,6 +778,8 @@ static void draw_plot() {
 #define MAP_CY   (MAP_Y0 + MAP_H / 2)
 #define TILE_ZMIN 11
 #define TILE_ZMAX 15
+#define MAP_HUD_H 46             // selected-contact banner: tall enough for a finger
+static int s_pan_bx = 20, s_pan_bw = 0;   // the MANUAL PAN button, for the hit-test
 static PNG  s_png;
 static File s_pngFile;
 static int  s_blit_x, s_blit_y;             // screen origin of the tile being decoded
@@ -855,6 +942,7 @@ static void draw_map() {
   }
 
   // overlay: home, contacts, scale, north
+  int home_x = -1, home_y = -1;
   if (g_home_set) {
     double wx, wy; world_px(g_home_lat, g_home_lon, s_cam_z, &wx, &wy);
     int x = (int)(wx - left), y = MAP_Y0 + (int)(wy - top);
@@ -863,36 +951,62 @@ static void draw_map() {
       epd_draw_circle(x, y, 10, BLACK, s_fb);
       rect(x + 12, y - 12, 48, 16, WHITE);
       text(&FreeSansBold9pt7b, "HOME", x + 14, y, BLACK);
+      home_x = x; home_y = y;
     }
   }
 
   char b[32];
+  // Markers in reverse priority so the selected aircraft ends on top, then
+  // labels in priority order, each only where one fits clear of markers,
+  // other labels and the map furniture.
+  int rows[TRK_MAX]; int nr = priority_rows(rows);
+  int px[TRK_MAX], py[TRK_MAX]; bool on[TRK_MAX];
   for (int k = 0; k < s_n; k++) {
     const Track* t = &g_tracks[s_order[k]];
+    on[k] = false;
     if (!t->has_pos) continue;
     double wx, wy; world_px(t->lat, t->lon, s_cam_z, &wx, &wy);
-    int x = (int)(wx - left), y = MAP_Y0 + (int)(wy - top);
-    if (x < 0 || x >= W || y < MAP_Y0 || y >= MAP_Y0 + MAP_H) continue;
+    px[k] = (int)(wx - left); py[k] = MAP_Y0 + (int)(wy - top);
+    on[k] = px[k] >= 0 && px[k] < W && py[k] >= MAP_Y0 && py[k] < MAP_Y0 + MAP_H;
+  }
+  lb_reset();
+  lb_block(20, MAP_Y0 + 8, 240, s_cam_manual ? 62 : 28);   // zoom badge (+ MANUAL PAN button)
+  lb_block(20, MAP_Y0 + MAP_H - 32, 160, 26);            // scale bar
+  lb_block(W - 60, MAP_Y0, 60, 240);                     // compass, zoom, follow
+  if (home_x >= 0) lb_block(home_x - 12, home_y - 14, 74, 28);   // the HOME marker and its label
+  if (s_n > 0 && s_sel >= 0 && s_sel < s_n) lb_block(20, MAP_Y0 + MAP_H - MAP_HUD_H - 40, W - 40, MAP_HUD_H);
+  for (int i = nr - 1; i >= 0; i--) {
+    int k = rows[i];
+    if (!on[k]) continue;
+    const Track* t = &g_tracks[s_order[k]];
     bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now);
-    epd_fill_circle(x, y, danger ? 15 : 11, WHITE, s_fb);
-    if (danger) epd_draw_circle(x, y, 13, BLACK, s_fb);
-    epd_fill_circle(x, y, k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
+    epd_fill_circle(px[k], py[k], danger ? 15 : 11, WHITE, s_fb);
+    if (danger) epd_draw_circle(px[k], py[k], 13, BLACK, s_fb);
+    epd_fill_circle(px[k], py[k], k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
     if (!isnan(t->heading)) {
       double hr = t->heading * M_PI / 180;
-      epd_draw_line(x, y, x + (int)(sin(hr) * 20), y - (int)(cos(hr) * 20), BLACK, s_fb);
+      epd_draw_line(px[k], py[k], px[k] + (int)(sin(hr) * 20), py[k] - (int)(cos(hr) * 20), BLACK, s_fb);
     }
-    if (!isnan(t->height)) snprintf(b, sizeof(b), "%s %dm", uas_tail(t->uas, 5), (int)t->height);
-    else snprintf(b, sizeof(b), "%s", uas_tail(t->uas, 8));
-    int tw = text_w(&FreeSansBold9pt7b, b);
-    int box_w = tw + 8;
-    int bx = x + 10;
-    if (bx + box_w > W - 8) bx = x - 10 - box_w;
-    if (bx < 8) bx = 8;
-    int by = y - 20;
-    if (by < MAP_Y0 + 4) by = y + 10;
-    rect(bx, by, box_w, 18, WHITE);
-    box(bx, by, box_w, 18, stale ? GREY : BLACK);
-    text(&FreeSansBold9pt7b, b, bx + 4, by + 14, stale ? GREY : BLACK);
+  }
+  // The selected aircraft and alerts label first (they may cover a lesser
+  // marker); then markers become obstacles for everyone else.
+  for (int pass = 0; pass < 2; pass++) {
+    if (pass == 1) for (int k = 0; k < s_n; k++) if (on[k]) lb_block(px[k] - 16, py[k] - 16, 32, 32);
+    for (int i = 0; i < nr; i++) {
+      int k = rows[i];
+      if (!on[k]) continue;
+      const Track* t = &g_tracks[s_order[k]];
+      bool first = (k == s_sel) || ui_danger(t, s_now);
+      if (first != (pass == 0)) continue;
+      bool stale = ui_stale(t, s_now);
+      if (!isnan(t->height)) snprintf(b, sizeof(b), "%s %dm", label_id(k), (int)t->height);
+      else snprintf(b, sizeof(b), "%s", label_id(k));
+      int box_w = text_w(&FreeSansBold9pt7b, b) + 8, lx, ly;
+      if (!lb_place(px[k], py[k], box_w, 18, 8, MAP_Y0 + 4, W - 62, MAP_Y0 + MAP_H - 4, &lx, &ly)) continue;
+      rect(lx, ly, box_w, 18, WHITE);
+      box(lx, ly, box_w, 18, stale ? GREY : BLACK);
+      text(&FreeSansBold9pt7b, b, lx + 4, ly + 14, stale ? GREY : BLACK);
+    }
   }
 
   // scale bar: 100 px in metres at this zoom and latitude
@@ -931,18 +1045,24 @@ static void draw_map() {
   epd_draw_line(W - 32, rby + 8, W - 32, rby + 36, BLACK, s_fb);
   epd_draw_line(W - 46, rby + 22, W - 18, rby + 22, BLACK, s_fb);
 
+  // Mode feedback that is also the way out: a button, not a badge.
   if (s_cam_manual) {
-    int pw = 140, ph = 26;
-    int px = 20, py = MAP_Y0 + 8;
-    rect(px, py, pw, ph, WHITE);
-    box(px, py, pw, ph, BLACK);
-    text(&FreeSansBold9pt7b, "MANUAL PAN", px + 10, py + 18, BLACK);
+    const char* lbl = "MANUAL PAN - TAP TO FOLLOW";
+    s_pan_bw = text_w(&FreeSansBold9pt7b, lbl) + 24;
+    s_pan_bx = 20;                                     // under the zoom badge
+    int py = MAP_Y0 + 42, ph = 28;
+    rect(s_pan_bx, py, s_pan_bw, ph, WHITE);
+    box(s_pan_bx, py, s_pan_bw, ph, BLACK);
+    box(s_pan_bx + 1, py + 1, s_pan_bw - 2, ph - 2, BLACK);
+    text(&FreeSansBold9pt7b, lbl, s_pan_bx + 12, py + 19, BLACK);
+  } else {
+    s_pan_bw = 0;
   }
 
   // Tactical HUD banner when an aircraft is selected
   if (s_n > 0 && s_sel >= 0 && s_sel < s_n) {
     const Track* sel_t = &g_tracks[s_order[s_sel]];
-    const int hud_h = 36;
+    const int hud_h = MAP_HUD_H;
     const int hud_y = MAP_Y0 + MAP_H - hud_h - 40;
     rect(20, hud_y, W - 40, hud_h, WHITE);
     box(20, hud_y, W - 40, hud_h, BLACK);
@@ -954,24 +1074,23 @@ static void draw_map() {
     if (g_home_set && sel_t->has_pos) {
       ui_fmt_range(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, sel_t->lat, sel_t->lon));
     }
-    char hud_str[128];
-    snprintf(hud_str, sizeof(hud_str), "%.16s | %s | Alt %s | Spd %s | Rng %s | %s",
+    char hud_str[128], al[48];
+    ui_alert_text(al, sizeof(al), sel_t, s_now);
+    snprintf(hud_str, sizeof(hud_str), "%s | %s | Hgt %s | Spd %s | Rng %s",
              sel_t->uas[0] ? sel_t->uas : "(no id)",
-             ui_status_name(sel_t->status), hb, sb, rb,
-             (sel_t->src_mask & 1) ? "W" : (sel_t->src_mask & 2) ? "N" : "B");
-    text(&FreeSansBold9pt7b, hud_str, 32, hud_y + 24, BLACK);
-
-    // [ DETAILS ] button
-    int d_w = 90, d_h = 26;
-    int d_x = W - 140, d_y = hud_y + 5;
+             al[0] ? al : ui_status_name(sel_t->status), hb, sb, rb);
+    // [ DETAILS ] and [ X ] buttons, finger-sized; the text stops short of them
+    int d_w = 100, d_h = 36;
+    int d_x = W - 152, d_y = hud_y + 5;
+    fit_text(hud_str, sizeof(hud_str), &FreeSansBold9pt7b, d_x - 12 - 32);
+    text(&FreeSansBold9pt7b, hud_str, 32, hud_y + 29, BLACK);
     rect(d_x, d_y, d_w, d_h, BLACK);
-    text(&FreeSansBold9pt7b, "DETAILS", d_x + (d_w - text_w(&FreeSansBold9pt7b, "DETAILS")) / 2, d_y + 18, WHITE);
-
-    // [ X ] button
-    int x_w = 26, x_h = 26;
+    text(&FreeSansBold9pt7b, "DETAILS", d_x + (d_w - text_w(&FreeSansBold9pt7b, "DETAILS")) / 2, d_y + 24, WHITE);
+    int x_w = 36, x_h = 36;
     int x_x = W - 44, x_y = hud_y + 5;
     box(x_x, x_y, x_w, x_h, BLACK);
-    text(&FreeSansBold9pt7b, "X", x_x + 8, x_y + 18, BLACK);
+    box(x_x + 1, x_y + 1, x_w - 2, x_h - 2, BLACK);
+    text(&FreeSansBold9pt7b, "X", x_x + (x_w - text_w(&FreeSansBold9pt7b, "X")) / 2, x_y + 24, BLACK);
   }
 
   UiSummary sm; ui_summarize(&sm, s_now);
@@ -1002,6 +1121,15 @@ static void refresh(bool force_full) {
   refresh_area(epd_full_screen(), force_full, false);
 }
 
+/// One inspector line, fitted to its column so it can never cross into the
+/// other one.
+static void ins_line(int x, int* y, const char* s, uint8_t ink = BLACK) {
+  char c[96]; snprintf(c, sizeof(c), "%s", s);
+  fit_text(c, sizeof(c), &FreeSansBold9pt7b, 300);
+  text(&FreeSansBold9pt7b, c, x, *y, ink);
+  *y += 20;
+}
+
 static void draw_inspector_modal() {
   if (s_sel < 0 || s_sel >= s_n) return;
   const Track* t = &g_tracks[s_order[s_sel]];
@@ -1017,15 +1145,14 @@ static void draw_inspector_modal() {
   box(mx + 1, my + 1, mw - 2, mh - 2, BLACK);
   box(mx + 2, my + 2, mw - 4, mh - 4, BLACK);
 
-  // Header banner
+  // Header banner: a title that stops short of the close button
   rect(mx + 3, my + 3, mw - 6, 42, BLACK);
-  char title_buf[64];
-  snprintf(title_buf, sizeof(title_buf), "CONTACT INSPECTOR: %.20s", t->uas[0] ? t->uas : "(no id)");
-  text(f12, title_buf, mx + 16, my + 28, WHITE);
-
-  // Close [ X ] button in header
-  int close_w = 34, close_h = 34;
+  int close_w = 40, close_h = 34;
   int close_x = mx + mw - close_w - 6, close_y = my + 7;
+  char b[96];
+  snprintf(b, sizeof(b), "AIRCRAFT DETAILS: %s", t->uas[0] ? t->uas : "(no id)");
+  fit_text(b, sizeof(b), f12, close_x - 12 - (mx + 16));
+  text(f12, b, mx + 16, my + 28, WHITE);
   rect(close_x, close_y, close_w, close_h, WHITE);
   box(close_x, close_y, close_w, close_h, BLACK);
   text(f12, "X", close_x + (close_w - text_w(f12, "X")) / 2, close_y + 24, BLACK);
@@ -1034,98 +1161,86 @@ static void draw_inspector_modal() {
   int col2 = mx + 350;
   int y = my + 68;
 
-  // Section 1: IDENTITY & RF (Left column)
+  // Section 1: IDENTITY & SIGNALS (Left column)
   text(f9, "IDENTITY & SIGNALS", col1, y, BLACK);
   rect(col1, y + 4, 300, 1, BLACK);
-
-  char b[64];
   y += 24;
+  char al[64]; ui_alert_text(al, sizeof(al), t, s_now);
+  if (al[0]) { snprintf(b, sizeof(b), "ALERT: %s", al); ins_line(col1, &y, b); }
   snprintf(b, sizeof(b), "UAS ID: %s", t->uas[0] ? t->uas : "(not reported)");
-  text(f9, b, col1, y, BLACK);
-
-  y += 20;
-  snprintf(b, sizeof(b), "MFR: %s", uas_manufacturer(t->uas));
-  text(f9, b, col1, y, BLACK);
-
-  y += 20;
+  ins_line(col1, &y, b);
+  snprintf(b, sizeof(b), "%s: %s", uas_model_name(t->uas) ? "Type" : "Make", ui_uas_type_name(t->uas));
+  ins_line(col1, &y, b);
+  if (t->ssid[0]) {
+    snprintf(b, sizeof(b), "SSID: %s", t->ssid);
+    ins_line(col1, &y, b, GREY);
+    if (t->ssid_check == 2) ins_line(col1, &y, "SSID names another serial!", BLACK);
+  }
   snprintf(b, sizeof(b), "MAC: %02X:%02X:%02X:%02X:%02X:%02X", t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5]);
-  text(f9, b, col1, y, BLACK);
-
-  y += 20;
-  snprintf(b, sizeof(b), "Path: %s%s%s  (%u msgs)",
-           (t->src_mask & 1) ? "Wi-Fi Beacon " : "",
-           (t->src_mask & 2) ? "NAN " : "",
-           (t->src_mask & 4) ? "BLE" : "",
-           t->msgs);
-  text(f9, b, col1, y, BLACK);
-
-  y += 20;
-  snprintf(b, sizeof(b), "RSSI: %d dBm  (Peak: %d dBm)", t->rssi, t->peak_rssi);
-  text(f9, b, col1, y, BLACK);
-
-  y += 20;
+  if (t->alt_mac_count) {
+    char more[24]; snprintf(more, sizeof(more), "  (+%u more)", (unsigned)t->alt_mac_count);
+    strncat(b, more, sizeof(b) - strlen(b) - 1);
+  }
+  ins_line(col1, &y, b);
+  snprintf(b, sizeof(b), "Via: %s%s%s%s%s",
+           (t->src_mask & 1) ? "Wi-Fi" : "",
+           (t->src_mask & 1) && (t->src_mask & 6) ? ", " : "",
+           (t->src_mask & 2) ? "NAN" : "",
+           (t->src_mask & 2) && (t->src_mask & 4) ? ", " : "",
+           (t->src_mask & 4) ? "BLE" : "");
+  if (t->fmt & 2) strncat(b, " (GB 46750)", sizeof(b) - strlen(b) - 1);
+  ins_line(col1, &y, b);
+  snprintf(b, sizeof(b), "RSSI: %d dBm (peak %d)", t->rssi, t->peak_rssi);
+  ins_line(col1, &y, b);
   uint32_t age_s = (s_now - t->last_ms) / 1000;
   uint32_t dur_s = (s_now - t->first_ms) / 1000;
-  snprintf(b, sizeof(b), "Seen: %lus ago  (Track: %lum%lus)", (unsigned long)age_s, (unsigned long)(dur_s / 60), (unsigned long)(dur_s % 60));
-  text(f9, b, col1, y, BLACK);
-
-  y += 20;
+  snprintf(b, sizeof(b), "Heard %lus ago | %lum%02lus | %u msgs", (unsigned long)age_s,
+           (unsigned long)(dur_s / 60), (unsigned long)(dur_s % 60), t->msgs);
+  ins_line(col1, &y, b);
   const char* auth_str = (t->auth_state == 3) ? "VALID (Ed25519 ASTM)" :
                          (t->auth_state == 4) ? "SIGNATURE INVALID!" :
                          (t->auth_state == 2) ? "Untrusted Key" :
                          (t->auth_state == 1) ? "Partial Page" : "None";
-  snprintf(b, sizeof(b), "Auth: %s", auth_str);
-  text(f9, b, col1, y, (t->auth_state == 4) ? BLACK : GREY);
+  snprintf(b, sizeof(b), "ID signature: %s", auth_str);
+  ins_line(col1, &y, b, (t->auth_state == 4) ? BLACK : GREY);
 
   // Section 2: FLIGHT TELEMETRY (Right column)
   int y2 = my + 68;
   text(f9, "FLIGHT TELEMETRY", col2, y2, BLACK);
   rect(col2, y2 + 4, 300, 1, BLACK);
-
   y2 += 24;
-  if (t->has_pos) {
-    snprintf(b, sizeof(b), "Pos: %.6f, %.6f", t->lat, t->lon);
-  } else {
-    snprintf(b, sizeof(b), "Pos: NO POSITION REPORTED");
-  }
-  text(f9, b, col2, y2, BLACK);
-
-  y2 += 20;
-  char hb[16] = "--", mb[16] = "--";
-  if (!isnan(t->height)) snprintf(hb, sizeof(hb), "%d m", (int)t->height);
+  if (t->has_pos) snprintf(b, sizeof(b), "Pos: %.6f, %.6f", t->lat, t->lon);
+  else snprintf(b, sizeof(b), "Pos: NO POSITION REPORTED");
+  ins_line(col2, &y2, b);
+  char mb[16] = "--";
   if (!isnan(t->max_height)) snprintf(mb, sizeof(mb), "%d m", (int)t->max_height);
-  snprintf(b, sizeof(b), "Height AGL: %s  (Peak: %s)", hb, mb);
-  text(f9, b, col2, y2, BLACK);
-
-  y2 += 20;
+  if (isnan(t->height)) snprintf(b, sizeof(b), "Height: --");
+  else snprintf(b, sizeof(b), "Height %s: %d m", ui_height_ref(t->height_ref), (int)t->height);
+  ins_line(col2, &y2, b);
+  snprintf(b, sizeof(b), "Peak height: %s", mb);
+  ins_line(col2, &y2, b);
   char sb[24] = "--";
   if (!isnan(t->speed)) snprintf(sb, sizeof(sb), "%.1f m/s (%.0f kt)", t->speed, t->speed * 1.94384f);
   snprintf(b, sizeof(b), "Speed: %s", sb);
-  text(f9, b, col2, y2, BLACK);
-
-  y2 += 20;
+  ins_line(col2, &y2, b);
   char cb[16] = "--";
   if (!isnan(t->heading)) snprintf(cb, sizeof(cb), "%03d deg True", (int)t->heading);
   snprintf(b, sizeof(b), "Heading: %s", cb);
-  text(f9, b, col2, y2, BLACK);
-
-  y2 += 20;
+  ins_line(col2, &y2, b);
   if (g_home_set && t->has_pos) {
     char rb[16]; ui_fmt_range(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
     int brg = (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon);
     snprintf(b, sizeof(b), "Range: %s  BRG: %03d deg", rb, brg);
   } else {
-    snprintf(b, sizeof(b), "Range: NO OPERATOR FIX");
+    snprintf(b, sizeof(b), "Range: NO RECEIVER POSITION");
   }
-  text(f9, b, col2, y2, BLACK);
-
-  y2 += 20;
-  snprintf(b, sizeof(b), "Status: %s", ui_status_name(t->status));
-  text(f9, b, col2, y2, BLACK);
-
-  y2 += 20;
-  snprintf(b, sizeof(b), "Airspace: %s", t->in_tfr ? t->tfr_id : "Clear of TFRs");
-  text(f9, b, col2, y2, t->in_tfr ? BLACK : GREY);
+  ins_line(col2, &y2, b);
+  snprintf(b, sizeof(b), "Status: %s", t->status == 3 ? "EMERGENCY REPORTED" : ui_status_name(t->status));
+  ins_line(col2, &y2, b);
+  // "No match" is only claimed against data the host actually pushed.
+  ui_airspace_text(al, sizeof(al), t, s_now);
+  snprintf(b, sizeof(b), "Airspace: %s", al);
+  y2 += 20 * text_wrap2(f9, b, col2, y2, 20, 300, t->in_tfr ? BLACK : GREY);
 
   // Bottom action buttons
   int btn_w = 200, btn_h = 44;
@@ -1192,8 +1307,10 @@ static void draw_tx() {
   if (!running) rect(0, 68, W, 2, BLACK);
   uint8_t fg = running ? WHITE : BLACK, mut = running ? WHITE : BLACK;
 
-  // Headline
-  text(&FreeSansBold18pt7b, running ? "TEST BEACON  ON AIR" : "TEST BEACON  PAUSED", TABLE_X, 48, fg);
+  // Headline, then the tally where the headline ends
+  const char* head = running ? "TEST BEACON  ON AIR" : "TEST BEACON  PAUSED";
+  text(&FreeSansBold18pt7b, head, TABLE_X, 48, fg);
+  int tally_x = TABLE_X + text_w(&FreeSansBold18pt7b, head) + 24;
 
   // Status tally
   int n = txui_count();
@@ -1205,7 +1322,7 @@ static void draw_tx() {
   }
   char st_b[48];
   snprintf(st_b, sizeof(st_b), "%d/%d ACTIVE | %lu PKTS", on, n, (unsigned long)total_sent);
-  text(&FreeSansBold9pt7b, st_b, 410, 45, mut);
+  text(&FreeSansBold9pt7b, st_b, tally_x, 45, mut);
 
   // Battery, backlight, and RX mode button on right
   int xr = W - 170;
@@ -1267,9 +1384,15 @@ static void draw_tx() {
   box(aoff_x + 1, aoff_y + 1, aoff_w - 2, aoff_h - 2, BLACK);
   text(&FreeSansBold12pt7b, "ALL OFF", aoff_x + (aoff_w - text_w(&FreeSansBold12pt7b, "ALL OFF")) / 2, aoff_y + 30, BLACK);
 
-  // Band label on right
-  text(&FreeSansBold9pt7b, "CH 6 | 2.4 GHz", 765, 102, BLACK);
-  text(&FreeSansBold9pt7b, "TEST BENCH RADIATOR", 765, 120, BLACK);
+  // Band label on the right, in the room left after the ALL OFF button
+  {
+    char band[32];
+    int band_w = W - 20 - (aoff_x + aoff_w + 12);
+    snprintf(band, sizeof(band), "CH 6 | 2.4 GHz"); fit_text(band, sizeof(band), &FreeSansBold9pt7b, band_w);
+    text_r(&FreeSansBold9pt7b, band, W - 20, 102, BLACK);
+    snprintf(band, sizeof(band), "BENCH RADIATOR"); fit_text(band, sizeof(band), &FreeSansBold9pt7b, band_w);
+    text_r(&FreeSansBold9pt7b, band, W - 20, 120, BLACK);
+  }
 
   // 10 Transmit Paths Grid (y: 146..488)
   const int card_w = 450, card_h = 58, row_pitch = 68;
@@ -1315,27 +1438,19 @@ static void draw_tx() {
       snprintf(cb, sizeof(cb), "%lu pkts", (unsigned long)txui_sent(i));
       int cnt_w = text_w(f9, cb);
 
-      // UAS ID with pixel-width truncation to prevent collision with packet counter
+      // UAS ID, shortened from the head: the variant name after the last
+      // dash is what tells the ten paths apart, so it must survive.
       int id_x = cx + cw + 10;
       int max_id_w = (x0 + card_w - 14 - cnt_w - 10) - id_x;
       if (max_id_w < 50) max_id_w = 50;
-
       char id_b[32];
-      const char* raw_id = txui_id(i);
-      strncpy(id_b, raw_id ? raw_id : "", sizeof(id_b) - 1);
-      id_b[sizeof(id_b) - 1] = 0;
-      if (text_w(f12, id_b) > max_id_w) {
-        int len = strlen(id_b);
-        while (len > 2) {
-          id_b[len - 1] = 0;
-          char temp[32];
-          snprintf(temp, sizeof(temp), "%s..", id_b);
-          if (text_w(f12, temp) <= max_id_w) {
-            strcpy(id_b, temp);
-            break;
-          }
-          len--;
-        }
+      const char* raw_id = txui_id(i) ? txui_id(i) : "";
+      const char* dash = strrchr(raw_id, '-');
+      int tail = dash ? (int)strlen(dash + 1) : 4;
+      if (tail < 4) tail = 4;
+      for (int chars = 40; chars >= tail + 2; chars--) {
+        ui_short_id(id_b, sizeof(id_b), raw_id, tail, chars);
+        if (text_w(f12, id_b) <= max_id_w) break;
       }
       text(f12, id_b, id_x, y + 26, BLACK);
 
@@ -1349,10 +1464,14 @@ static void draw_tx() {
   // Footer (y: 496..540)
   rect(0, 496, W, 44, WHITE);
   rect(0, 496, W, 2, BLACK);
-  text(f9, running ? "TRANSMITTING TEST BURSTS | DO NOT RADIATE NEAR LIVE AIRSPACE" :
-                     "TRANSMIT PAUSED | CONFIGURE PATHS AND TAP [TRANSMIT] TO RADIATE",
-       TABLE_X, 524, BLACK);
-  text_r(f9, "tap card to toggle | hold BOOT: rx mode", W - 20, 524, BLACK);
+  const char* hint = "tap card: toggle | hold BOOT: rx mode";
+  int hint_x = W - 20 - text_w(f9, hint);
+  char note[96];
+  snprintf(note, sizeof(note), "%s", running ? "ON AIR | do not radiate near live airspace"
+                                             : "PAUSED | configure paths, tap TRANSMIT to radiate");
+  fit_text(note, sizeof(note), f9, hint_x - 16 - TABLE_X);
+  text(f9, note, TABLE_X, 524, BLACK);
+  text(f9, hint, hint_x, 524, BLACK);
 }
 
 static void draw_diagnostics() {
@@ -1363,7 +1482,7 @@ static void draw_diagnostics() {
 
   // Header banner
   rect(0, 0, W, 68, BLACK);
-  text(f18, "SYSTEM DIAGNOSTICS & CALIBRATION", 24, 46, WHITE);
+  text(f18, "SYSTEM SETTINGS & DIAGNOSTICS", 24, 46, WHITE);
 
   // [ CLOSE ] button in header
   int cl_w = 100, cl_h = 42, cl_x = W - 120, cl_y = 13;
@@ -1371,54 +1490,15 @@ static void draw_diagnostics() {
   box(cl_x, cl_y, cl_w, cl_h, BLACK);
   text(f12, "CLOSE", cl_x + (cl_w - text_w(f12, "CLOSE")) / 2, cl_y + 28, BLACK);
 
-  // Section 1: PANEL VCOM VOLTAGE TUNING
-  text(f12, "1. PANEL VCOM VOLTAGE TUNING", 24, 98, BLACK);
-  char v_str[64];
-  snprintf(v_str, sizeof(v_str), "Current: -%.2f V (%u mV)", (float)s_vcom / 1000.0f, s_vcom);
-  text(f9, v_str, 460, 98, GREY);
-
-  int b_y = 112, b_h = 36;
-  struct Vbtn { const char* lbl; int x; int w; } vbtns[] = {
-    { "-50 mV", 24, 90 }, { "-10 mV", 124, 90 },
-    { "+10 mV", 364, 90 }, { "+50 mV", 464, 90 }
-  };
-  for (const auto& vb : vbtns) {
-    box(vb.x, b_y, vb.w, b_h, BLACK);
-    text(f9, vb.lbl, vb.x + (vb.w - text_w(f9, vb.lbl)) / 2, b_y + 24, BLACK);
-  }
-  // Value center badge
-  rect(224, b_y, 130, b_h, BLACK);
-  char cur_v[32]; snprintf(cur_v, sizeof(cur_v), "%u mV", s_vcom);
-  text(f12, cur_v, 224 + (130 - text_w(f12, cur_v)) / 2, b_y + 25, WHITE);
-
-
-  rect(24, 158, W - 48, 1, LIGHT);
-
-  // Section 2: 16-LEVEL GREYSCALE CALIBRATION TEST STRIP
-  text(f12, "2. 16-LEVEL GREYSCALE TEST STRIP (4-BIT DAC)", 24, 180, BLACK);
-  int strip_x = 24, strip_y = 192, swatch_w = 56, swatch_h = 34;
-  for (int i = 0; i < 16; i++) {
-    int sx = strip_x + i * swatch_w;
-    uint8_t shade = i * 17; // 0 to 255
-    rect(sx, strip_y, swatch_w, swatch_h, shade);
-    box(sx, strip_y, swatch_w, swatch_h, BLACK);
-    char num_buf[4]; snprintf(num_buf, sizeof(num_buf), "%d", i);
-    uint8_t text_col = (i < 8) ? WHITE : BLACK;
-    text(f9, num_buf, sx + (swatch_w - text_w(f9, num_buf)) / 2, strip_y + 23, text_col);
-  }
-  text(f9, "Verify uniform monotonic gradation across all 16 levels without clipping or banding.", 24, strip_y + swatch_h + 18, GREY);
-
-  rect(24, 256, W - 48, 1, LIGHT);
-
-  // Section 3: DISPLAY BACKLIGHT & AMBIENT SENSING
-  text(f12, "3. DISPLAY BACKLIGHT (PT4103 & SOLAR TIME)", 24, 278, BLACK);
+  // Section 1: DISPLAY BACKLIGHT -- the control people actually reach for
+  text(f12, "1. DISPLAY BACKLIGHT (PT4103 & SOLAR TIME)", 24, 98, BLACK);
   BlMode bm = periph_bl_get_mode();
   struct BlBtn { const char* lbl; BlMode m; int x; int w; } bl_btns[] = {
     { "AUTO (Sunset)", BL_AUTO, 24, 150 },
     { "MANUAL ON", BL_ON, 184, 130 },
     { "OFF", BL_OFF, 324, 90 }
   };
-  int bl_btn_y = 290, bl_btn_h = 34;
+  int bl_btn_y = DG_BL_BTN_Y, bl_btn_h = DG_BL_BTN_H;
   for (const auto& bb : bl_btns) {
     bool active = (bm == bb.m);
     if (active) {
@@ -1446,11 +1526,24 @@ static void draw_diagnostics() {
            periph_bl_is_active() ? "ON" : "OFF");
   text(f9, sun_buf, 680, bl_btn_y + 23, GREY);
 
-  rect(24, 336, W - 48, 1, LIGHT);
+  rect(24, 154, W - 48, 1, LIGHT);
 
-  // Section 4: HARDWARE RESOURCE TELEMETRY
-  text(f12, "4. HARDWARE TELEMETRY & RESOURCES", 24, 358, BLACK);
-  int t_y = 382;
+  // Section 2: OPERATING MODE & POWER
+  text(f12, "2. OPERATING MODE & POWER", 24, 176, BLACK);
+  int tx_btn_w = 380, tx_btn_h = DG_MODE_BTN_H, tx_btn_x = 24, tx_btn_y = DG_MODE_BTN_Y;
+  box(tx_btn_x, tx_btn_y, tx_btn_w, tx_btn_h, BLACK);
+  box(tx_btn_x + 1, tx_btn_y + 1, tx_btn_w - 2, tx_btn_h - 2, BLACK);
+  text(f9, "SWITCH TO TX BEACON MODE", tx_btn_x + (tx_btn_w - text_w(f9, "SWITCH TO TX BEACON MODE")) / 2, tx_btn_y + 25, BLACK);
+  int pwr_btn_x = 420, pwr_btn_y = DG_MODE_BTN_Y, pwr_btn_w = 210, pwr_btn_h = DG_MODE_BTN_H;
+  rect(pwr_btn_x, pwr_btn_y, pwr_btn_w, pwr_btn_h, BLACK);
+  text(f9, "POWER OFF DEVICE", pwr_btn_x + (pwr_btn_w - text_w(f9, "POWER OFF DEVICE")) / 2, pwr_btn_y + 25, WHITE);
+  text(f9, "Each asks for confirmation first.", pwr_btn_x + pwr_btn_w + 14, pwr_btn_y + 25, GREY);
+
+  rect(24, 236, W - 48, 1, LIGHT);
+
+  // Section 3: HARDWARE RESOURCE TELEMETRY
+  text(f12, "3. HARDWARE TELEMETRY & RESOURCES", 24, 258, BLACK);
+  int t_y = 282;
   // Col 1: ESP32 Memory
   char m1[48], m2[48];
   snprintf(m1, sizeof(m1), "PSRAM: %lu KB free / %lu KB", (unsigned long)(ESP.getFreePsram() / 1024), (unsigned long)(ESP.getPsramSize() / 1024));
@@ -1484,21 +1577,42 @@ static void draw_diagnostics() {
   text(f9, g1, 660, t_y, BLACK);
   text(f9, g2, 660, t_y + 22, BLACK);
 
-  rect(24, 420, W - 48, 1, LIGHT);
+  rect(24, 318, W - 48, 1, LIGHT);
 
-  // Section 5: TRANSMITTER BEACON MODE SWITCH & POWER CONTROL
-  text(f12, "5. OPERATING MODE SWITCH & POWER CONTROL", 24, 442, BLACK);
-  int tx_btn_w = 380, tx_btn_h = 38, tx_btn_x = 24, tx_btn_y = 454;
-  box(tx_btn_x, tx_btn_y, tx_btn_w, tx_btn_h, BLACK);
-  box(tx_btn_x + 1, tx_btn_y + 1, tx_btn_w - 2, tx_btn_h - 2, BLACK);
-  text(f9, "SWITCH TO TX BEACON MODE", tx_btn_x + (tx_btn_w - text_w(f9, "SWITCH TO TX BEACON MODE")) / 2, tx_btn_y + 25, BLACK);
+  // Section 4: PANEL VCOM VOLTAGE TUNING (engineering)
+  text(f12, "4. PANEL VCOM VOLTAGE TUNING (ENGINEERING)", 24, 340, BLACK);
+  char v_str[64];
+  snprintf(v_str, sizeof(v_str), "Current: -%.2f V (%u mV)", (float)s_vcom / 1000.0f, s_vcom);
+  text(f9, v_str, 680, 340, GREY);
+  int b_y = DG_VCOM_BTN_Y, b_h = DG_VCOM_BTN_H;
+  struct Vbtn { const char* lbl; int x; int w; } vbtns[] = {
+    { "-50 mV", 24, 90 }, { "-10 mV", 124, 90 },
+    { "+10 mV", 364, 90 }, { "+50 mV", 464, 90 }
+  };
+  for (const auto& vb : vbtns) {
+    box(vb.x, b_y, vb.w, b_h, BLACK);
+    text(f9, vb.lbl, vb.x + (vb.w - text_w(f9, vb.lbl)) / 2, b_y + 24, BLACK);
+  }
+  // Value center badge
+  rect(224, b_y, 130, b_h, BLACK);
+  char cur_v[32]; snprintf(cur_v, sizeof(cur_v), "%u mV", s_vcom);
+  text(f12, cur_v, 224 + (130 - text_w(f12, cur_v)) / 2, b_y + 25, WHITE);
 
-  // Power Off button
-  int pwr_btn_x = 420, pwr_btn_y = 454, pwr_btn_w = 210, pwr_btn_h = 38;
-  rect(pwr_btn_x, pwr_btn_y, pwr_btn_w, pwr_btn_h, BLACK);
-  text(f9, "POWER OFF DEVICE", pwr_btn_x + (pwr_btn_w - text_w(f9, "POWER OFF DEVICE")) / 2, pwr_btn_y + 25, WHITE);
+  rect(24, 398, W - 48, 1, LIGHT);
 
-  text(f9, "Cuts power or enters deep sleep.", pwr_btn_x + pwr_btn_w + 14, pwr_btn_y + 25, GREY);
+  // Section 5: 16-LEVEL GREYSCALE CALIBRATION TEST STRIP
+  text(f12, "5. 16-LEVEL GREYSCALE TEST STRIP (4-BIT DAC)", 24, 420, BLACK);
+  int strip_x = 24, strip_y = 430, swatch_w = 56, swatch_h = 34;
+  for (int i = 0; i < 16; i++) {
+    int sx = strip_x + i * swatch_w;
+    uint8_t shade = i * 17; // 0 to 255
+    rect(sx, strip_y, swatch_w, swatch_h, shade);
+    box(sx, strip_y, swatch_w, swatch_h, BLACK);
+    char num_buf[4]; snprintf(num_buf, sizeof(num_buf), "%d", i);
+    uint8_t text_col = (i < 8) ? WHITE : BLACK;
+    text(f9, num_buf, sx + (swatch_w - text_w(f9, num_buf)) / 2, strip_y + 23, text_col);
+  }
+  text(f9, "Uniform monotonic gradation across all 16 levels, no clipping or banding.", 24, strip_y + swatch_h + 18, GREY);
 
   // Footer note
   rect(0, 506, W, 34, WHITE);
@@ -1608,6 +1722,11 @@ void ui_set_view(const char* view) {
 void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (!s_ok) return;
   s_now = now; s_ble_ok = ble_ok; s_batt = batt_pct;
+  struct EpdIdleGuard {
+    uint32_t now;
+    ~EpdIdleGuard() { epd_idle_check(now); }
+  } idle_guard{now};
+
   bool syncing = sync_files >= 0;
   static bool was_syncing = false;
   if (syncing != was_syncing) { was_syncing = syncing; if (!syncing) { s_sig_prev = 0; } }
@@ -1767,8 +1886,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       return;
     }
     if (tap_x >= 0) {
-      // VCOM buttons (y: 112..148)
-      if (tap_y >= 112 && tap_y <= 148) {
+      // VCOM buttons
+      if (tap_y >= DG_VCOM_BTN_Y && tap_y <= DG_VCOM_BTN_Y + DG_VCOM_BTN_H) {
         if (tap_x >= 24 && tap_x <= 114) {
           uint16_t nv = s_vcom > 550 ? s_vcom - 50 : 500;
           ui_set_vcom(nv);  // persists, redraws and refreshes itself
@@ -1787,8 +1906,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           return;
         }
       }
-      // Backlight mode buttons (y: 290..324)
-      if (tap_y >= 290 && tap_y <= 324) {
+      // Backlight mode buttons
+      if (tap_y >= DG_BL_BTN_Y && tap_y <= DG_BL_BTN_Y + DG_BL_BTN_H) {
         if (tap_x >= 24 && tap_x <= 174) {
           periph_bl_set_mode(BL_AUTO);
           draw_board(false);
@@ -1813,16 +1932,16 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           return;
         }
       }
-      // Mode Switch: TX Beacon button (y: 454..492, x: 24..404)
-      if (tap_y >= 454 && tap_y <= 492 && tap_x >= 24 && tap_x <= 404) {
+      // Mode Switch: TX Beacon button (x: 24..404)
+      if (tap_y >= DG_MODE_BTN_Y && tap_y <= DG_MODE_BTN_Y + DG_MODE_BTN_H && tap_x >= 24 && tap_x <= 404) {
         s_confirm_switch = true;
         s_target_mode = UI_MODE_TX;
         s_sig_prev = 0;
         draw_board(false);
         return;
       }
-      // Power Off button (y: 454..492, x: 420..630): confirm first, like the mode switch
-      if (tap_y >= 454 && tap_y <= 492 && tap_x >= 420 && tap_x <= 630) {
+      // Power Off button (x: 420..630): confirm first, like the mode switch
+      if (tap_y >= DG_MODE_BTN_Y && tap_y <= DG_MODE_BTN_Y + DG_MODE_BTN_H && tap_x >= 420 && tap_x <= 630) {
         s_confirm_switch = true;
         s_target_mode = UI_TARGET_POWER_OFF;
         s_sig_prev = 0;
@@ -1933,8 +2052,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
             draw_board(false);
             return;
           }
-          s_sel = k;
-          s_table_page = s_sel / ROWS;
+          select_row(k);
           draw_table();
           draw_plot();
           { UiSummary fsm; ui_summarize(&fsm, s_now); draw_footer(fsm, nullptr); }
@@ -1971,8 +2089,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           }
         }
         if (hit >= 0) {
-          s_sel = hit;
-          s_table_page = s_sel / ROWS;
+          select_row(hit);
           draw_table();
           draw_plot();
           { UiSummary fsm; ui_summarize(&fsm, s_now); draw_footer(fsm, nullptr); }
@@ -1989,7 +2106,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         if (tap_x >= 310 && tap_x <= 490 && s_n > ROWS) {
           int max_pages = (s_n + ROWS - 1) / ROWS;
           s_table_page = (s_table_page + 1) % max_pages;
-          s_sel = s_table_page * ROWS;
+          select_row(s_table_page * ROWS);
           draw_table();
           draw_plot();
           UiSummary sm; ui_summarize(&sm, s_now);
@@ -2013,18 +2130,18 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       s_map_touched = true;
       // Tactical HUD button hit-test
       if (s_n > 0 && s_sel >= 0 && s_sel < s_n) {
-        const int hud_h = 36;
+        const int hud_h = MAP_HUD_H;
         const int hud_y = MAP_Y0 + MAP_H - hud_h - 40;
         if (tap_y >= hud_y && tap_y <= hud_y + hud_h) {
-          if (tap_x >= W - 140 && tap_x <= W - 50) {
+          if (tap_x >= W - 152 && tap_x <= W - 48) {
             // [ DETAILS ] button
             s_inspector = true;
             s_sig_prev = 0;
             draw_board(false);
             return;
-          } else if (tap_x >= W - 46 && tap_x <= W - 10) {
+          } else if (tap_x >= W - 46 && tap_x <= W - 4) {
             // [ X ] button -> deselect
-            s_sel = -1;
+            select_row(-1);
             draw_map();
             refresh_area(RECT_MAP, false);
             s_sig_prev = signature();
@@ -2050,7 +2167,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         refresh_area(RECT_MAP, false);
         s_sig_prev = signature();
         return;
-      } else if (s_cam_manual && tap_x >= 20 && tap_x <= 310 && tap_y >= MAP_Y0 + 8 && tap_y <= MAP_Y0 + 36) {
+      } else if (s_cam_manual && s_pan_bw && tap_x >= s_pan_bx && tap_x <= s_pan_bx + s_pan_bw && tap_y >= MAP_Y0 + 38 && tap_y <= MAP_Y0 + 76) {
         s_cam_manual = false;
         map_camera();
         draw_map();
@@ -2073,7 +2190,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           int x = (int)(wx - left), y = MAP_Y0 + (int)(wy - top);
           if (abs(x - tap_x) < 36 && abs(y - tap_y) < 36) { hit = k; break; }
         }
-        if (hit >= 0) s_sel = hit;
+        if (hit >= 0) select_row(hit);
         else { s_cam_wx = left + tap_x; s_cam_wy = top + (tap_y - MAP_Y0); s_cam_manual = true; s_cam_manual_ms = now; }
         draw_map();
         refresh_area(RECT_MAP, false);
@@ -2096,10 +2213,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   // then back to the table's first row.
   if (tap) {
     if (s_map && s_cam_manual) { s_cam_manual = false; map_camera(); draw_map(); refresh_area(RECT_MAP, false); s_sig_prev = signature(); return; }
-    else if (s_map) { s_map = false; s_sel = 0; s_table_page = 0; draw_board(true); s_sig_prev = signature(); return; }
+    else if (s_map) { s_map = false; select_row(0); draw_board(true); s_sig_prev = signature(); return; }
     else if (s_n > 0 && s_sel < s_n - 1) {
-      s_sel++;
-      s_table_page = s_sel / ROWS;
+      select_row(s_sel + 1);
       draw_table();
       draw_plot();
       { UiSummary fsm; ui_summarize(&fsm, s_now); draw_footer(fsm, nullptr); }
@@ -2125,17 +2241,18 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     }
     return;
   }
+  // Re-read the table every 3 s whether or not a frame arrived: the
+  // signature also moves with time (a contact going stale, an emergency
+  // header clearing), with the peripherals (GPS fix, battery), and with
+  // expiry, which drops rows without any message announcing it.
   static uint32_t last_check = 0;
   if (tap || now - last_check >= 3000) {
     last_check = now;
-    if (s_tracks_dirty || now - s_last_full > 300000UL) {
-      s_tracks_dirty = false;
-      build_order();
-      uint32_t sig = signature();
-      if (sig != s_sig_prev || now - s_last_full > 300000UL) {
-        s_sig_prev = sig;
-        draw_board(false);
-      }
+    build_order();
+    uint32_t sig = signature();
+    if (sig != s_sig_prev || now - s_last_full > 300000UL) {
+      s_sig_prev = sig;
+      draw_board(false);
     }
   }
 

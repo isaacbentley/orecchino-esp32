@@ -38,6 +38,7 @@ static uint8_t          s_tp_addr = 0;   // 0x38 FT3168 / 0x15 CST816, 0 = none
 enum View : uint8_t { V_LIST, V_DETAIL, V_SPECTRUM };
 static View s_view = V_LIST;
 static int  s_sel = 0, s_scroll = 0, s_n = 0, s_order[TRK_MAX];
+static UiSel s_selid = {-1, 0};   // the aircraft behind s_sel; survives re-sorting
 static uint32_t s_now, s_last_touch = 0;
 static bool s_ble_ok = true;
 static int  s_batt = -1;
@@ -82,21 +83,16 @@ static uint16_t heat(uint8_t v) {  // 0..255 -> black-blue-cyan-yellow-white
   return RGB565(255, 255, (v - 192) * 4);
 }
 
+// Danger first, then live contacts, then history (shared with every board);
+// the selection follows its aircraft rather than the row it was tapped on.
 static void build_order() {
-  s_n = 0;
-  for (int i = 0; i < TRK_MAX; i++) if (g_tracks[i].used) s_order[s_n++] = i;
-  auto rank = [](const Track* t) {
-    return (ui_danger(t, s_now) ? 0 : ui_stale(t, s_now) ? 2 : 1) * 1000000000ULL + (uint64_t)(s_now - t->last_ms);
-  };
-  for (int a = 1; a < s_n; a++) {
-    int v = s_order[a], b = a - 1;
-    while (b >= 0 && rank(&g_tracks[s_order[b]]) > rank(&g_tracks[v])) { s_order[b + 1] = s_order[b]; b--; }
-    s_order[b + 1] = v;
-  }
+  ui_order_build(s_order, &s_n, s_now);
   int max_scroll = s_n > CARDS ? s_n - CARDS : 0;
   if (s_scroll > max_scroll) s_scroll = max_scroll;
   if (s_scroll < 0) s_scroll = 0;
-  if (s_sel >= s_n) s_sel = s_n ? s_n - 1 : 0;
+  int row = ui_sel_row(&s_selid, s_order, s_n);
+  if (row < 0) { row = 0; ui_sel_set(&s_selid, s_n ? s_order[0] : -1); }
+  s_sel = row;
 }
 
 static uint32_t track_sig(const Track* t) {
@@ -155,7 +151,8 @@ static void draw_card(int slot, const Track* t) {
   s_gfx->drawRoundRect(8, y, W - 16, CARD_H, 10, danger ? C_DANGER : C_EDGE);
   s_gfx->fillRect(8, y + 10, 4, CARD_H - 20, col);
   char id[20];
-  snprintf(id, sizeof(id), "%.16s", t->uas[0] ? t->uas : "(no id)");
+  if (t->uas[0]) ui_short_id(id, sizeof(id), t->uas, ui_unique_tail(s_order, s_n, s_scroll + slot, 4), 16);
+  else snprintf(id, sizeof(id), "(no id)");
   txt(&FreeSansBold12pt7b, 22, y + 26, stale ? C_MUTED : C_TEXT, id);
   const char* badge = track_auth_badge(t->auth_state);
   if (badge[0]) {
@@ -408,10 +405,12 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
   // touch: tap vs drag
   static bool t_was = false; static int tx0 = 0, ty0 = 0, ty_last = 0; static bool dragged = false;
   static uint32_t t_last_poll = 0;
+  static int y_last_valid = 0;
   if (now - t_last_poll >= 25) {
     t_last_poll = now;
     int x, y;
     bool t = touch_read(&x, &y);
+    if (t) y_last_valid = y;
     if (t && !t_was) { tx0 = x; ty0 = y; ty_last = y; dragged = false; }
     if (t && t_was && s_view == V_LIST && abs(y - ty0) > 16) {
       dragged = true;
@@ -425,12 +424,12 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
         else if (s_view == V_DETAIL) s_view = V_LIST;
         else if (ty0 >= CARD_Y && ty0 < BOT_Y) {
           int k = s_scroll + (ty0 - CARD_Y) / CARD_P;
-          if (k < s_n) { s_sel = k; s_view = V_DETAIL; }
+          if (k < s_n) { s_sel = k; ui_sel_set(&s_selid, s_order[k]); s_view = V_DETAIL; }
         }
         s_dirty = true;
       } else if (s_view == V_LIST) {
         // Catch quick swipe flick on release
-        int dy = ty0 - y;
+        int dy = ty0 - y_last_valid;
         if (abs(dy) > 28) {
           s_scroll += (dy > 0 ? 1 : -1);
           s_dirty = true;

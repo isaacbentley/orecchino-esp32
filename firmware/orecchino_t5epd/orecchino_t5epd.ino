@@ -286,7 +286,7 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
 
   return tile_store_host_line(cmd, line, now);
 }
-void rx_hook_track(Track*, bool, bool) { ui_mark_tracks_dirty(); }
+void rx_hook_track(Track*, bool, bool) {}   // the board re-reads the table on its own cadence
 
 static int batt_pct() { return periph_batt_pct(); }
 

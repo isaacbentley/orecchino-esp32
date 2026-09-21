@@ -46,6 +46,11 @@ typedef struct {
   uint8_t op_id_type;
   char    op_id[21];
 
+  // Which wire format this came from: the ASTM protocol version from the
+  // message header, or GB 46750-2025 (gb46750_decode.h).
+  uint8_t  proto_ver;
+  bool     gb46750;
+
   // Authentication (message type 2). Pages may arrive together in a pack or
   // spread across frames, so the assembled state carries a bitmap of which
   // pages have been seen; a signature can only be checked once complete.
@@ -86,6 +91,16 @@ static inline uint32_t odid_rd_u32(const uint8_t* p) {
 }
 static inline float odid_decode_alt(uint16_t raw) {
   return raw * 0.5f - 1000.0f;  // -1000 = unknown
+}
+
+/// A position worth believing: on the globe and outside the band around
+/// 0,0 that DJI encoders emit for "no fix" (small non-zero values, open
+/// ocean in the Gulf of Guinea). The desktop app applies the same rule.
+static inline bool odid_coord_plausible(double lat, double lon) {
+  if (lat != lat || lon != lon) return false;                  // NaN
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return false;
+  if (lat > -5 && lat < 5 && lon > -5 && lon < 5) return false;
+  return true;
 }
 
 // Copy a fixed-width ASCII field, trimming NULs/trailing space, sanitising
@@ -209,13 +224,18 @@ static inline void odid_decode_msg(const uint8_t* m, OdidUas* u) {
   }
 }
 
-// Accepts either a single message or a message pack (type 0xF).
+// GB 46750-2025 shares the vendor element; its decoder needs everything above.
+#include "gb46750_decode.h"
+
+// Accepts a single message, a message pack (type 0xF), or a GB 46750 packet.
 static inline bool odid_decode_payload(const uint8_t* d, int len, OdidUas* u) {
   memset(u, 0, sizeof(*u));
   if (len < 25) return false;
   uint8_t type = d[0] >> 4;
+  u->proto_ver = d[0] & 0x0F;
   bool any = false;
   if (type == 0xF) {
+    if (d[0] == 0xFF) return gb46750_decode(d, len, u);   // not an ODID pack
     if (len < 3 || d[1] != 25) return false;
     int n = d[2];
     if (n > 9) n = 9;
@@ -232,5 +252,5 @@ static inline bool odid_decode_payload(const uint8_t* d, int len, OdidUas* u) {
     any = true;
   }
   return any && (u->has_basic[0] || u->has_loc || u->has_sys ||
-                 u->has_self || u->has_op);
+                 u->has_self || u->has_op || u->has_auth);
 }

@@ -67,6 +67,12 @@ dissector's output (one Lua 5.4 compatibility fix applied locally).
 
 ## Data
 
+- **UAS make/model table** (`tools/uas_models.json`, generated into
+  `firmware/common/uas_models.h` and `app/Sources/Orecchino/UasModels.swift`):
+  the DJI serial-prefix to model entries come from
+  [Light RID Scanner](https://github.com/luyii-code-1/Light_RID_Scanner)'s
+  `rid_model.json` (GPL-3.0, compatible with this project), with the names
+  translated to English. The manufacturer codes are this project's own.
 - **Map tiles are not distributed in this repo.** `tools/fetch_tiles.py`
   downloads CARTO `dark_all` raster tiles for personal/offline use:
   map data © OpenStreetMap contributors (ODbL), tiles © CARTO, subject to
@@ -79,3 +85,12 @@ dissector's output (one Lua 5.4 compatibility fix applied locally).
 
 The ASTM F3411 / Open Drone ID message layouts were implemented from the
 public specification; no decoder code was copied from other projects.
+
+The GB 46750-2025 packet layout in `firmware/common/gb46750_decode.h`
+(data type, version, length, item bitmap, fixed item lengths and units)
+was taken from the Light RID Scanner project's Python parser (GPL-3.0) and
+reimplemented here in C; the two test vectors in `tests/odid_test.c` and
+`tests/core_test.cpp` (a DJI Matrice 400's ASTM v1 beacon and a DJI Mini
+5 Pro's GB 46750 packet) are that project's captures. The 5-degree no-fix
+band around 0,0 and the "RID-" SSID convention are observations from the
+same project.

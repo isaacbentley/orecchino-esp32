@@ -6,10 +6,14 @@
 #include <Arduino.h>
 #include <math.h>
 #include "tracker.h"
+#include "uas_models.h"
 
 extern bool     g_home_set;
 extern double   g_home_lat, g_home_lon;
 extern uint32_t g_seen_count;
+extern uint8_t  g_tfr_n;        // TFR polygons the host has pushed
+extern bool     g_tfr_loaded;   // ...if it ever has
+extern uint32_t g_tfr_ms;       // when it last did (millis)
 
 // A "contact" means heard within the last minute (RID transmits at 1-3 Hz);
 // anything older is history and renders freshness-grey until it expires.
@@ -68,6 +72,110 @@ static inline bool ui_stale(const Track* t, uint32_t now) {
 /// current. History never shouts.
 static inline bool ui_danger(const Track* t, uint32_t now) {
   return (t->status == 3 || t->in_tfr || t->auth_state == 4) && !ui_stale(t, now);
+}
+
+// Table order shared by every board: what needs attention first, then live
+// contacts, then history -- and within a group by arrival, so an ordinary
+// packet never reshuffles the list under the reader's finger.
+static inline void ui_order_build(int* order, int* n, uint32_t now) {
+  int m = 0;
+  for (int i = 0; i < TRK_MAX; i++) if (g_tracks[i].used) order[m++] = i;
+  auto rank = [now](const Track* t) {
+    return (ui_danger(t, now) ? 0ULL : ui_stale(t, now) ? 2ULL : 1ULL) * 4294967296ULL
+           + (uint64_t)t->first_ms;
+  };
+  for (int a = 1; a < m; a++) {
+    int v = order[a], b = a - 1;
+    while (b >= 0 && rank(&g_tracks[order[b]]) > rank(&g_tracks[v])) { order[b + 1] = order[b]; b--; }
+    order[b + 1] = v;
+  }
+  *n = m;
+}
+
+// A selection that survives re-sorting, expiry and slot reuse: remember the
+// aircraft (its slot plus the creation stamp a reused slot cannot share),
+// never the row it happened to sit on when it was tapped.
+struct UiSel { int slot; uint32_t first_ms; };
+static inline void ui_sel_set(UiSel* s, int slot) {
+  s->slot = slot;
+  s->first_ms = slot >= 0 ? g_tracks[slot].first_ms : 0;
+}
+/// Row of the remembered aircraft in `order`, or -1 when it is gone.
+static inline int ui_sel_row(const UiSel* s, const int* order, int n) {
+  if (s->slot < 0) return -1;
+  for (int k = 0; k < n; k++)
+    if (order[k] == s->slot && g_tracks[s->slot].first_ms == s->first_ms) return k;
+  return -1;
+}
+
+/// Shortest suffix (at least `min_len` characters) of the k-th listed ID
+/// that no other listed ID shares: a fleet of common-prefix serials stays
+/// tellable apart by its tail, which is where serials differ.
+static inline int ui_unique_tail(const int* order, int n, int k, int min_len) {
+  const char* id = g_tracks[order[k]].uas;
+  int len = (int)strlen(id);
+  for (int L = min_len; L < len; L++) {
+    bool clash = false;
+    for (int j = 0; j < n && !clash; j++) {
+      if (j == k) continue;
+      const char* o = g_tracks[order[j]].uas;
+      int ol = (int)strlen(o);
+      if (ol >= L && strcmp(o + ol - L, id + len - L) == 0) clash = true;
+    }
+    if (!clash) return L;
+  }
+  return len;
+}
+/// Short display form of an ID within `max_chars`: the whole ID when it
+/// fits, else head + ".." + the distinguishing tail ("1581F2..D9A10").
+static inline void ui_short_id(char* out, size_t n, const char* id, int tail_len, int max_chars) {
+  int len = (int)strlen(id);
+  if (len <= max_chars) { snprintf(out, n, "%s", id); return; }
+  if (tail_len > len) tail_len = len;
+  int head = max_chars - 2 - tail_len;
+  if (head < 0) head = 0;
+  snprintf(out, n, "%.*s..%s", head, id, id + len - tail_len);
+}
+
+/// The literal reasons a contact is loud, joined with " + ": what the
+/// aircraft reported, what the signature check found, what the airspace
+/// lookup matched. Never one word standing in for all three. Empty when
+/// quiet or stale.
+static inline void ui_alert_text(char* b, size_t n, const Track* t, uint32_t now) {
+  b[0] = 0;
+  if (ui_stale(t, now)) return;
+  const char* parts[3]; int m = 0;
+  if (t->status == 3)     parts[m++] = "EMERGENCY REPORTED";
+  if (t->auth_state == 4) parts[m++] = "ID SIG INVALID";
+  if (t->in_tfr)          parts[m++] = "TFR MATCH";
+  size_t o = 0;
+  for (int i = 0; i < m && o < n; i++)
+    o += snprintf(b + o, n - o, "%s%s", i ? " + " : "", parts[i]);
+}
+
+/// What to call an aircraft: its model when the serial says, else its
+/// maker, else the plain fact that the code is unknown.
+static inline const char* ui_uas_type_name(const char* uas) {
+  if (!uas || !*uas) return "unidentified";
+  const char* m = uas_model_name(uas);
+  if (m) return m;
+  const char* mk = uas_manufacturer_name(uas);
+  return mk ? mk : "unknown make";
+}
+
+/// What a height figure is measured from, as transmitted.
+static inline const char* ui_height_ref(uint8_t ref) { return ref ? "AGL" : "above T/O"; }
+
+/// Airspace line for a contact. "No match" is only claimed against data
+/// the host actually pushed; without any, say so instead of "clear".
+static inline void ui_airspace_text(char* b, size_t n, const Track* t, uint32_t now) {
+  if (t->in_tfr)            snprintf(b, n, "TFR MATCH: %s", t->tfr_id);
+  else if (!g_tfr_loaded)   snprintf(b, n, "TFR data not loaded (connect app)");
+  else if (!t->has_pos)     snprintf(b, n, "no position to check for TFRs");
+  else if (g_tfr_n == 0)    snprintf(b, n, "no TFRs pushed for this area (%lum ago)",
+                                     (unsigned long)((now - g_tfr_ms) / 60000));
+  else                      snprintf(b, n, "no match in %u TFRs (pushed %lum ago)", g_tfr_n,
+                                     (unsigned long)((now - g_tfr_ms) / 60000));
 }
 
 // Bar state: dark = quiet sky, amber = active contact, red = emergency.

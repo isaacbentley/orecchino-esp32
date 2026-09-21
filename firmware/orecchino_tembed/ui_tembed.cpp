@@ -31,8 +31,9 @@ static uint32_t s_last_solar_eval = 0;
 static int      s_tx_sel = 0;     // row in the TX list (0 master, 1 emg, 2+ paths)
 static int      s_menu_sel = 0;
 static int      s_sel = 0;        // selected row (index into the ordered list)
+static UiSel    s_selid = {-1, 0}; // ...and the aircraft on it, which survives re-sorting
 static int      s_scroll = 0;
-static int      s_order[TRK_MAX]; // track indices, newest-active first
+static int      s_order[TRK_MAX]; // track indices: danger, live, history; by arrival within
 static int      s_n = 0;
 static uint32_t s_now;
 static bool     s_ble_ok = true;
@@ -97,22 +98,16 @@ void ui_feed_wifi(uint8_t chan, int8_t rssi) {
 void ui_set_wifi_channel(uint8_t chan) { s_dwell = chan; }
 bool ui_spectrum_active() { return s_spec_on; }
 
-// ---- ordering: active contacts first (danger on top), then history
+// ---- ordering: danger first, then live contacts, then history (shared
+// with every board); the selection follows its aircraft, not its row.
 static void build_order() {
-  s_n = 0;
-  for (int i = 0; i < TRK_MAX; i++) if (g_tracks[i].used) s_order[s_n++] = i;
-  for (int a = 1; a < s_n; a++) {          // insertion sort, n <= 16
-    int v = s_order[a], b = a - 1;
-    auto rank = [](const Track* t) {
-      return (ui_danger(t, s_now) ? 0 : ui_stale(t, s_now) ? 2 : 1) * 1000000000ULL
-             + (uint64_t)(s_now - t->last_ms);
-    };
-    while (b >= 0 && rank(&g_tracks[s_order[b]]) > rank(&g_tracks[v])) {
-      s_order[b + 1] = s_order[b]; b--;
-    }
-    s_order[b + 1] = v;
+  ui_order_build(s_order, &s_n, s_now);
+  int row = ui_sel_row(&s_selid, s_order, s_n);
+  if (row < 0) {                            // gone, or nothing chosen yet
+    row = 0;
+    ui_sel_set(&s_selid, s_n ? s_order[0] : -1);
   }
-  if (s_sel >= s_n) s_sel = s_n ? s_n - 1 : 0;
+  s_sel = row;
   if (s_sel < s_scroll) s_scroll = s_sel;
   if (s_sel >= s_scroll + ROWS) s_scroll = s_sel - ROWS + 1;
 }
@@ -195,8 +190,9 @@ static void draw_scope() {
       s_cv->drawRoundRect(2, y, LIST_W - 4, ROW_H - 2, 4, C_DANGER);
     }
     s_cv->fillRect(6, y + 5, 3, ROW_H - 12, col);
-    char id[15];
-    snprintf(id, sizeof(id), "%.14s", t->uas[0] ? t->uas : "(no id)");
+    char id[16];
+    if (t->uas[0]) ui_short_id(id, sizeof(id), t->uas, ui_unique_tail(s_order, s_n, k, 4), 14);
+    else snprintf(id, sizeof(id), "(no id)");
     bold(14, y + 13, stale ? C_MUTED : C_TEXT, id);
     const char* badge = track_auth_badge(t->auth_state);
     if (badge[0]) {
@@ -539,6 +535,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
         s_sel += det;
         if (s_sel < 0) s_sel = 0;
         if (s_sel >= s_n) s_sel = s_n - 1;
+        ui_sel_set(&s_selid, s_order[s_sel]);
       }
     }
     s_dirty = true;

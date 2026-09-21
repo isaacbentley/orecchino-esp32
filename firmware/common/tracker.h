@@ -6,25 +6,49 @@
 // (never clobbers a fixed slot — the classic reference-receiver bug).
 #pragma once
 #include <Arduino.h>
+#include "odid_decode.h"
 
 #define TRK_MAX      16
 #define TRK_EXPIRE_MS 600000UL
+#define TRK_ALT_MACS 4    // other addresses remembered per contact
+
+// Authentication pages collected across frames for one contact (see
+// tracker_ingest in rx_core.h); mirrors the auth fields of OdidUas.
+struct OdidAuthAssembly {
+  bool     has_basic_raw;
+  uint8_t  basic_raw[25];
+  bool     has_auth;
+  uint8_t  auth_type;
+  uint8_t  auth_last_page;
+  uint8_t  auth_len;
+  uint32_t auth_ts;
+  uint16_t auth_pages_seen;
+  bool     verified;          // the pages held form a complete, verified set
+  uint8_t  auth_data[ODID_AUTH_MAX_BYTES];
+};
 
 struct Track {
   bool     used;
   uint8_t  mac[6];
+  uint8_t  alt_macs[TRK_ALT_MACS][6];  // earlier addresses of the same aircraft
+  uint8_t  alt_mac_count;
   char     uas[41];
   int8_t   rssi;
   uint8_t  src_mask;    // bit0 wifi, bit1 nan, bit2 ble
+  uint8_t  fmt;         // bit0 ASTM F3411 seen, bit1 GB 46750-2025 seen
+  char     ssid[33];    // beacon SSID, when Wi-Fi (DJI: "RID-" + serial)
+  uint8_t  ssid_check;  // 0 n/a, 1 SSID serial matches the Basic ID, 2 it differs
   uint8_t  status;      // ODID operational status; 3 = emergency
   bool     has_pos;
   double   lat, lon;
-  float    height;      // m AGL, NAN when unknown
+  float    height;      // m, NAN when unknown; see height_ref
+  uint8_t  height_ref;  // ODID height type: 0 above takeoff, 1 above ground
   float    speed;       // m/s, NAN when unknown
   float    heading;     // deg true, NAN when unknown
   // Authentication verification, mirroring OdidAuthState:
   // 0 none, 1 partial, 2 unknown key, 3 ID signature valid, 4 invalid.
   uint8_t  auth_state;
+  OdidAuthAssembly auth_asm;
   bool     in_tfr;      // position inside a pushed TFR polygon
   char     tfr_id[16];
   uint32_t first_ms, last_ms;
@@ -54,7 +78,16 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
       continue;
     }
     if (uas && uas[0] && strncmp(t->uas, uas, sizeof(t->uas)) == 0) by_uas = t;
-    if (memcmp(t->mac, mac, 6) == 0) by_mac = t;
+    bool match_mac = (memcmp(t->mac, mac, 6) == 0);
+    if (!match_mac) {
+      for (uint8_t m = 0; m < t->alt_mac_count; m++) {
+        if (memcmp(t->alt_macs[m], mac, 6) == 0) {
+          match_mac = true;
+          break;
+        }
+      }
+    }
+    if (match_mac) by_mac = t;
     if (!oldest || t->last_ms < oldest->last_ms) oldest = t;
   }
   // Identity wins over hardware address. Falling back to the MAC is only
@@ -76,7 +109,34 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
     t->peak_rssi = -127;
     if (created) *created = true;
   }
-  memcpy(t->mac, mac, 6);
+  // One aircraft shows up under several addresses -- its Wi-Fi SA, its BLE
+  // random-static address, a NAN cluster member -- and a Location-only
+  // frame carries no UAS ID to re-match on. So every address seen stays
+  // attached to the contact: `mac` is the most recent, the rest wait in
+  // alt_macs (oldest evicted first). When an old address comes back the
+  // previous primary takes its slot, so the remembered set never shrinks;
+  // forgetting the previous primary here is exactly the split into two
+  // contacts that this table exists to prevent.
+  if (memcmp(t->mac, mac, 6) != 0) {
+    static const uint8_t zero_mac[6] = {0};
+    int slot = -1;
+    for (int m = 0; m < t->alt_mac_count; m++)
+      if (memcmp(t->alt_macs[m], mac, 6) == 0) { slot = m; break; }
+    if (memcmp(t->mac, zero_mac, 6) != 0) {   // a fresh slot has nothing to keep
+      if (slot >= 0) {
+        // The returning address leaves the list and the outgoing primary
+        // joins it at the end, so the list stays oldest-first for eviction.
+        memmove(t->alt_macs[slot], t->alt_macs[slot + 1], (size_t)(t->alt_mac_count - slot - 1) * 6);
+        memcpy(t->alt_macs[t->alt_mac_count - 1], t->mac, 6);
+      } else if (t->alt_mac_count < TRK_ALT_MACS) {
+        memcpy(t->alt_macs[t->alt_mac_count++], t->mac, 6);
+      } else {
+        memmove(t->alt_macs[0], t->alt_macs[1], (TRK_ALT_MACS - 1) * 6);
+        memcpy(t->alt_macs[TRK_ALT_MACS - 1], t->mac, 6);
+      }
+    }
+    memcpy(t->mac, mac, 6);
+  }
   if (uas && uas[0]) {
     strncpy(t->uas, uas, sizeof(t->uas) - 1);
     t->uas[sizeof(t->uas) - 1] = 0;

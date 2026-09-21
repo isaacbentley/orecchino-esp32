@@ -50,7 +50,8 @@ for attempt in range(3):
         res = s.read(s.in_waiting or 100).decode("utf-8", errors="ignore")
         s.close()
         if "time" in res or "utc" in res:
-            print(f"RTC successfully synchronized to {epoch} ({time.strftime(\"%Y-%m-%d %H:%M:%SZ\", time.gmtime(epoch))})")
+            utc_str = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(epoch))
+            print(f"RTC successfully synchronized to {epoch} ({utc_str})")
             sys.exit(0)
     except Exception as e:
         time.sleep(1.0)

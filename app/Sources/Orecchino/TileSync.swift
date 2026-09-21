@@ -47,7 +47,7 @@ final class TileSync {
     private var fileOffset = 0
     private var currentRel = ""
     private var seq = 0
-    private var running = false
+    private(set) var running = false
     private var timeout: Task<Void, Never>?
 
     private var localRoot: URL {
@@ -84,8 +84,14 @@ final class TileSync {
         Task { await run() }
     }
 
+    func cancel() {
+        timeout?.cancel()
+        state = .idle
+        phase = .idle
+        running = false
+    }
+
     private func run() async {
-        defer { running = false }
         let tiles = expectedTiles()
 
         // 1. Fill the local cache from CARTO (skip anything present).
@@ -120,12 +126,14 @@ final class TileSync {
         }
         guard have > 0 else {
             phase = .failed("no local tiles")
+            running = false
             return
         }
 
         // 2. Ask the device what it has.
         guard AppModel.shared.serialStatus.isConnected else {
             phase = .failed("no device")
+            running = false
             return
         }
         deviceFiles = [:]
@@ -150,26 +158,27 @@ final class TileSync {
         }
     }
 
-    /// Routed from AppModel.ingest for fs_*/ack message types.
+    /// Routed from AppModel.ingest for fs_*/ack message types. A reply that
+    /// does not belong to the current step -- a late ack from an interrupted
+    /// session, an fs_ok while idle -- is ignored and leaves the step's
+    /// timeout armed, so a stray line can neither advance nor stall a sync.
     func handle(_ msg: RidMessage) {
-        timeout?.cancel()
-        switch msg.type {
-        case "fs_f":
+        switch (msg.type, state) {
+        case ("fs_f", .awaitList):
             if let p = msg.p, let s = msg.s { deviceFiles[p] = s }
             armTimeout(seconds: 15)
-        case "fs_ls_done":
+        case ("fs_ls_done", .awaitList):
             buildQueueAndGo()
-        case "ack":
+        case ("ack", .awaitAck) where msg.q == nil || msg.q == seq:
             sendNextChunk()
-        case "fs_ok":
-            if state == .deleting {
-                nextDelete()
-            } else {
-                sentCount += 1
-                phase = .syncing(sentCount, totalToSend)
-                nextFile()
-            }
-        case "fs_err":
+        case ("fs_ok", .deleting):
+            nextDelete()
+        case ("fs_ok", .awaitOk):
+            sentCount += 1
+            phase = .syncing(sentCount, totalToSend)
+            nextFile()
+        case ("fs_err", _) where running:
+            timeout?.cancel()
             state = .idle
             phase = .failed(msg.msg ?? "device error")
             running = false
@@ -214,6 +223,7 @@ final class TileSync {
 
     private func nextFile() {
         guard let item = sendQueue.first else {
+            timeout?.cancel()
             state = .idle
             phase = .done(sentCount)
             running = false
