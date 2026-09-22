@@ -219,6 +219,11 @@ under `firmware/libraries/epdiy` (the board is an epdiy v7 layout).
 tools/flash_t5epd.sh            # finds the port itself; pass one to override
 ```
 
+The script also sets the board's clock from this computer's and reads it
+back to confirm, because the board has no network and its automatic sunset
+backlight depends on knowing the date. If it cannot, it says so rather than
+leaving you with a board that thinks it is the middle of the night.
+
 > **Note**: If compiling by hand or in the Arduino IDE instead of using the helper script, select **Partition Scheme: Custom** (`PartitionScheme=custom`) and include `--libraries firmware/libraries` to include the vendored `epdiy` library and use the 3 MB app partition.
 
 ## Pocket AMOLED — `firmware/orecchino_amoled`

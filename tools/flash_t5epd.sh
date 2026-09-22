@@ -34,29 +34,61 @@ else
   echo "Warning: esptool not found to trigger auto-reboot; manual reset may be needed."
 fi
 
-# Synchronize onboard RTC with current computer time over serial
-echo "Synchronizing onboard RTC to current UTC time..."
+# Set the board's clock from this computer's. The board has no network, so
+# its RTC only ever learns the time here or from the app; the sunset
+# backlight and the displayed UTC clock both depend on it. Spoken over the
+# serial port in plain shell -- an earlier version used Python and pyserial,
+# which is not installed by default, and hid the failure behind 2>/dev/null,
+# so every flash silently left the clock wrong.
+sync_rtc() {
+  local port="$1" epoch reply got cat_pid raw
+  raw="$(mktemp -t orecchino_rtc)"
+  # Never run stty on this port: the board is an ESP32-S3 on native USB, and
+  # touching the control lines resets it -- which lands it in epdiy's
+  # board init, where a warm reset can panic on the PCA9555. Opening a
+  # cu.* device leaves DTR alone, so a plain read and write are safe.
+  cat "$port" > "$raw" 2>/dev/null &
+  cat_pid=$!
+  # A Ctrl-C during the waits below must not leave a reader holding the
+  # port: a stray cat would keep the Mac app from ever opening it.
+  trap 'kill "$cat_pid" 2>/dev/null; rm -f "$raw"; exit 130' INT TERM
+  sleep 1                                    # let the reader attach first
+  epoch="$(date -u +%s)"
+  printf '{"cmd":"set_time","utc":%d}\n' "$epoch" 2>/dev/null > "$port" || epoch=""
+  if [ -n "$epoch" ]; then
+    sleep 1
+    # Ask for the status too: set_time answers {"set":true} as soon as it
+    # has parsed the command, so only the status line's clock proves it
+    # stuck. Its "utc" is the quoted string; set_time's is a bare number,
+    # so this pattern can only ever match the status line.
+    printf '{"cmd":"status"}\n' 2>/dev/null > "$port" || true
+    sleep 3
+  fi
+  kill "$cat_pid" 2>/dev/null
+  wait "$cat_pid" 2>/dev/null || true
+  trap - INT TERM
+  reply="$(grep -o '"utc":"[^"]*"' "$raw" | tail -1 | cut -d'"' -f4)"
+  rm -f "$raw"
+  [ -n "$epoch" ] && [ -n "$reply" ] || return 1
+  # Compare as epoch seconds. Comparing the formatted minute instead would
+  # cry wolf every time the readback crossed a minute boundary, which is
+  # several seconds after the set and so a few per cent of all flashes.
+  got="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$reply" '+%s' 2>/dev/null)" || got=""
+  [ -n "$got" ] || return 1
+  if [ "$((got - epoch))" -gt 90 ] || [ "$((epoch - got))" -gt 90 ]; then
+    echo "RTC still reads $reply after being set to $(date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ')."
+    return 1
+  fi
+  echo "RTC set and verified: the board reports $reply."
+}
+
+echo "Setting the onboard RTC to the current UTC time..."
 sleep 2.0
-python3 -c '
-import serial, sys, time
-port = sys.argv[1]
-epoch = int(time.time())
-for attempt in range(3):
-    try:
-        s = serial.Serial(port, 115200, timeout=1)
-        time.sleep(0.5)
-        s.write(f"{{\"cmd\":\"set_time\",\"utc\":{epoch}}}\n".encode())
-        time.sleep(0.3)
-        res = s.read(s.in_waiting or 100).decode("utf-8", errors="ignore")
-        s.close()
-        if "time" in res or "utc" in res:
-            utc_str = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(epoch))
-            print(f"RTC successfully synchronized to {epoch} ({utc_str})")
-            sys.exit(0)
-    except Exception as e:
-        time.sleep(1.0)
-print(f"RTC sync command sent (epoch {epoch}).")
-' "$PORT" 2>/dev/null || true
+if ! sync_rtc "$PORT"; then
+  echo "Warning: could not set the RTC -- the board kept its old clock."
+  echo "         Its UTC readout and the automatic sunset backlight will be wrong."
+  echo "         Retry with: tools/flash_t5epd.sh $PORT"
+fi
 
 echo "Reopen the app with: open app/build/Orecchino.app"
 
