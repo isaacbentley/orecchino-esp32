@@ -10,8 +10,7 @@ private func decode(_ s: String) throws -> RidMessage {
 
 @Suite struct RidMessageTests {
     @Test func heartbeatLine() throws {
-        // Captured from firmware v0.4.0
-        let m = try decode(#"{"type":"hb","up":34103,"wifi_frames":117,"ble_advs":4674,"rid":1,"rid_w":1,"rid_n":0,"rid_b":0,"pfail":0,"dropped":0,"seen":1,"ch":6,"ble":true,"ble_ext":true,"heap":103424}"#)
+        let m = try decode(#"{"type":"hb","up":34103,"wifi_frames":117,"ble_advs":4674,"rid":1,"dropped":0,"ch":6,"ble":true,"ble_ext":true}"#)
         #expect(m.type == "hb")
         #expect(m.wifi_frames == 117)
         #expect(m.ble_ext == true)
@@ -24,11 +23,6 @@ private func decode(_ s: String) throws -> RidMessage {
         #expect(m.loc?.vspeed == nil)
         #expect(m.loc?.speed == 5.0)
         #expect(m.basic_id?.first?.uas_id == "1581F204C68D9A11")
-    }
-
-    @Test func trackEndLineParses() throws {
-        let m = try decode(#"{"type":"track_end","uas":"X","mac":"00:00:00:00:00:01","first_ms":1,"last_ms":2,"peak_rssi":-40,"max_height":60,"tfr":false}"#)
-        #expect(m.type == "track_end")
     }
 }
 

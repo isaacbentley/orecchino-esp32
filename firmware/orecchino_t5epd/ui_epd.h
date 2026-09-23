@@ -31,7 +31,6 @@ void ui_feed_wifi(uint8_t chan, int8_t rssi);
 void ui_set_wifi_channel(uint8_t chan);
 uint16_t ui_get_vcom();
 bool     ui_set_vcom(uint16_t vcom);
-void     ui_set_view(const char* view);
 /// The screen left on the panel while the board is off; `boot_wakes`:
 /// deep sleep, BOOT wakes it (else ship mode, PWR restarts it).
 void     ui_show_shutdown_screen(bool boot_wakes);

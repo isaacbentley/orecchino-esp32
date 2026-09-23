@@ -172,7 +172,6 @@ static int gt911_read_point(int* x, int* y) {
     if (now - s_last_home >= 500) {
       s_last_home = now;
       s_home_key = true;
-      Serial.println("{\"type\":\"home_button\"}");
     }
   }
 
@@ -304,7 +303,6 @@ bool periph_touch(int* x, int* y) {
   }
 }
 void periph_touch_range(int* mx, int* my) { *mx = s_tp_max_x; *my = s_tp_max_y; }
-const char* periph_touch_kind() { return s_tp_kind == TP_GT911 ? "gt911" : s_tp_kind == TP_GT6972P ? "gt6972p" : "none"; }
 
 // ---- BQ27220 fuel gauge (firmware/common/bq27220.h)
 static bool gauge_write(uint8_t reg, const uint8_t* data, size_t n) {
@@ -327,16 +325,11 @@ static void gauge_begin() {
   const size_t n = sizeof(bq27220::kT5EpdProfile) / sizeof(bq27220::kT5EpdProfile[0]);
   bq27220::Report r = bq27220::provision(kGaugeIo, bq27220::kT5EpdProfile, n);
   s_gauge_result = r.result;
-  char line[320];
-  bq27220::report_json(line, sizeof(line), r, bq27220::kT5CellMah);
-  Serial.print(line);
 }
 
 int periph_batt_pct() { return s_have_gauge ? bq27220::soc_pct(kGaugeIo) : -1; }
 int periph_batt_mv() { return s_have_gauge ? bq27220::voltage_mv(kGaugeIo) : -1; }
-bool periph_batt_ma(int* ma) { return s_have_gauge && bq27220::current_ma(kGaugeIo, ma); }
 int periph_batt_full_mah() { return s_have_gauge ? bq27220::full_capacity_mah(kGaugeIo) : -1; }
-const char* periph_gauge_state() { return s_have_gauge ? bq27220::result_name(s_gauge_result) : "none"; }
 bool periph_gauge_configured() {
   return s_have_gauge && (s_gauge_result == bq27220::Result::Ok ||
                           s_gauge_result == bq27220::Result::Provisioned);
@@ -498,10 +491,6 @@ static void bl_eval(uint32_t now) {
   if (want_on != s_bl_active) {
     s_bl_active = want_on;
     ledcWrite(PIN_BL_EN, s_bl_active ? s_bl_duty : 0);
-    Serial.printf("{\"type\":\"backlight\",\"mode\":\"%s\",\"active\":%s,\"duty\":%u,\"sundown\":%s,\"sun_elev\":%.1f}\n",
-                  s_bl_mode == BL_AUTO ? "auto" : s_bl_mode == BL_ON ? "on" : "off",
-                  s_bl_active ? "true" : "false", (unsigned)s_bl_duty,
-                  s_after_sundown ? "true" : "false", s_sun_elev);
   }
 }
 
@@ -676,7 +665,6 @@ static void periph_input_task(void* arg) {
           if (s_gps_hunt_attempts >= GPS_MAX_HUNT_ATTEMPTS) {
             s_gps_disabled = true;
             Serial1.end();
-            Serial.println("{\"type\":\"periph\",\"gps\":false,\"status\":\"not_found_disabled\"}");
           }
         }
         if (!s_gps_disabled) {
@@ -791,12 +779,6 @@ void periph_begin() {
     0   // Pin to Core 0 (PRO_CPU)
   );
   Serial.println("[T5] Multi-core input & touch task launched on Core 0 (PRO_CPU)");
-
-  Serial.printf("{\"type\":\"periph\",\"touch\":\"%s\",\"touch_range\":[%d,%d],\"gauge\":%s,\"charger\":%s,\"rtc\":%s,\"rail\":%s,\"bl\":\"%s\"}\n",
-                periph_touch_kind(), s_tp_max_x, s_tp_max_y, s_have_gauge ? "true" : "false",
-                s_have_charger ? "true" : "false",
-                s_have_rtc ? "true" : "false", s_pca ? "true" : "false",
-                s_bl_mode == BL_AUTO ? "auto" : s_bl_mode == BL_ON ? "on" : "off");
 }
 
 void periph_tick(uint32_t now) {
@@ -811,17 +793,6 @@ void periph_tick(uint32_t now) {
     }
   }
 
-  static uint32_t last_rep = 0;
-  if (s_gps_fix && now - last_rep >= 10000) {
-    last_rep = now;
-    Serial.printf("{\"type\":\"gps\",\"fix\":true,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f}\n",
-                  s_gps_sats, g_home_lat, g_home_lon);
-  }
-  static bool s_rep_detected = false;
-  if (periph_gps_detected() && !s_rep_detected) {
-    s_rep_detected = true;
-    Serial.printf("{\"type\":\"periph\",\"gps\":true,\"baud\":%u}\n", (unsigned)GPS_BAUDS[s_gps_baud_i]);
-  }
   // Evaluate backlight every 10 seconds
   if (now - s_last_bl_eval >= 10000 || s_last_bl_eval == 0) {
     bl_eval(now);

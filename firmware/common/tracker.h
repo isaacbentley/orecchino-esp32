@@ -55,7 +55,6 @@ struct Track {
   uint16_t msgs;
   int8_t   peak_rssi;
   float    max_height;   // NAN until known
-  bool     tfr_ever;     // entered a TFR at any point in this track's life
 };
 
 // One table for the whole program. Defined in rx_core.h (included exactly

@@ -1754,15 +1754,6 @@ bool ui_begin(uint8_t mode) {
   return true;
 }
 
-void ui_set_view(const char* view) {
-  if (!view) return;
-  if (!strcmp(view, "table")) {
-    if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); }
-  } else if (!strcmp(view, "map")) {
-    if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); }
-  }
-}
-
 void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (!s_ok) return;
   s_now = now; s_ble_ok = ble_ok; s_batt = batt_pct;
@@ -1833,12 +1824,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     if (evt.type == TOUCH_EVT_TAP || !is_map_drag_area) {
       tap_x = evt.x;
       tap_y = evt.y;
-      Serial.printf("{\"type\":\"tap\",\"xy\":[%d,%d],\"dxy\":[%d,%d],\"core\":1}\n",
-                    tap_x, tap_y, evt.dx, evt.dy);
     } else if (evt.type == TOUCH_EVT_DRAG && is_map_drag_area) {
       drag_dx = evt.dx;
       drag_dy = evt.dy;
-      Serial.printf("{\"type\":\"drag\",\"dxy\":[%d,%d],\"core\":1}\n", drag_dx, drag_dy);
     }
   }
 

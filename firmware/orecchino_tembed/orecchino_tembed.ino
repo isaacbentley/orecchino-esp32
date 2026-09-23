@@ -82,10 +82,7 @@ static const bq27220::Io kGaugeIo = { gauge_write, gauge_read, gauge_sleep };
 // drifts away from the cell.
 static void gauge_begin() {
   const size_t n = sizeof(bq27220::kTEmbedProfile) / sizeof(bq27220::kTEmbedProfile[0]);
-  bq27220::Report r = bq27220::provision(kGaugeIo, bq27220::kTEmbedProfile, n);
-  char line[320];
-  bq27220::report_json(line, sizeof(line), r, bq27220::kTEmbedCellMah);
-  Serial.print(line);
+  bq27220::provision(kGaugeIo, bq27220::kTEmbedProfile, n);
 }
 
 // StateOfCharge() in percent, -1 if the gauge does not answer.

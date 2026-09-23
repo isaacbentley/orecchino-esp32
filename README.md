@@ -188,8 +188,7 @@ TI's generic 3000 mAh profile, twice this board's cell, and its percentage
 wanders far from the real charge. At every boot the firmware compares the
 gauge with the 1500 mAh cell profile LilyGO publishes for this board and
 rewrites it only when they differ, which costs a few seconds once. The
-boot log's `gauge` line says what it found, and the settings screen shows
-the capacity the percentage is counted against.
+settings screen shows the capacity the percentage is counted against.
 
 It has touch. The header has TABLE and MAP tabs. On the table, tap a row to
 select it, then DETAILS (or a second tap) for its details; tap an aircraft

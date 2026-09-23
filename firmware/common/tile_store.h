@@ -81,7 +81,6 @@ static inline bool ts_evict_one() {
   }
   if (!victim[0]) return false;
   LittleFS.remove(victim);
-  Serial.printf("{\"type\":\"fs_evict\",\"p\":\"%s\"}\n", victim);
 
   // Prune empty parent directory /tiles/z/x and /tiles/z
   char parent[80];
@@ -141,10 +140,7 @@ static inline void ts_ls_walk(File dir, uint32_t* n) {
 static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t now) {
   if (strncmp(cmd, "fs_", 3) != 0) return false;
   s_ts_last_ms = now;
-  if (!strcmp(cmd, "fs_info")) {
-    Serial.printf("{\"type\":\"fs_info\",\"total\":%u,\"used\":%u}\n",
-                  (unsigned)LittleFS.totalBytes(), (unsigned)LittleFS.usedBytes());
-  } else if (!strcmp(cmd, "fs_ls")) {
+  if (!strcmp(cmd, "fs_ls")) {
     uint32_t n = 0;
     File root = LittleFS.open("/tiles");
     if (root) ts_ls_walk(root, &n);

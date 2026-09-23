@@ -20,13 +20,11 @@ struct RidMessage: Decodable {
     var ssid: String? = nil       // Wi-Fi beacon SSID, when the frame had one
     var ssid_id_match: Bool? = nil   // the SSID's "RID-" serial agrees with the Basic ID
 
-    // tile-sync replies (fs_f / fs_ls_done / ack / fs_ok / fs_err / fs_info)
+    // tile-sync replies (fs_f / fs_ls_done / ack / fs_ok / fs_err)
     var q: Int? = nil
     var p: String? = nil
     var s: Int? = nil
     var n: Int? = nil
-    var total: Int? = nil
-    var used: Int? = nil
     var msg: String? = nil
 
     // heartbeat / boot fields
@@ -37,7 +35,6 @@ struct RidMessage: Decodable {
     var dropped: Int? = nil
     var ble: Bool? = nil
     var ble_ext: Bool? = nil
-    var heap: Int? = nil
     var fw: String? = nil
     var ver: String? = nil
 }

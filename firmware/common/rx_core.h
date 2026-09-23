@@ -21,7 +21,6 @@
 //   {"type":"boot", ...}   once at startup
 //   {"type":"rid",  ...}   one per decoded Remote ID transmission
 //   {"type":"hb",   ...}   heartbeat with counters every 2 s
-//   {"type":"track_end"}   when a track ages out
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
@@ -70,9 +69,6 @@ static QueueHandle_t s_q;
 static volatile uint32_t s_cnt_wifi_frames = 0;
 static volatile uint32_t s_cnt_ble_advs    = 0;
 static volatile uint32_t s_cnt_rid         = 0;
-static volatile uint32_t s_cnt_rid_wifi    = 0;  // per-path match counters:
-static volatile uint32_t s_cnt_rid_nan     = 0;  // "why no NAN?" is the
-static volatile uint32_t s_cnt_rid_ble     = 0;  // first field question
 static volatile uint32_t s_cnt_pfail       = 0;  // matched but failed decode
 static volatile uint32_t s_cnt_dropped     = 0;
 uint32_t                 g_seen_count      = 0;  // unique drones since boot
@@ -111,9 +107,6 @@ static void enqueue_rid(uint8_t src, const uint8_t* mac, int8_t rssi,
                         uint8_t chan, uint8_t phy, const uint8_t* odid, int len,
                         const char* ssid) {
   if (len < 25 || !s_q || rx_hook_paused()) return;
-  if (src == SRC_WIFI_BEACON) s_cnt_rid_wifi++;
-  else if (src == SRC_WIFI_NAN) s_cnt_rid_nan++;
-  else s_cnt_rid_ble++;
   RidEvt e;
   e.src  = src;
   memcpy(e.mac, mac, 6);
@@ -356,17 +349,11 @@ static void emit_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
 
 static void emit_heartbeat() {
   Serial.printf("{\"type\":\"hb\",\"up\":%lu,\"wifi_frames\":%lu,\"ble_advs\":%lu,"
-                "\"rid\":%lu,\"rid_w\":%lu,\"rid_n\":%lu,\"rid_b\":%lu,"
-                "\"pfail\":%lu,\"dropped\":%lu,\"seen\":%lu,\"ch\":%u,"
-                "\"ble\":%s,\"ble_ext\":%s,\"heap\":%lu}\n",
+                "\"rid\":%lu,\"dropped\":%lu,\"ch\":%u,\"ble\":%s,\"ble_ext\":%s}\n",
                 (unsigned long)millis(),
                 (unsigned long)s_cnt_wifi_frames, (unsigned long)s_cnt_ble_advs,
-                (unsigned long)s_cnt_rid, (unsigned long)s_cnt_rid_wifi,
-                (unsigned long)s_cnt_rid_nan, (unsigned long)s_cnt_rid_ble,
-                (unsigned long)s_cnt_pfail, (unsigned long)s_cnt_dropped,
-                (unsigned long)g_seen_count, s_cur_chan,
-                s_ble_ok ? "true" : "false", s_ble_ext ? "true" : "false",
-                (unsigned long)ESP.getFreeHeap());
+                (unsigned long)s_cnt_rid, (unsigned long)s_cnt_dropped, s_cur_chan,
+                s_ble_ok ? "true" : "false", s_ble_ext ? "true" : "false");
 }
 
 // ---------------------------------------------- host context (home + TFRs)
@@ -423,56 +410,6 @@ static bool json_field_dbl(const char* line, const char* key, double* out) {
   if (!p) return false;
   *out = strtod(p + strlen(pat), nullptr);
   return true;
-}
-
-// ----------------------------------------------------------------- self-test
-
-static void wr_i32(uint8_t* p, int32_t v) {
-  p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF;
-  p[2] = (v >> 16) & 0xFF; p[3] = (v >> 24) & 0xFF;
-}
-static void wr_u16(uint8_t* p, uint16_t v) { p[0] = v & 0xFF; p[1] = v >> 8; }
-
-// Sending 't' over serial injects a synthetic ODID message pack through the
-// normal enqueue -> decode -> JSON path, so the full chain (minus RF) can be
-// exercised without a transmitting drone.
-static void inject_test_pack() {
-  uint8_t d[3 + 3 * 25] = {0};
-  d[0] = 0xF2;  // message pack, protocol v2
-  d[1] = 25;
-  d[2] = 3;
-
-  uint8_t* m = d + 3;         // Basic ID: serial number, multirotor
-  m[0] = 0x02;
-  m[1] = 0x12;
-  memcpy(m + 2, "ORECCHINO-TEST-01", 17);
-
-  m = d + 3 + 25;             // Location: airborne, 90 deg, 5 m/s
-  m[0] = 0x12;
-  m[1] = 0x20;
-  m[2] = 90;
-  m[3] = 20;
-  m[4] = 0;
-  wr_i32(m + 5, 378039000);   // 37.8039 N
-  wr_i32(m + 9, -1224640000); // 122.4640 W
-  wr_u16(m + 13, 2190);       // baro alt 95 m
-  wr_u16(m + 15, 2200);       // geo alt 100 m
-  wr_u16(m + 17, 2120);       // height 60 m
-  m[19] = 0x35; m[20] = 0x33;
-  wr_u16(m + 21, 12000);      // 20 min past the hour
-  m[23] = 0x05;
-
-  m = d + 3 + 50;             // System: operator location
-  m[0] = 0x42;
-  m[1] = 0x01;                // dynamic operator location
-  wr_i32(m + 2, 378030000);
-  wr_i32(m + 6, -1224650000);
-  wr_u16(m + 10, 1);          // area count
-  wr_u16(m + 18, 2030);       // operator alt 15 m
-  wr_i32(m + 20, 238000000);  // system timestamp
-
-  const uint8_t mac[6] = {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x01};
-  enqueue_rid(SRC_WIFI_BEACON, mac, -42, s_cur_chan, 0, d, sizeof(d), nullptr);
 }
 
 // ------------------------------------------------------ track ingest + host
@@ -593,7 +530,6 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
     if (t->has_pos) {
       bool was = t->in_tfr;
       t->in_tfr = tfr_lookup(t->lat, t->lon, t->tfr_id, sizeof(t->tfr_id));
-      if (t->in_tfr) t->tfr_ever = true;
       entered = t->in_tfr && !was;
     }
   }
@@ -601,29 +537,7 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
   return t;
 }
 
-static void tracker_expire_emit(uint32_t now) {
-  for (int i = 0; i < TRK_MAX; i++) {
-    Track* t = &g_tracks[i];
-    if (!t->used || now - t->last_ms <= TRK_EXPIRE_MS) continue;
-    char mh[12] = "null";
-    if (!isnan(t->max_height)) snprintf(mh, sizeof(mh), "%d", (int)t->max_height);
-    Serial.printf("{\"type\":\"track_end\",\"uas\":\"%s\","
-                  "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-                  "\"first_ms\":%lu,\"last_ms\":%lu,\"peak_rssi\":%d,"
-                  "\"max_height\":%s,\"tfr\":%s}\n",
-                  t->uas, t->mac[0], t->mac[1], t->mac[2], t->mac[3],
-                  t->mac[4], t->mac[5], (unsigned long)t->first_ms,
-                  (unsigned long)t->last_ms, t->peak_rssi, mh,
-                  t->tfr_ever ? "true" : "false");
-    t->used = false;
-  }
-}
-
 static void handle_host_line(char* line, uint32_t now) {
-  if (!strcmp(line, "t")) {  // dev harness: inject a synthetic pack
-    inject_test_pack();
-    return;
-  }
   char cmd[16] = {0};
   if (!json_field_str(line, "cmd", cmd, sizeof(cmd))) {
     if (rx_hook_host_line("", line, now)) return;
@@ -781,7 +695,7 @@ static void rx_tick(uint32_t now) {
 
   if (now - last_expire >= 5000) {
     last_expire = now;
-    tracker_expire_emit(now);
+    tracker_expire(now);
   }
   if (now - last_hb >= 2000) {
     last_hb = now;

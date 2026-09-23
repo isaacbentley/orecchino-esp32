@@ -369,15 +369,6 @@ final class AppModel {
                 MainActor.assumeIsolated { AppModel.shared.deviceCtxPushed = false }
             }
         }
-        // Test hook: ORECCHINO_AUTOSYNC=1 starts a tile sync once the port
-        // rotation has had time to settle on the JSON feed.
-        if ProcessInfo.processInfo.environment["ORECCHINO_AUTOSYNC"] != nil {
-            Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { _ in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { AppModel.shared.tileSync.start() }
-                }
-            }
-        }
     }
 
     var trackList: [DroneTrack] {
@@ -416,7 +407,7 @@ final class AppModel {
             stats.lastHeartbeat = Date()
         case "rid":
             ingestRid(msg, demo: demo)
-        case "ack", "fs_ok", "fs_err", "fs_f", "fs_ls_done", "fs_info":
+        case "ack", "fs_ok", "fs_err", "fs_f", "fs_ls_done":
             tileSync.handle(msg)
         default:
             break

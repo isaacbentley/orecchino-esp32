@@ -394,8 +394,6 @@ bool ui_begin() {
   s_gfx->flush();
   s_panel->setBrightness(255);
   s_last_touch = millis();
-  Serial.printf("{\"type\":\"panel\",\"driver\":\"%s\",\"touch\":\"0x%02X\"}\n",
-                co5300 ? "co5300" : "sh8601", s_tp_addr);
   return true;
 }
 

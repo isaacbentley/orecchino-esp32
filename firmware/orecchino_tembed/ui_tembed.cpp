@@ -524,7 +524,6 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     if (dt < 70 && abs(det) == 1 && s_view != V_MENU) {
       det *= 2; // quick turn acceleration for responsive list navigation
     }
-    Serial.printf("{\"type\":\"knob_turn\",\"det\":%d,\"pos\":%ld,\"view\":%d}\n", det, (long)pos, (int)s_view);
     if (s_view == V_MENU) { s_menu_sel = (s_menu_sel + det + 5) % 5; }
     else if (s_view == V_TX) { s_tx_sel += det; }   // clamped in draw_tx
     else if (s_view == V_SPECTRUM) s_mark = (s_mark + det + CC_SWEEP_BINS) % CC_SWEEP_BINS;
@@ -544,12 +543,10 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
   if (k && !k_was) { k_down = now; k_held = false; s_last_input = now; }
   if (k && !k_held && now - k_down > 800 && s_view != V_MENU) {   // long hold -> menu
     k_held = true;
-    Serial.println("{\"type\":\"knob_hold\",\"action\":\"open_menu\"}");
     if (s_view == V_SPECTRUM) spectrum_leave();
     s_menu_sel = s_mode; s_view = V_MENU; s_dirty = true;
   }
   if (!k && k_was && !k_held && now - k_down > 40) {              // short click
-    Serial.printf("{\"type\":\"knob_click\",\"view\":%d}\n", (int)s_view);
     if (s_view == V_MENU) {
       if (s_menu_sel == 2) {                                     // Brightness: cycle
         s_bl = (s_bl + 1) % 3; s_dimmed = false;
@@ -587,7 +584,6 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     tembed_power_off();
   }
   if (!u && u_was && !u_spec_fired && !u_off_fired && now - u_down > 30) {
-    Serial.printf("{\"type\":\"back_key\",\"view\":%d}\n", (int)s_view);
     if (s_view == V_SPECTRUM) { spectrum_leave(); s_view = V_SCOPE; }
     else if (s_view == V_DETAIL) s_view = V_SCOPE;
     else if (s_view == V_MENU) s_view = s_mode == UI_MODE_TX ? V_TX : V_SCOPE;

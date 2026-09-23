@@ -45,15 +45,10 @@ bool periph_touch(int* x, int* y);
 bool periph_home_key();
 /// Controller's reported range (for mapping to the panel); 0 if unknown.
 void periph_touch_range(int* max_x, int* max_y);
-const char* periph_touch_kind();   // "gt911", "gt6972p", "none"
 int  periph_batt_pct();            // -1 when no gauge
 int  periph_batt_mv();             // -1 when no gauge (cell mV from BQ27220)
-/// Cell current in mA, positive while charging. False when no gauge.
-bool periph_batt_ma(int* ma);
 /// The capacity the percentage is counted against (FullChargeCapacity()), -1 when no gauge.
 int  periph_batt_full_mah();
-/// The boot-time gauge check: "ok", "provisioned", "locked", ... or "none".
-const char* periph_gauge_state();
 /// True when the gauge holds this board's cell profile.
 bool periph_gauge_configured();
 bool periph_gps_detected();        // true when valid NMEA sentences received on UART1

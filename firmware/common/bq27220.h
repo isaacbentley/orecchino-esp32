@@ -45,18 +45,6 @@ enum class Result : uint8_t {
   WriteFailed,  // written but not read back intact (or CONFIG UPDATE refused)
 };
 
-inline const char* result_name(Result r) {
-  switch (r) {
-    case Result::Ok:          return "ok";
-    case Result::Provisioned: return "provisioned";
-    case Result::NotFound:    return "not_found";
-    case Result::BusError:    return "bus_error";
-    case Result::Locked:      return "locked";
-    case Result::WriteFailed: return "write_failed";
-  }
-  return "?";
-}
-
 struct Report {
   Result result;
   const char* step;            // where a failure happened, "" otherwise
@@ -276,24 +264,6 @@ inline Report provision(const Io& io, const Param* profile, size_t n) {
   if (r.write_errors > 0 || still != 0) return finish(r, Result::WriteFailed, "verify");
   r.result = Result::Provisioned;
   return r;
-}
-
-// The boot log line for a report: one JSON object, newline-terminated.
-inline int report_json(char* out, size_t n, const Report& r, unsigned cell_mah) {
-  char bad[48] = "";
-  for (uint8_t i = 0; i < r.bad_count && i < 4; i++) {
-    size_t used = strlen(bad);
-    snprintf(bad + used, sizeof(bad) - used, "%s%04X=%04X", i ? "," : "",
-             (unsigned)r.bad_addr[i], (unsigned)r.bad_got[i]);
-  }
-  return snprintf(out, n,
-                  "{\"type\":\"gauge\",\"chip\":\"bq27220\",\"result\":\"%s\",\"step\":\"%s\","
-                  "\"cell_mah\":%u,\"was_design_mah\":%d,\"was_full_mah\":%d,\"mismatched\":%d,"
-                  "\"reset\":%s,\"write_errors\":%d,\"in_cfg_mismatched\":%d,\"verify_ms\":%u,"
-                  "\"bad\":\"%s\"}\n",
-                  result_name(r.result), r.step, cell_mah, r.design_mah_before,
-                  r.full_mah_before, r.mismatched, r.reset ? "true" : "false", r.write_errors,
-                  r.mismatched_in_cfg, (unsigned)r.verify_ms, bad);
 }
 
 // Read-outs; -1 when the gauge does not answer.

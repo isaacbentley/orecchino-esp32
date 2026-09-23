@@ -328,12 +328,6 @@ static void test_failures_midway(void) {
   CHECK(r.result == Result::WriteFailed && r.write_errors == 0 && r.bad_count == 1 &&
         r.bad_addr[0] == 0x929F && r.bad_got[0] == 3000,
         "bq27220: a value that does not stick is named, with what it reads back as");
-  char line[320];
-  bq27220::report_json(line, sizeof line, r, 1500);
-  CHECK(strstr(line, "\"result\":\"write_failed\"") && strstr(line, "\"bad\":\"929F=0BB8\"") &&
-        strstr(line, "\"reset\":false") && strstr(line, "\"was_design_mah\":3000") &&
-        line[strlen(line) - 1] == '\n',
-        "bq27220: the boot log line carries result, reset, and the wrong entries");
 
   // The RESET paths only run for a stuck chip; "left in CONFIG UPDATE" is one.
   fresh(bq27220::kT5EpdProfile);
