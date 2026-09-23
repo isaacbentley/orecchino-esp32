@@ -20,6 +20,8 @@
 #define ORECCHINO_BOARD_HOOKS
 #include "../common/rx_core.h"
 #include "../common/tx_core.h"
+#include "../common/bq27220.h"
+#include "../common/bq27220_profiles.h"
 #include "board_tembed.h"
 #include "ui_tembed.h"
 
@@ -56,16 +58,38 @@ void board_switch_mode(uint8_t mode) {
   ESP.restart();
 }
 
-// BQ27220 fuel gauge: StateOfCharge (0x2C) in percent, -1 if absent.
-static int batt_pct() {
+// ---- BQ27220 fuel gauge (firmware/common/bq27220.h)
+static bool gauge_write(uint8_t reg, const uint8_t* data, size_t n) {
   Wire.beginTransmission(BQ27220_ADDR);
-  Wire.write(0x2C);
-  if (Wire.endTransmission(false) != 0) return -1;
-  if (Wire.requestFrom((int)BQ27220_ADDR, 2) != 2) return -1;
-  int lo = Wire.read(), hi = Wire.read();
-  int pct = lo | (hi << 8);
-  return pct > 100 ? 100 : pct;
+  Wire.write(reg);
+  Wire.write(data, n);
+  return Wire.endTransmission() == 0;
 }
+static bool gauge_read(uint8_t reg, uint8_t* data, size_t n) {
+  Wire.beginTransmission(BQ27220_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)BQ27220_ADDR, (int)n) != (int)n) return false;
+  for (size_t i = 0; i < n; i++) data[i] = (uint8_t)Wire.read();
+  return true;
+}
+static void gauge_sleep(uint32_t ms) { delay(ms); }
+static const bq27220::Io kGaugeIo = { gauge_write, gauge_read, gauge_sleep };
+
+// Check the gauge against the 1300 mAh cell's profile and rewrite it on any
+// difference (~60 ms when it matches, ~5 s the one time it does not).
+// Unconfigured, it counts against TI's generic profile and its percentage
+// drifts away from the cell.
+static void gauge_begin() {
+  const size_t n = sizeof(bq27220::kTEmbedProfile) / sizeof(bq27220::kTEmbedProfile[0]);
+  bq27220::Report r = bq27220::provision(kGaugeIo, bq27220::kTEmbedProfile, n);
+  char line[320];
+  bq27220::report_json(line, sizeof(line), r, bq27220::kTEmbedCellMah);
+  Serial.print(line);
+}
+
+// StateOfCharge() in percent, -1 if the gauge does not answer.
+static int batt_pct() { return bq27220::soc_pct(kGaugeIo); }
 
 void setup() {
   pinMode(PIN_PWR_EN, OUTPUT);
@@ -87,6 +111,7 @@ void setup() {
   if (g_mode > UI_MODE_TX) g_mode = UI_MODE_RX;
 
   bool disp = ui_begin(g_mode);
+  gauge_begin();   // after the screen is up: the one-time rewrite takes ~5 s
   if (g_mode == UI_MODE_TX) {
     tx_begin();
   } else {

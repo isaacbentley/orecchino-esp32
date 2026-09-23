@@ -137,7 +137,9 @@ the knob or key — never while a danger alert is live. The side button is
 is a menu item; hold the side button for a spectrum view that
 shows 2.4 GHz activity by Wi-Fi channel and uses the CC1101 to sweep
 300–928 MHz across its three tuning ranges, with a knob-driven cursor
-readout. Battery percentage comes from the board's gauge.
+readout. Battery percentage comes from the board's fuel gauge, which the
+firmware checks against the board's 1300 mAh cell at every boot, as on the
+e-paper board below.
 
 ```bash
 arduino-cli lib install "GFX Library for Arduino"
@@ -175,8 +177,16 @@ heading and a halo so it reads over street ink, and shows a scale bar.
 The board self-locates. Its GPS feeds the operator position directly, so
 the range rings and the map frame around you in the field with nothing
 attached; the header shows the satellite count (`GPS 9`), or `APP POS` when
-the Mac app supplied the position instead, or `NO POS`. Battery percentage
-comes from the board's gauge.
+the Mac app supplied the position instead, or `NO POS`.
+
+Battery percentage comes from the board's fuel gauge (a TI BQ27220), which
+has to be told the cell it is measuring. Unconfigured, it counts against
+TI's generic 3000 mAh profile, twice this board's cell, and its percentage
+wanders far from the real charge. At every boot the firmware compares the
+gauge with the 1500 mAh cell profile LilyGO publishes for this board and
+rewrites it only when they differ, which costs a few seconds once. The
+boot log's `gauge` line says what it found, and the settings screen shows
+the capacity the percentage is counted against.
 
 It has touch. The header has TABLE and MAP tabs. On the table, tap a row
 to select it and tap it again for its details card; tap an aircraft on
@@ -216,13 +226,17 @@ The panel driver is [epdiy](https://github.com/vroland/epdiy), vendored
 under `firmware/libraries/epdiy` (the board is an epdiy v7 layout).
 
 ```bash
-tools/flash_t5epd.sh            # finds the port itself; pass one to override
+tools/flash_t5epd.sh                # finds the port itself; pass one to override
+tools/flash_t5epd.sh --clock-only   # set the board's clock without reflashing
 ```
 
-The script also sets the board's clock from this computer's and reads it
-back to confirm, because the board has no network and its automatic sunset
-backlight depends on knowing the date. If it cannot, it says so rather than
-leaving you with a board that thinks it is the middle of the night.
+The board has no network, and its automatic sunset backlight and UTC
+readout run off its clock, so the script finishes by setting that clock
+from this computer's. The board answers with the time its clock chip reads
+back after the write — the time that survives a reset — and the script
+checks that, then tells you the result, or exactly what went wrong. The
+Mac app also sets the clock whenever it connects, and again with each
+airspace-data refresh.
 
 > **Note**: If compiling by hand or in the Arduino IDE instead of using the helper script, select **Partition Scheme: Custom** (`PartitionScheme=custom`) and include `--libraries firmware/libraries` to include the vendored `epdiy` library and use the 3 MB app partition.
 
@@ -245,6 +259,9 @@ answers and drives the panel accordingly. Drawing goes through an 8-bit
 canvas rather than straight to the panel: these QSPI AMOLED controllers drop
 writes at odd column addresses, which silently erases text drawn pixel by
 pixel. The glass is a rounded rectangle, so nothing is placed in the corners.
+Battery percentage comes from the fuel gauge in the board's AXP2101 power
+chip, which the firmware switches on at boot; with no battery fitted the
+readout is hidden rather than showing a meaningless number.
 
 ```bash
 arduino-cli lib install "GFX Library for Arduino"
@@ -295,7 +312,9 @@ What it does:
   different serial than its Basic ID
 - Flags a drone whose claimed operator position is more than 15 km away,
   and restarts a trail rather than drawing a jump no aircraft could make
-- Finds the receiver's USB port by itself and reconnects after unplugs
+- Finds the receiver's USB port by itself and reconnects after unplugs,
+  and sets the receiver's clock whenever it connects and with each
+  airspace-data refresh (the boards have no network of their own)
 - A demo mode with two simulated drones, so the UI can be tried with no
   hardware: a persistent SIMULATION ACTIVE banner, a SIMULATED badge on
   every simulated row, marker and card, and "(N simulated)" in the count
@@ -396,6 +415,19 @@ round-trip tested against the decoder in the suite below.
 ```bash
 tests/run_tests.sh
 ```
+
+The T5 flash script's clock step is tested against a fake board on a
+pseudo-terminal (`tests/flash_clock_test.sh`): every answer the firmware
+can give, a slow boot, a lost command, and `Ctrl-C`, `Ctrl-\`, TERM and
+HUP mid-step, none of which may leave a reader on the port.
+
+The fuel-gauge code runs against simulated chips (`tests/gauge_test.cpp`).
+The simulated BQ27220 reproduces what the T5's real one does: a reset that
+lands seconds after the command, and data that reads back as junk for
+seconds after the gauge re-initialises. The tests pin the exact bytes of a
+data-memory write. They also check that a gauge already holding the
+profile is never written, and that no failure leaves it unsealed or stuck
+in configuration mode, where it stops counting.
 
 Every receiver shares one Remote ID decoder (`firmware/common/odid_decode.h`,
 with `gb46750_decode.h` for GB 46750-2025) and one radio core

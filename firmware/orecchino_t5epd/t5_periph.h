@@ -7,11 +7,14 @@
 //   * Touch: a Goodix controller — GT911 on some batches, the GT6972P
 //     ("Berlin" register map) on others. Probed at boot; one finger is all
 //     a slow panel needs (tap and drag-release).
-//   * BQ27220 fuel gauge: state of charge, percent.
+//   * BQ27220 fuel gauge: state of charge, cell voltage and current. At
+//     boot it is checked against the 1500 mAh cell's profile and rewritten
+//     when it holds anything else (firmware/common/bq27220.h).
 //   * GPS on UART1 (RX 44 / TX 43): NMEA GGA parsed into the operator
 //     position, so the board self-locates in the field without the app.
 #pragma once
 #include <Arduino.h>
+#include <time.h>
 
 /// Optional pre-init: pulses GT911 RST/INT to latch address 0x5D before epdiy claims GPIO9
 void periph_touch_reset();
@@ -45,6 +48,14 @@ void periph_touch_range(int* max_x, int* max_y);
 const char* periph_touch_kind();   // "gt911", "gt6972p", "none"
 int  periph_batt_pct();            // -1 when no gauge
 int  periph_batt_mv();             // -1 when no gauge (cell mV from BQ27220)
+/// Cell current in mA, positive while charging. False when no gauge.
+bool periph_batt_ma(int* ma);
+/// The capacity the percentage is counted against (FullChargeCapacity()), -1 when no gauge.
+int  periph_batt_full_mah();
+/// The boot-time gauge check: "ok", "provisioned", "locked", ... or "none".
+const char* periph_gauge_state();
+/// True when the gauge holds this board's cell profile.
+bool periph_gauge_configured();
 bool periph_gps_detected();        // true when valid NMEA sentences received on UART1
 bool periph_gps_fix();
 int  periph_gps_sats();
@@ -62,6 +73,14 @@ double  periph_sun_elevation();
 bool    periph_has_utc_time();
 void    periph_get_utc_time(uint16_t* y, uint8_t* m, uint8_t* d, uint8_t* h, uint8_t* min, uint8_t* s);
 void    periph_set_utc_time(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s);
+/// Set the clock from a host (the flash script, the Mac app). Unlike the
+/// GPS path, which writes the RTC chip at most hourly, this always writes
+/// the chip, so the time survives the next reset. False when the date is
+/// out of range.
+bool    periph_set_utc_time_host(time_t epoch);
+/// The RTC chip's own time, "YYYY-MM-DDTHH:MM:SSZ". False when there is no
+/// chip, it does not answer, or it flags its time as lost.
+bool    periph_rtc_iso(char* out, size_t n);
 
 // Power management & hardware button (BQ25896 charger, PCA9535 S3 button, power off)
 bool    periph_is_charging();

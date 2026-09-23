@@ -12,6 +12,7 @@
 #define FW_BOARD "waveshare-c6-amoled-1.8"
 #define ORECCHINO_BOARD_HOOKS
 #include "../common/rx_core.h"
+#include "../common/axp2101.h"
 #include "board_amoled.h"
 #include "ui_amoled.h"
 
@@ -24,15 +25,25 @@ bool rx_hook_host_line(const char* cmd, char*, uint32_t) {
 }
 void rx_hook_track(Track*, bool, bool) {}
 
-// AXP2101: battery percentage register 0xA4, -1 if the PMU is not answering.
-static int batt_pct() {
+// ---- AXP2101 fuel gauge (firmware/common/axp2101.h)
+static bool pmu_read(uint8_t reg, uint8_t* v) {
   Wire.beginTransmission(AXP2101_ADDR);
-  Wire.write(0xA4);
-  if (Wire.endTransmission(false) != 0) return -1;
-  if (Wire.requestFrom((int)AXP2101_ADDR, 1) != 1) return -1;
-  int v = Wire.read() & 0x7F;
-  return v > 100 ? 100 : v;
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)AXP2101_ADDR, 1) != 1) return false;
+  *v = (uint8_t)Wire.read();
+  return true;
 }
+static bool pmu_write(uint8_t reg, uint8_t v) {
+  Wire.beginTransmission(AXP2101_ADDR);
+  Wire.write(reg);
+  Wire.write(v);
+  return Wire.endTransmission() == 0;
+}
+static const axp2101::Io kPmu = { pmu_read, pmu_write };
+
+// Percent, or -1 with no battery fitted or no answer from the PMU.
+static int batt_pct() { return axp2101::batt_pct(kPmu); }
 
 void setup() {
   // Host lines run to 1.6 KB (TFR polygons, tile chunks) and land in one
@@ -42,6 +53,7 @@ void setup() {
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 2000) delay(10);
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  axp2101::begin(kPmu);   // battery detection + fuel gauge on, or 0xA4 means nothing
   bool disp = ui_begin();
   rx_begin(disp ? ",\"display\":true" : ",\"display\":false");
 }

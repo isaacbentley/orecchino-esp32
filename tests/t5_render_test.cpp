@@ -49,6 +49,8 @@ bool periph_gps_fix() { return p_gps_fix; }
 int  periph_gps_sats() { return p_sats; }
 int  periph_batt_pct() { return 76; }
 int  periph_batt_mv() { return 3900; }
+int  periph_batt_full_mah() { return 1500; }
+bool periph_gauge_configured() { return true; }
 bool periph_has_utc_time() { return true; }
 void periph_get_utc_time(uint16_t* y, uint8_t* m, uint8_t* d, uint8_t* h, uint8_t* mi, uint8_t* s) { *y = 2026; *m = 9; *d = 21; *h = 18; *mi = 24; *s = 0; }
 void periph_bl_set_mode(BlMode) {} BlMode periph_bl_get_mode() { return BL_AUTO; }

@@ -92,6 +92,9 @@ static void print_help() {
 static void print_t5_status() {
   int batt = periph_batt_pct();
   int mv = periph_batt_mv();
+  int ma = 0;
+  char ma_buf[12] = "null";   // signed mA, positive while charging
+  if (periph_batt_ma(&ma)) snprintf(ma_buf, sizeof(ma_buf), "%d", ma);
   uint16_t yr = 0; uint8_t mo = 0, da = 0, hr = 0, mi = 0, se = 0;
   periph_get_utc_time(&yr, &mo, &da, &hr, &mi, &se);
 
@@ -99,12 +102,13 @@ static void print_t5_status() {
   snprintf(utc_buf, sizeof(utc_buf), "%04u-%02u-%02uT%02u:%02u:%02uZ", yr, mo, da, hr, mi, se);
 
   Serial.printf("{\"type\":\"status\",\"device\":\"lilygo-t5-epaper-s3-pro\",\"mode\":\"%s\","
-                "\"batt_pct\":%d,\"batt_mv\":%d,\"gps_detected\":%s,\"gps_fix\":%s,\"gps_sats\":%d,"
+                "\"batt_pct\":%d,\"batt_mv\":%d,\"batt_ma\":%s,\"batt_full_mah\":%d,\"gauge_cfg\":\"%s\","
+                "\"gps_detected\":%s,\"gps_fix\":%s,\"gps_sats\":%d,"
                 "\"lat\":%.6f,\"lon\":%.6f,\"home_set\":%s,\"vcom\":%u,"
                 "\"bl_mode\":\"%s\",\"bl_active\":%s,\"bl_duty\":%u,\"sun_elev\":%.1f,\"sundown\":%s,"
                 "\"utc\":\"%s\",\"seen_count\":%lu,\"heap_free\":%u,\"psram_free\":%u}\n",
                 g_mode == UI_MODE_TX ? "tx" : "rx",
-                batt, mv,
+                batt, mv, ma_buf, periph_batt_full_mah(), periph_gauge_state(),
                 periph_gps_detected() ? "true" : "false",
                 periph_gps_fix() ? "true" : "false",
                 periph_gps_sats(),
@@ -189,10 +193,17 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
     double u = 0;
     if (json_field_dbl(line, "utc", &u)) {
       time_t epoch = (time_t)u;
-      struct tm t;
-      gmtime_r(&epoch, &t);
-      periph_set_utc_time(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
-      Serial.printf("{\"type\":\"time\",\"utc\":%lu,\"set\":true}\n", (unsigned long)epoch);
+      bool set = periph_set_utc_time_host(epoch);
+      // Answer with what the RTC chip holds, read back after the write:
+      // the time that survives a reset. null when there is no chip, the
+      // write failed, or the chip flags its time as lost, so a host can say
+      // so rather than trust the running clock, which a reset discards.
+      char rtc[24];
+      if (set && periph_rtc_iso(rtc, sizeof(rtc)))
+        Serial.printf("{\"type\":\"time\",\"utc\":%lu,\"set\":true,\"rtc\":\"%s\"}\n", (unsigned long)epoch, rtc);
+      else
+        Serial.printf("{\"type\":\"time\",\"utc\":%lu,\"set\":%s,\"rtc\":null}\n",
+                      (unsigned long)epoch, set ? "true" : "false");
       return true;
     }
   }

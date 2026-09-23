@@ -521,9 +521,18 @@ final class AppModel {
         tracks[key] = t
     }
 
-    /// Push operator location + nearby TFR polygons to the receiver so it
-    /// can range contacts and buzz on TFR incursions.
+    /// The clock command a receiver understands: whole UTC seconds. The
+    /// boards have no network, so this and the flash script are how a
+    /// receiver's clock gets set; the T5 writes it to its RTC chip.
+    nonisolated static func setTimeCommand(now: Date) -> String {
+        #"{"cmd":"set_time","utc":\#(Int(now.timeIntervalSince1970))}"#
+    }
+
+    /// Push the time, operator location and nearby TFR polygons to the
+    /// receiver so it can keep its clock, range contacts and buzz on TFR
+    /// incursions. Boards without a clock command ignore set_time.
     private func pushDeviceContext() {
+        serial.send(Self.setTimeCommand(now: Date()))
         let home = location.current
         if let h = home {
             serial.send(String(format: #"{"cmd":"set_home","lat":%.6f,"lon":%.6f}"#,

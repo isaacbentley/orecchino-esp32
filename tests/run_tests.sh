@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 echo "== Generated make/model tables (tools/uas_models.json -> firmware + app)"
 python3 tools/gen_uas_models.py --check
 
+echo "== T5 flash script clock step (bash against a fake board on a pty)"
+tests/flash_clock_test.sh
+
 echo "== ODID decoder (C, golden vectors from opendroneid/wireshark-dissector)"
 cc -std=c11 -Wall -Wextra -O2 tests/odid_test.c -o /tmp/orecchino_odid_test
 /tmp/orecchino_odid_test
@@ -21,6 +24,11 @@ c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wno-unused-function \
   tests/core_test.cpp tests/host_shim/shim.cpp \
   firmware/libraries/Monocypher/src/monocypher.cpp -o /tmp/orecchino_core_test
 /tmp/orecchino_core_test
+
+echo "== Fuel gauges (C++ against simulated BQ27220 and AXP2101 chips)"
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+  -I firmware/common tests/gauge_test.cpp -o /tmp/orecchino_gauge_test
+/tmp/orecchino_gauge_test
 
 echo "== T5 e-paper board render (C++ against host shims: fitted text, label placement, selection)"
 GFX="$HOME/Documents/Arduino/libraries/Adafruit_GFX_Library"

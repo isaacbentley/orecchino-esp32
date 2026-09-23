@@ -394,3 +394,16 @@ private func decode(_ s: String) throws -> RidMessage {
         #expect(u.model == "DJI Matrice 400")
     }
 }
+
+@Suite struct SetTimeCommandTests {
+    @Test func wholeUtcSecondsInTheFirmwaresShape() throws {
+        // The T5 parses "utc" with strtod and casts to time_t, and the flash
+        // script sends the same line: whole seconds, no fraction, no quotes.
+        let when = Date(timeIntervalSince1970: 1_790_101_127.9)
+        let line = AppModel.setTimeCommand(now: when)
+        #expect(line == #"{"cmd":"set_time","utc":1790101127}"#)
+        let obj = try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        #expect(obj["cmd"] as? String == "set_time")
+        #expect(obj["utc"] as? Int == 1_790_101_127)
+    }
+}

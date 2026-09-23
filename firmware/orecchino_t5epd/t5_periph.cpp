@@ -4,6 +4,8 @@
 #include "driver/i2c_master.h"
 #include "../common/ui_common.h"   // g_home_*
 #include "../common/solar.h"
+#include "../common/bq27220.h"
+#include "../common/bq27220_profiles.h"
 #include <Preferences.h>
 #include <esp_sleep.h>
 #include <sys/time.h>
@@ -304,20 +306,40 @@ bool periph_touch(int* x, int* y) {
 void periph_touch_range(int* mx, int* my) { *mx = s_tp_max_x; *my = s_tp_max_y; }
 const char* periph_touch_kind() { return s_tp_kind == TP_GT911 ? "gt911" : s_tp_kind == TP_GT6972P ? "gt6972p" : "none"; }
 
-// ---- BQ27220
-int periph_batt_pct() {
-  if (!s_have_gauge) return -1;
-  uint8_t reg = 0x2C, r[2] = {0};   // StateOfCharge, percent
-  if (!wrrd(s_gauge, &reg, 1, r, 2)) return -1;
-  int pct = r[0] | (r[1] << 8);
-  return pct > 100 ? 100 : pct;
+// ---- BQ27220 fuel gauge (firmware/common/bq27220.h)
+static bool gauge_write(uint8_t reg, const uint8_t* data, size_t n) {
+  uint8_t b[8];
+  if (n + 1 > sizeof(b)) return false;
+  b[0] = reg;
+  memcpy(b + 1, data, n);
+  return wr(s_gauge, b, n + 1);
+}
+static bool gauge_read(uint8_t reg, uint8_t* data, size_t n) { return wrrd(s_gauge, &reg, 1, data, n); }
+static void gauge_sleep(uint32_t ms) { delay(ms); }
+static const bq27220::Io kGaugeIo = { gauge_write, gauge_read, gauge_sleep };
+static bq27220::Result s_gauge_result = bq27220::Result::NotFound;
+
+// Check the gauge against the T5's 1500 mAh cell profile and rewrite it on
+// any difference (~60 ms when it matches, ~5 s the one time it does not).
+// Unconfigured, the gauge counts against TI's generic profile and its
+// percentage drifts away from the cell.
+static void gauge_begin() {
+  const size_t n = sizeof(bq27220::kT5EpdProfile) / sizeof(bq27220::kT5EpdProfile[0]);
+  bq27220::Report r = bq27220::provision(kGaugeIo, bq27220::kT5EpdProfile, n);
+  s_gauge_result = r.result;
+  char line[320];
+  bq27220::report_json(line, sizeof(line), r, bq27220::kT5CellMah);
+  Serial.print(line);
 }
 
-int periph_batt_mv() {
-  if (!s_have_gauge) return -1;
-  uint8_t reg = 0x08, r[2] = {0};   // Voltage, mV
-  if (!wrrd(s_gauge, &reg, 1, r, 2)) return -1;
-  return r[0] | (r[1] << 8);
+int periph_batt_pct() { return s_have_gauge ? bq27220::soc_pct(kGaugeIo) : -1; }
+int periph_batt_mv() { return s_have_gauge ? bq27220::voltage_mv(kGaugeIo) : -1; }
+bool periph_batt_ma(int* ma) { return s_have_gauge && bq27220::current_ma(kGaugeIo, ma); }
+int periph_batt_full_mah() { return s_have_gauge ? bq27220::full_capacity_mah(kGaugeIo) : -1; }
+const char* periph_gauge_state() { return s_have_gauge ? bq27220::result_name(s_gauge_result) : "none"; }
+bool periph_gauge_configured() {
+  return s_have_gauge && (s_gauge_result == bq27220::Result::Ok ||
+                          s_gauge_result == bq27220::Result::Provisioned);
 }
 
 // ---- RTC (PCF8563 at 0x51) & System Time
@@ -389,20 +411,42 @@ static inline time_t utc_to_epoch(int y, int m, int d, int h, int min, int s) {
   return (time_t)(days * 86400L + (long)h * 3600L + (long)min * 60L + s);
 }
 
-void periph_set_utc_time(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s) {
-  if (y < 2024 || m < 1 || m > 12 || d < 1 || d > 31 || h > 23 || min > 59 || s > 59) return;
+// Sets the system clock, and the RTC chip when `persist` is set or an hour
+// has passed. GPS calls this once a second, hence the hourly limit; a host
+// set must persist every time, because the boot restore in periph_begin
+// takes the hourly slot, so a set in the first hour after a reset would
+// otherwise never reach the chip and the next reset would undo it.
+static bool set_utc(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s, bool persist) {
+  if (y < 2024 || m < 1 || m > 12 || d < 1 || d > 31 || h > 23 || min > 59 || s > 59) return false;
   time_t epoch = utc_to_epoch((int)y, (int)m, (int)d, (int)h, (int)min, (int)s);
-  if (epoch > 0) {
-    struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
-    settimeofday(&tv, nullptr);
-    s_have_utc_time = true;
-    static uint32_t last_rtc_sync = 0;
-    uint32_t now = millis();
-    if (s_have_rtc && (now - last_rtc_sync > 3600000UL || last_rtc_sync == 0)) {
-      last_rtc_sync = now;
-      rtc_write_time(y, m, d, h, min, s);
-    }
+  if (epoch <= 0) return false;
+  struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+  settimeofday(&tv, nullptr);
+  s_have_utc_time = true;
+  static uint32_t last_rtc_sync = 0;
+  uint32_t now = millis();
+  if (s_have_rtc && (persist || now - last_rtc_sync > 3600000UL || last_rtc_sync == 0)) {
+    last_rtc_sync = now;
+    rtc_write_time(y, m, d, h, min, s);
   }
+  return true;
+}
+
+void periph_set_utc_time(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s) {
+  set_utc(y, m, d, h, min, s, false);
+}
+
+bool periph_set_utc_time_host(time_t epoch) {
+  struct tm t;
+  gmtime_r(&epoch, &t);
+  return set_utc(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, true);
+}
+
+bool periph_rtc_iso(char* out, size_t n) {
+  uint16_t y; uint8_t mo, d, h, mi, s;
+  if (!rtc_read_time(&y, &mo, &d, &h, &mi, &s)) return false;
+  snprintf(out, n, "%04u-%02u-%02uT%02u:%02u:%02uZ", y, mo, d, h, mi, s);
+  return true;
 }
 
 bool periph_has_utc_time() { return s_have_utc_time; }
@@ -713,6 +757,7 @@ void periph_begin() {
   rail_on();
   touch_begin();
   if (present(BQ27220_ADDR)) { s_gauge = dev_add(BQ27220_ADDR); s_have_gauge = s_gauge != nullptr; }
+  if (s_have_gauge) gauge_begin();   // before the input task shares the bus
   if (present(BQ25896_ADDR)) { s_charger = dev_add(BQ25896_ADDR); s_have_charger = s_charger != nullptr; }
   if (present(PCF8563_ADDR)) {
     s_rtc = dev_add(PCF8563_ADDR);

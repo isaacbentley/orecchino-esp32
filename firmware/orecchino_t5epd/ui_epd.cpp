@@ -1553,9 +1553,15 @@ static void draw_diagnostics() {
 
   // Col 2: Power & RTC
   char p1[48], p2[48];
+  // The capacity the gauge counts against is the figure to trust the
+  // percentage by: 1500 mAh once the boot check has configured it.
   int mv = periph_batt_mv();
-  if (mv > 0) snprintf(p1, sizeof(p1), "Cell:   %d mV (%d%%) | BQ27220 OK", mv, s_batt);
+  int cap = periph_batt_full_mah();
+  if (mv > 0 && cap > 0 && periph_gauge_configured())
+    snprintf(p1, sizeof(p1), "Cell:   %d mV  %d%% of %d mAh", mv, s_batt, cap);
+  else if (mv > 0) snprintf(p1, sizeof(p1), "Cell:   %d mV  %d%%  (gauge not set)", mv, s_batt);
   else snprintf(p1, sizeof(p1), "Cell:   No Gauge Detected");
+  fit_text(p1, sizeof(p1), f9, 660 - 340 - 12);   // column 3 starts at x=660
   if (periph_has_utc_time()) {
     uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
     periph_get_utc_time(&cy, &cm, &cd, &ch, &cmi, &cs);
