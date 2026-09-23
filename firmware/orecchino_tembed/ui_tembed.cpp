@@ -112,6 +112,37 @@ static void build_order() {
   if (s_sel >= s_scroll + ROWS) s_scroll = s_sel - ROWS + 1;
 }
 
+// Send only the rows that changed since the last frame. The SPI link, not
+// the CPU, is what a frame costs here (320x170 at 16 bits over 40 MHz SPI is
+// ~22 ms), and most redraws change a clock digit and a meter. Rows are
+// compared against a copy of what the panel shows, in 10-row bands, and runs
+// of changed bands go out as one transfer.
+static uint16_t* s_shown = nullptr;
+static uint32_t  s_rows_sent = 0;   // for the host render check
+static void present() {
+  uint16_t* fb = s_cv->getFramebuffer();
+  if (!s_shown) s_shown = (uint16_t*)ps_malloc((size_t)W * H * 2);
+  if (!s_shown) { s_cv->flush(); return; }   // no spare memory: whole frames
+  static bool primed = false;
+  const int BAND = 10;
+  for (int y = 0; y < H;) {
+    int bh = min(BAND, H - y);
+    size_t off = (size_t)y * W;
+    if (primed && !memcmp(fb + off, s_shown + off, (size_t)bh * W * 2)) { y += bh; continue; }
+    int y1 = y + bh;
+    while (y1 < H) {
+      int b2 = min(BAND, H - y1);
+      if (primed && !memcmp(fb + (size_t)y1 * W, s_shown + (size_t)y1 * W, (size_t)b2 * W * 2)) break;
+      y1 += b2;
+    }
+    s_gfx->draw16bitRGBBitmap(0, y, fb + off, W, y1 - y);
+    memcpy(s_shown + off, fb + off, (size_t)(y1 - y) * W * 2);
+    s_rows_sent += (uint32_t)(y1 - y);
+    y = y1;
+  }
+  primed = true;
+}
+
 static void small(int x, int y, uint16_t c, const char* s) {
   s_cv->setFont(nullptr); s_cv->setTextSize(1); s_cv->setTextColor(c);
   s_cv->setCursor(x, y); s_cv->print(s);
@@ -120,6 +151,37 @@ static void bold(int x, int y, uint16_t c, const char* s, const GFXfont* f = &Fr
   s_cv->setFont(f); s_cv->setTextSize(1); s_cv->setTextColor(c);
   s_cv->setCursor(x, y); s_cv->print(s);
   s_cv->setFont(nullptr);
+}
+/// Width in pixels of `s` in `f` (nullptr: the 6 px classic font).
+static int text_px(const char* s, const GFXfont* f) {
+  if (!f) return (int)strlen(s) * 6;
+  int w = 0;
+  for (; *s; s++) {
+    uint8_t c = (uint8_t)*s;
+    if (c >= f->first && c <= f->last) w += f->glyph[c - f->first].xAdvance;
+  }
+  return w;
+}
+/// Shorten `b` in place, ending in "..", until it fits `maxw` pixels.
+static void fit(char* b, size_t cap, int maxw, const GFXfont* f) {
+  if (text_px(b, f) <= maxw) return;
+  for (size_t n = strlen(b); n > 0; n--) {
+    b[n - 1] = 0;
+    if (strlen(b) + 3 > cap) continue;
+    strcat(b, "..");
+    if (text_px(b, f) <= maxw) return;
+    b[strlen(b) - 2] = 0;
+  }
+}
+/// Small north-up compass: a ring with an N tick and a needle on `brg`.
+static void needle(int cx, int cy, int r, double brg, uint16_t col) {
+  s_cv->drawCircle(cx, cy, r, C_EDGE);
+  s_cv->drawFastVLine(cx, cy - r - 3, 3, C_MUTED);   // north
+  double a = brg * M_PI / 180.0;
+  int x = cx + (int)lround(sin(a) * (r - 2)), y = cy - (int)lround(cos(a) * (r - 2));
+  s_cv->drawLine(cx, cy, x, y, col);
+  s_cv->fillCircle(x, y, 2, col);
+  s_cv->fillCircle(cx, cy, 1, C_MUTED);
 }
 
 static void draw_top(const UiSummary& sm, const char* title) {
@@ -130,10 +192,8 @@ static void draw_top(const UiSummary& sm, const char* title) {
   uint16_t mut = sm.alert == UI_EMERGENCY ? RGB565(0xD8, 0x9A, 0x9A)
                : sm.alert == UI_CONTACT ? RGB565(0x5E, 0x48, 0x10) : C_MUTED;
   s_cv->fillRect(0, 0, W, TOP, bg);
-  char b[40];
-  if (title) snprintf(b, sizeof(b), "%s", title); else ui_headline(b, sizeof(b), &sm);
-  bold(6, 15, fg, b);
-  // right cluster: seen, battery, RX dot
+  char b[48];
+  // right cluster first (seen, battery, RX dot), so the title knows its room
   int x = W - 12;
   s_cv->fillCircle(x, 10, 4, s_ble_ok ? (sm.active ? RGB565(0x1E, 0x64, 0x28) : C_OK) : C_DANGER);
   x -= 10;
@@ -141,10 +201,16 @@ static void draw_top(const UiSummary& sm, const char* title) {
     snprintf(b, sizeof(b), "%d%%", s_batt);
     x -= strlen(b) * 6; small(x, 7, s_batt <= 15 ? C_DANGER : mut, b); x -= 8;
   }
+  char head[48];
+  if (title) snprintf(head, sizeof(head), "%s", title); else ui_headline(head, sizeof(head), &sm);
+  // "N seen" is the first thing to give way: an alert headline is worth more
   if (g_seen_count) {
     snprintf(b, sizeof(b), "%lu seen", (unsigned long)g_seen_count);
-    x -= strlen(b) * 6; small(x, 7, mut, b);
+    int sx = x - (int)strlen(b) * 6;
+    if (text_px(head, &FreeSansBold9pt7b) <= sx - 6 - 8) { small(sx, 7, mut, b); x = sx; }
   }
+  fit(head, sizeof(head), x - 6 - 8, &FreeSansBold9pt7b);
+  bold(6, 15, fg, head);
 }
 
 static void draw_meter(int x, int y, int w, int rssi, uint16_t col) {
@@ -172,7 +238,7 @@ static void draw_scope() {
     int sx = (s_now / 12) % W;
     s_cv->drawFastVLine(sx, TOP + 2, H - TOP - 2, RGB565(0x14, 0x3A, 0x36));
     draw_bl_toast();
-    s_cv->flush();
+    present();
     return;
   }
   // list pane
@@ -190,60 +256,85 @@ static void draw_scope() {
       s_cv->drawRoundRect(2, y, LIST_W - 4, ROW_H - 2, 4, C_DANGER);
     }
     s_cv->fillRect(6, y + 5, 3, ROW_H - 12, col);
-    char id[16];
-    if (t->uas[0]) ui_short_id(id, sizeof(id), t->uas, ui_unique_tail(s_order, s_n, k, 4), 14);
-    else snprintf(id, sizeof(id), "(no id)");
-    bold(14, y + 13, stale ? C_MUTED : C_TEXT, id);
     const char* badge = track_auth_badge(t->auth_state);
+    int id_right = LIST_W - 8;
     if (badge[0]) {
-      s_cv->fillRoundRect(LIST_W - 34, y + 3, 28, 11, 3, C_BAR);
-      small(LIST_W - 31, y + 5, ui_auth_color(t->auth_state),
-            badge);
+      int bw = (int)strlen(badge) * 6 + 5, bx = LIST_W - 7 - bw;
+      s_cv->fillRoundRect(bx, y + 3, bw, 11, 3, sel ? C_BG : C_BAR);
+      small(bx + 3, y + 5, ui_auth_color(t->auth_state), badge);
+      id_right = bx - 4;
     }
+    char id[24];
+    if (t->uas[0]) {
+      int tail = ui_unique_tail(s_order, s_n, k, 4);
+      for (int chars = 16; chars >= tail + 2; chars--) {
+        ui_short_id(id, sizeof(id), t->uas, tail, chars);
+        if (text_px(id, &FreeSansBold9pt7b) <= id_right - 14) break;
+      }
+    } else {
+      snprintf(id, sizeof(id), "MAC ..%02X%02X", t->mac[4], t->mac[5]);   // no ID yet: its address
+    }
+    bold(14, y + 13, stale ? C_MUTED : C_TEXT, id);
     char b[32], hb[8] = "--";
     if (!isnan(t->height)) snprintf(hb, sizeof(hb), "%dm", (int)t->height);
     snprintf(b, sizeof(b), "h %-5s %4ddBm %s%s%s%s", hb, t->rssi,
              (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
              (t->src_mask & 4) ? "B" : "", t->in_tfr ? " TFR!" : "");
-    small(14, y + 17, t->in_tfr && !stale ? C_DANGER : C_MUTED, b);
+    small(14, y + 18, t->in_tfr && !stale ? C_DANGER : C_MUTED, b);
   }
   if (s_n > ROWS) {  // scrollbar
     int h = (H - TOP - 4) * ROWS / s_n, y0 = TOP + 2 + (H - TOP - 4) * s_scroll / s_n;
     s_cv->fillRect(LIST_W - 2, TOP + 2, 2, H - TOP - 4, C_METER);
     s_cv->fillRect(LIST_W - 2, y0, 2, h, C_MUTED);
   }
-  // detail pane
+  // detail pane: signal, then where it is from here (compass needle, range,
+  // closing or opening), height and speed, then the flags
   s_cv->drawFastVLine(LIST_W + 1, TOP + 2, H - TOP - 2, C_EDGE);
-  const Track* t = &g_tracks[s_order[s_sel]];
+  const int slot = s_order[s_sel];
+  const Track* t = &g_tracks[slot];
   int x = LIST_W + 8, y = TOP + 6;
   bool stale = ui_stale(t, s_now);
-  uint16_t col = stale ? C_MUTED : ui_danger(t, s_now) ? C_DANGER : TRACK_COLORS[s_order[s_sel] % N_TRACK_COLORS];
+  uint16_t col = stale ? C_MUTED : ui_danger(t, s_now) ? C_DANGER : TRACK_COLORS[slot % N_TRACK_COLORS];
   draw_meter(x, y, W - x - 8, t->rssi, col); y += 8;
   char b[40], hb[10] = "--", sb[12] = "--";
   if (!isnan(t->height)) snprintf(hb, sizeof(hb), "%dm", (int)t->height);
   if (!isnan(t->speed))  snprintf(sb, sizeof(sb), "%.1fm/s", t->speed);
   snprintf(b, sizeof(b), "%d dBm  %s", t->rssi, ui_status_name(t->status));
-  small(x, y, t->status == 3 ? C_DANGER : C_MUTED, b); y += 11;
-  snprintf(b, sizeof(b), "h %s  v %s", hb, sb); small(x, y, C_MUTED, b); y += 11;
-  if (t->has_pos) {
-    if (g_home_set) {
-      char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
-      snprintf(b, sizeof(b), "%s  brg %03d", r, (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
-      bold(x, y + 12, C_TEXT, b); y += 18;
+  small(x, y, t->status == 3 ? C_DANGER : C_MUTED, b); y += 12;
+  if (t->has_pos && g_home_set) {
+    double brg = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon);
+    needle(x + 13, y + 14, 13, brg, stale ? C_MUTED : col);
+    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+    bold(x + 32, y + 12, C_TEXT, r);
+    snprintf(b, sizeof(b), "brg %03d", (int)brg); small(x + 32, y + 17, C_MUTED, b);
+    y += 32;
+    float rate;
+    if (ui_range_rate(slot, t, s_now, &rate)) {
+      ui_rate_text(b, sizeof(b), rate); fit(b, sizeof(b), W - x - 4, nullptr);
+      small(x, y, rate < -0.5f ? C_AMBER : C_MUTED, b);
     }
+    y += 11;
+  } else if (t->has_pos) {
+    small(x, y, C_MUTED, "no home fix"); y += 10;
     snprintf(b, sizeof(b), "%.5f", t->lat); small(x, y, C_MUTED, b); y += 9;
     snprintf(b, sizeof(b), "%.5f", t->lon); small(x, y, C_MUTED, b); y += 11;
   } else { small(x, y, C_MUTED, "no position"); y += 11; }
-  if (t->auth_state) {
-    small(x, y, ui_auth_color(t->auth_state), ui_auth_text(t->auth_state)); y += 11;
+  snprintf(b, sizeof(b), "h %s  v %s", hb, sb); fit(b, sizeof(b), W - x - 4, nullptr);
+  small(x, y, C_MUTED, b); y += 11;
+  if (t->auth_state && y < H - 20) {
+    snprintf(b, sizeof(b), "%s", ui_auth_text(t->auth_state)); fit(b, sizeof(b), W - x - 4, nullptr);
+    small(x, y, ui_auth_color(t->auth_state), b); y += 11;
   }
-  if (t->in_tfr) { snprintf(b, sizeof(b), "IN TFR %s", t->tfr_id); small(x, y, C_DANGER, b); y += 11; }
+  if (t->in_tfr && y < H - 20) {
+    snprintf(b, sizeof(b), "IN TFR %s", t->tfr_id); fit(b, sizeof(b), W - x - 4, nullptr);
+    small(x, y, C_DANGER, b); y += 11;
+  }
   snprintf(b, sizeof(b), "src %s%s%s  %us ago", (t->src_mask & 1) ? "W" : "",
            (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
            (unsigned)((s_now - t->last_ms) / 1000));
   small(x, H - 10, C_MUTED, b);
   draw_bl_toast();
-  s_cv->flush();
+  present();
 }
 
 static void draw_detail() {
@@ -256,10 +347,11 @@ static void draw_detail() {
     small(14, 105, C_MUTED, "Click: scope");
     small(14, 120, C_MUTED, "Hold: menu");
     draw_bl_toast();
-    s_cv->flush();
+    present();
     return;
   }
-  const Track* t = &g_tracks[s_order[s_sel]];
+  const int slot = s_order[s_sel];
+  const Track* t = &g_tracks[slot];
   draw_top(sm, t->uas[0] ? t->uas : "(no id)");
   bool danger = ui_danger(t, s_now);
   char b[48];
@@ -268,17 +360,25 @@ static void draw_detail() {
     char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
     snprintf(b, sizeof(b), "%s", r);
     bold(8, 58, C_TEXT, b, &FreeSansBold12pt7b);
-    snprintf(b, sizeof(b), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
+    double brg = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon);
+    snprintf(b, sizeof(b), "%03d", (int)brg);
     bold(120, 58, C_ACCENT, b, &FreeSansBold12pt7b);
     small(120, 62, C_MUTED, "bearing");
     small(8, 62, C_MUTED, "range");
+    needle(196, 46, 17, brg, danger ? C_DANGER : C_ACCENT);
+    float rate;
+    if (ui_range_rate(slot, t, s_now, &rate)) {
+      bold(224, 44, rate < -0.5f ? C_AMBER : C_TEXT,
+           rate < -0.5f ? "closing" : rate > 0.5f ? "opening" : "holding");
+      if (fabsf(rate) > 0.5f) { snprintf(b, sizeof(b), "%.1f m/s", fabsf(rate)); small(224, 50, C_MUTED, b); }
+    }
   } else {
     snprintf(b, sizeof(b), "%s", ui_status_name(t->status));
     bold(8, 58, t->status == 3 ? C_DANGER : C_TEXT, b, &FreeSansBold12pt7b);
   }
   // rssi meter, wide
-  draw_meter(8, 74, 200, t->rssi, danger ? C_DANGER : C_ACCENT);
-  snprintf(b, sizeof(b), "%d dBm (peak %d)", t->rssi, t->peak_rssi); small(214, 71, C_MUTED, b);
+  draw_meter(8, 74, 160, t->rssi, danger ? C_DANGER : C_ACCENT);
+  snprintf(b, sizeof(b), "%d dBm (peak %d)", t->rssi, t->peak_rssi); small(176, 71, C_MUTED, b);
   char hb[10] = "--", sb[12] = "--";
   if (!isnan(t->height)) snprintf(hb, sizeof(hb), "%dm", (int)t->height);
   if (!isnan(t->speed))  snprintf(sb, sizeof(sb), "%.1fm/s", t->speed);
@@ -292,10 +392,10 @@ static void draw_detail() {
            (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
            (t->src_mask & 4) ? "B" : "", t->msgs);
   small(8, 138, C_MUTED, b);
-  snprintf(b, sizeof(b), "%us ago • side key or click: back", (unsigned)((s_now - t->last_ms) / 1000));
+  snprintf(b, sizeof(b), "%us ago | side key or click: back", (unsigned)((s_now - t->last_ms) / 1000));
   small(8, 156, C_MUTED, b);
   draw_bl_toast();
-  s_cv->flush();
+  present();
 }
 
 // ---- spectrum: 2.4 GHz bars up top, CC1101 sweep below, encoder cursor
@@ -358,7 +458,8 @@ static void draw_spectrum() {
     for (int i = 0; i < CC_SWEEP_BINS; i++) { uint32_t d = (uint32_t)labs((long)cc1101_bin_hz(i) - (long)m.hz); if (d < bd) { bd = d; best = i; } }
     int x = X0 + best * PW / CC_SWEEP_BINS;
     s_cv->drawFastVLine(x, B_Y0 + B_H - 3, 3, C_MUTED);
-    small(x - 8, B_Y0 + B_H + 2, C_MUTED, m.l);
+    int lx = x - 8; if (lx > W - 19) lx = W - 19; if (lx < 0) lx = 0;
+    small(lx, B_Y0 + B_H + 2, C_MUTED, m.l);
   }
   // cursor readout
   int cx = X0 + s_mark * PW / CC_SWEEP_BINS;
@@ -367,7 +468,7 @@ static void draw_spectrum() {
   snprintf(b, sizeof(b), "%.2f MHz  %d dBm", cc1101_bin_hz(s_mark) / 1e6, s_swp[s_mark]);
   small(W - 6 - strlen(b) * 6, B_Y0 + 2, C_TEXT, b);
   draw_bl_toast();
-  s_cv->flush();
+  present();
 }
 
 
@@ -381,10 +482,10 @@ static void draw_tx() {
   s_cv->fillRect(0, 0, W, TOP, bg);
   bold(6, 15, fg, running ? "TEST BEACON  ON AIR" : "TEST BEACON  STOPPED");
   char hd[20]; int on = 0; for (int i = 0; i < n; i++) if (txui_enabled(i)) on++;
-  snprintf(hd, sizeof(hd), "%d/%d", on, n);
+  snprintf(hd, sizeof(hd), "%d/%d on", on, n);
   small(W - 6 - strlen(hd) * 6, 7, running ? RGB565(0x5E,0x48,0x10) : C_MUTED, hd);
 
-  const int ROWS_TX = 6, RH = 24, y0 = TOP + 2;
+  const int ROWS_TX = 5, RH = 24, y0 = TOP + 2;   // leaves a band for the hint
   int total = n + 2;                       // master + emergency + paths
   if (s_tx_sel < 0) s_tx_sel = 0; if (s_tx_sel >= total) s_tx_sel = total - 1;
   static int scroll = 0;
@@ -397,24 +498,24 @@ static void draw_tx() {
     int y = y0 + r * RH;
     bool sel = row == s_tx_sel;
     if (sel) { s_cv->fillRoundRect(2, y, W - 4, RH - 2, 4, C_BAR); s_cv->drawRoundRect(2, y, W - 4, RH - 2, 4, C_ACCENT); }
-    if (row == 0) {                        // master transmit
-      bold(10, y + 15, running ? C_OK : C_MUTED, "Transmit");
-      small(W - 60, y + 12, running ? C_OK : C_MUTED, running ? "[ ON  ]" : "[ OFF ]");
-    } else if (row == 1) {                 // emergency flag
-      bool e = txui_emergency();
-      bold(10, y + 15, e ? C_DANGER : C_MUTED, "Emergency status");
-      small(W - 60, y + 12, e ? C_DANGER : C_MUTED, e ? "[ ON  ]" : "[ OFF ]");
+    if (row <= 1) {                        // master transmit, emergency flag
+      bool on = row == 0 ? running : txui_emergency();
+      uint16_t hue = row == 0 ? C_OK : C_DANGER;
+      bold(10, y + 16, on ? hue : C_MUTED, row == 0 ? "TRANSMIT" : "EMERGENCY FLAG");
+      s_cv->fillRoundRect(W - 44, y + 4, 34, 15, 4, on ? (row == 0 ? RGB565(0x12,0x3A,0x20) : RGB565(0x4A,0x14,0x14)) : C_BAR);
+      s_cv->drawRoundRect(W - 44, y + 4, 34, 15, 4, on ? hue : C_EDGE);
+      small(W - 39, y + 8, on ? hue : C_MUTED, on ? "ON" : "off");
     } else {
       int i = row - 2;
       bool on = txui_enabled(i);
       uint16_t col = on ? (running ? C_OK : C_TEXT) : C_MUTED;
-      // carrier chip + id, sent count on the right
-      s_cv->setTextSize(1); s_cv->setTextColor(col); s_cv->setFont(nullptr);
-      s_cv->setCursor(10, y + 6); s_cv->print(txui_carrier(i));
-      char id[16]; snprintf(id, sizeof(id), "%.15s", txui_id(i));
-      s_cv->setCursor(10, y + 15); s_cv->setTextColor(on ? C_TEXT : C_MUTED); s_cv->print(id);
-      char c[10]; snprintf(c, sizeof(c), "%lu", (unsigned long)txui_sent(i));
-      s_cv->setTextColor(C_MUTED); s_cv->setCursor(W - 96, y + 10); s_cv->print(c);
+      // the variant's name (what tells the ten apart), its carrier, sent count
+      char v[16]; snprintf(v, sizeof(v), "%s", ui_tx_variant(txui_id(i)));
+      fit(v, sizeof(v), 92, &FreeSansBold9pt7b);
+      bold(10, y + 16, on ? C_TEXT : C_MUTED, v);
+      small(108, y + 9, col, txui_carrier(i));
+      char c[12]; snprintf(c, sizeof(c), "%lu", (unsigned long)txui_sent(i));
+      small(W - 52 - (int)strlen(c) * 6, y + 9, C_MUTED, c);
       // on/off pill
       s_cv->fillRoundRect(W - 44, y + 4, 34, 15, 4, on ? RGB565(0x12,0x3A,0x20) : C_BAR);
       s_cv->drawRoundRect(W - 44, y + 4, 34, 15, 4, on ? C_OK : C_EDGE);
@@ -423,19 +524,20 @@ static void draw_tx() {
     }
   }
   if (total > ROWS_TX) {
-    int h = (H - y0) * ROWS_TX / total, sy = y0 + (H - y0) * scroll / total;
-    s_cv->fillRect(W - 2, y0, 2, H - y0, C_METER); s_cv->fillRect(W - 2, sy, 2, h, C_MUTED);
+    int span = ROWS_TX * RH, h = span * ROWS_TX / total, sy = y0 + span * scroll / total;
+    s_cv->fillRect(W - 2, y0, 2, span, C_METER); s_cv->fillRect(W - 2, sy, 2, h, C_MUTED);
   }
   draw_bl_toast();
-  small(W - 150, H - 8, C_MUTED, "side key: menu  hold knob: menu");
-  s_cv->flush();
+  s_cv->drawFastHLine(0, H - 14, W, C_EDGE);
+  small(6, H - 10, C_MUTED, "turn: pick  click: on/off  hold: menu");
+  present();
 }
 
 void tembed_power_off() {
   s_cv->fillScreen(C_BG);
   bold(W / 2 - 45, H / 2 - 8, C_TEXT, "POWER OFF");
   small(W / 2 - 65, H / 2 + 14, C_MUTED, "Side button to wake");
-  s_cv->flush();
+  present();
   delay(500);
 
   ring_off();
@@ -457,7 +559,7 @@ static void draw_menu() {
   s_cv->fillScreen(C_BG);
   s_cv->fillRect(0, 0, W, TOP, C_BAR);
   bold(6, 15, C_TEXT, "MENU");
-  char bl[24]; snprintf(bl, sizeof(bl), "Brightness  %s", s_bl == 0 ? "100%" : s_bl == 1 ? "43%" : "12%");
+  char bl[24]; snprintf(bl, sizeof(bl), "Brightness  %s", s_bl == 0 ? "100%" : s_bl == 1 ? "43%" : "25%");
   const char* names[5] = { "Receiver", "Test beacon (TX)", bl, "Power Off", "Back" };
   const char* subs[5]  = { "listen for Remote ID", "transmit test signals", "click to cycle", "deep sleep (side btn wakes)", "return to the screen" };
   const int RH = 28;
@@ -470,7 +572,7 @@ static void draw_menu() {
     if (cur) small(W - 62, y + 12, C_OK, "current");
   }
   draw_bl_toast();
-  s_cv->flush();
+  present();
 }
 
 // ---- input + render loop
@@ -494,14 +596,14 @@ bool ui_begin(uint8_t mode) {
   s_cv = new Arduino_Canvas(W, H, s_gfx);
   if (!s_cv->begin()) return false;
   s_cv->fillScreen(C_BG);
-  s_cv->flush();
+  present();
   ledcAttach(PIN_LCD_BL, 5000, 8);
   ledcWrite(PIN_LCD_BL, BL_LEVELS[s_bl]);
   s_last_input = millis();
   s_cv->fillScreen(C_BG);
   bold(W / 2 - 66, 74, C_TEXT, "ORECCHINO", &FreeSansBold12pt7b);
   small(W / 2 - 60, 96, C_MUTED, mode == UI_MODE_TX ? "starting test beacon" : "starting radios");
-  s_cv->flush();
+  present();
   ring_begin();
   return true;
 }
@@ -600,7 +702,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     if (t_now > 1700000000) {
       struct tm tm_utc;
       gmtime_r(&t_now, &tm_utc);
-      double elev = solar_elevation_deg(37.7749, -122.4194, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
+      // The sun where the app last said we are; San Francisco until it has.
+      double lat = g_home_set ? g_home_lat : 37.7749, lon = g_home_set ? g_home_lon : -122.4194;
+      double elev = solar_elevation_deg(lat, lon, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
                                         tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
       bool night = (elev <= SOLAR_SUNDOWN_ELEVATION_DEG);
       if (night != s_night_mode) {

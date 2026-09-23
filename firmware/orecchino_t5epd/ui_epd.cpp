@@ -626,10 +626,10 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
   }
   text(f9, b, cx + 210, y, BLACK);
 
-  // Grid Row 2: Heading & Messages
+  // Grid Row 2: Heading & range rate (is it coming this way?)
   y += 24;
   text(f9, "HEADING", cx + 12, y, GREY);
-  text(f9, "MESSAGES", cx + 210, y, GREY);
+  text(f9, "RANGE RATE", cx + 210, y, GREY);
 
   y += 20;
   if (!isnan(t->heading)) {
@@ -639,7 +639,10 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
   }
   text(f9, b, cx + 12, y, BLACK);
 
-  snprintf(b, sizeof(b), "%u", t->msgs);
+  float rate;
+  if (ui_range_rate((int)(t - g_tracks), t, s_now, &rate)) ui_rate_text(b, sizeof(b), rate);
+  else snprintf(b, sizeof(b), "%s", g_home_set && t->has_pos ? "measuring" : "--");
+  fit_text(b, sizeof(b), f9, cw - 222);
   text(f9, b, cx + 210, y, BLACK);
 
   // Divider
@@ -1471,20 +1474,14 @@ static void draw_tx() {
       snprintf(cb, sizeof(cb), "%lu sent", (unsigned long)txui_sent(i));
       int cnt_w = text_w(f9, cb);
 
-      // UAS ID, shortened from the head: the variant name after the last
-      // dash is what tells the ten paths apart, so it must survive.
+      // The variant's name is the title: it is what tells the ten paths
+      // apart, and every UAS ID shares the ORECCHINO-TX- head.
       int id_x = cx + cw + 10;
       int max_id_w = (x0 + card_w - 14 - cnt_w - 10) - id_x;
       if (max_id_w < 50) max_id_w = 50;
       char id_b[32];
-      const char* raw_id = txui_id(i) ? txui_id(i) : "";
-      const char* dash = strrchr(raw_id, '-');
-      int tail = dash ? (int)strlen(dash + 1) : 4;
-      if (tail < 4) tail = 4;
-      for (int chars = 40; chars >= tail + 2; chars--) {
-        ui_short_id(id_b, sizeof(id_b), raw_id, tail, chars);
-        if (text_w(f12, id_b) <= max_id_w) break;
-      }
+      snprintf(id_b, sizeof(id_b), "%s", ui_tx_variant(txui_id(i)));
+      fit_text(id_b, sizeof(id_b), f12, max_id_w);
       text(f12, id_b, id_x, y + 26, BLACK);
 
       // Subtitle (self desc)
@@ -1660,6 +1657,114 @@ static void draw_diagnostics() {
   text(f9, "ORECCHINO | LILYGO T5 E-PAPER S3 PRO", 24, 528, BLACK);
 }
 
+// ---- glance mode: after GLANCE_IDLE_MS without a touch or a button, one
+// screen meant to be read across a room -- how many are in range, the
+// nearest, and a black band only when there is an alert. E-paper holds it
+// at no power; it refreshes only when what it says changes.
+#define GLANCE_IDLE_MS 300000UL
+static bool     s_glance = false;
+static uint32_t s_last_input_ms = 0;
+static uint32_t s_glance_sig = 0;
+
+/// Text at an integer scale: every glyph pixel becomes a scale x scale block.
+/// Blocky by design -- the point is legibility at distance, not finesse.
+static int text_big(const GFXfont* f, const char* s, int x, int y, int scale, bool draw) {
+  int x0 = x;
+  for (; *s; s++) {
+    uint8_t c = (uint8_t)*s;
+    if (c < f->first || c > f->last) continue;
+    const GFXglyph* g = &f->glyph[c - f->first];
+    if (draw) {
+      const uint8_t* bm = f->bitmap + g->bitmapOffset;
+      uint16_t bit = 0;
+      for (int yy = 0; yy < g->height; yy++)
+        for (int xx = 0; xx < g->width; xx++, bit++)
+          if (bm[bit >> 3] & (0x80 >> (bit & 7)))
+            rect(x + (g->xOffset + xx) * scale, y + (g->yOffset + yy) * scale, scale, scale, BLACK);
+    }
+    x += g->xAdvance * scale;
+  }
+  return x - x0;
+}
+
+struct Glance { int live, emerg, tfr, bad; bool near; double near_m, near_brg; float near_h; };
+static void glance_facts(Glance* g) {
+  memset(g, 0, sizeof(*g));
+  for (int i = 0; i < TRK_MAX; i++) {
+    const Track* t = &g_tracks[i];
+    if (!t->used || ui_stale(t, s_now)) continue;
+    g->live++;
+    if (t->status == 3) g->emerg++;
+    if (t->in_tfr) g->tfr++;
+    if (t->auth_state == 4) g->bad++;
+    if (g_home_set && t->has_pos) {
+      double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
+      if (!g->near || d < g->near_m) {
+        g->near = true; g->near_m = d;
+        g->near_brg = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon); g->near_h = t->height;
+      }
+    }
+  }
+}
+static uint32_t glance_signature() {
+  Glance g; glance_facts(&g);
+  uint32_t h = 2166136261u;
+  auto mix = [&](uint32_t v) { h ^= v; h *= 16777619u; };
+  mix(g.live); mix(g.emerg); mix(g.tfr); mix(g.bad); mix(g.near);
+  if (g.near) { mix((uint32_t)(g.near_m / 25)); mix((uint32_t)(g.near_brg / 22.5)); mix(isnan(g.near_h) ? 0xFFFF : (int)g.near_h / 10); }
+  return h;
+}
+
+static void draw_glance() {
+  const GFXfont* f24 = &FreeSansBold24pt7b;
+  const GFXfont* f18 = &FreeSansBold18pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  Glance g; glance_facts(&g);
+  epd_hl_set_all_white(&s_hl);
+  char b[96];
+  snprintf(b, sizeof(b), "%d", g.live);
+  const int scale = 6, base = 300;
+  int nw = text_big(f24, b, 40, base, scale, true);
+  int col = 40 + nw + 40;
+  text(f24, g.live == 1 ? "DRONE IN RANGE" : g.live ? "DRONES IN RANGE" : "NO DRONES IN RANGE", col, 170, BLACK);
+  if (g.near) {
+    char r[16];
+    if (g.near_m < 1000) snprintf(r, sizeof(r), "%d m", (int)g.near_m);
+    else snprintf(r, sizeof(r), "%.1f km", g.near_m / 1000);
+    if (isnan(g.near_h)) snprintf(b, sizeof(b), "nearest %s %s", r, cardinal((float)g.near_brg));
+    else snprintf(b, sizeof(b), "nearest %s %s, %d m high", r, cardinal((float)g.near_brg), (int)g.near_h);
+  } else {
+    snprintf(b, sizeof(b), "%s", g.live ? "no position to range from" : "listening on Wi-Fi and Bluetooth");
+  }
+  fit_text(b, sizeof(b), f18, W - col - 24);
+  text(f18, b, col, 226, GREY);
+  // The band: only what is true, in words.
+  b[0] = 0;
+  auto add = [&](int n, const char* one, const char* many) {
+    if (!n) return;
+    size_t l = strlen(b);
+    snprintf(b + l, sizeof(b) - l, "%s%d %s", l ? " | " : "", n, n == 1 ? one : many);
+  };
+  add(g.emerg, "EMERGENCY", "EMERGENCIES");
+  add(g.tfr, "IN A TFR", "IN TFRS");
+  add(g.bad, "ID SIG INVALID", "ID SIGS INVALID");
+  if (b[0]) {
+    rect(40, 330, W - 80, 96, BLACK);
+    const GFXfont* bf = text_w(f24, b) <= W - 80 - 48 ? f24 : f18;   // three alerts: smaller, never cut
+    fit_text(b, sizeof(b), bf, W - 80 - 48);
+    text(bf, b, 64, bf == f24 ? 392 : 388, WHITE);
+  }
+  char when[24] = "";
+  if (periph_has_utc_time()) {
+    uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
+    periph_get_utc_time(&cy, &cm, &cd, &ch, &cmi, &cs);
+    snprintf(when, sizeof(when), "as of %02u:%02uZ | ", ch, cmi);
+  }
+  snprintf(b, sizeof(b), "%stap anywhere for the board", when);
+  text(f12, b, 40, 500, GREY);
+  refresh(true);
+}
+
 static void draw_board(bool force_full) {
   if (s_diag) {
     draw_diagnostics();
@@ -1748,6 +1853,7 @@ bool ui_begin(uint8_t mode) {
   s_ok = true;
   s_now = millis();
   s_last_full = s_now;
+  s_last_input_ms = s_now;
   build_order();
   draw_board(true);
   s_sig_prev = signature();
@@ -1797,8 +1903,31 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   if (!k && was && hold_level == 0 && (now - down > 30)) tap = true;
   was = k;
 
+  // Glance mode: any touch or button only wakes the board, exactly as it was.
+  bool home = periph_home_key();
+  if (s_glance) {
+    TouchEvent ge;
+    bool touched = periph_poll_touch_event(&ge);
+    if (tap || home || touched) {
+      s_glance = false;
+      s_last_input_ms = now;
+      s_sig_prev = 0;
+      build_order();
+      draw_board(true);
+      return;
+    }
+    static uint32_t last_glance = 0;
+    if (now - last_glance >= 3000) {
+      last_glance = now;
+      uint32_t sig = glance_signature();
+      if (sig != s_glance_sig) { s_glance_sig = sig; draw_glance(); }
+    }
+    return;
+  }
+  if (tap || home) s_last_input_ms = now;
+
   // Capacitive round home button below display
-  if (periph_home_key() && !s_diag && !s_inspector && !s_confirm_switch) {
+  if (home && !s_diag && !s_inspector && !s_confirm_switch) {
     if (s_mode == UI_MODE_TX) {
       txui_set_running(!txui_running());
       s_sig_prev = 0;
@@ -1814,7 +1943,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   // Asynchronous touch event consumption (produced on Core 0)
   int tap_x = -1, tap_y = -1, drag_dx = 0, drag_dy = 0;
   TouchEvent evt;
-  if (periph_poll_touch_event(&evt)) {
+  bool touched = periph_poll_touch_event(&evt);
+  if (touched) s_last_input_ms = now;
+  if (touched) {
     // Slop and drag discrimination:
     // Only the open map canvas supports drag/pan. In table, modals, diag,
     // inspector, and on controls (header tabs, footer buttons, zoom buttons, HUD),
@@ -2278,6 +2409,15 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   // signature also moves with time (a contact going stale, an emergency
   // header clearing), with the peripherals (GPS fix, battery), and with
   // expiry, which drops rows without any message announcing it.
+  // Nobody has touched it for a while: switch to glance mode.
+  if (s_mode == UI_MODE_RX && !s_diag && !s_inspector && !s_confirm_switch && !syncing &&
+      now - s_last_input_ms >= GLANCE_IDLE_MS) {
+    s_glance = true;
+    build_order();
+    s_glance_sig = glance_signature();
+    draw_glance();
+    return;
+  }
   static uint32_t last_check = 0;
   if (tap || now - last_check >= 3000) {
     last_check = now;

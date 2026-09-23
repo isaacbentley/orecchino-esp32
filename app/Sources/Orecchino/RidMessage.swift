@@ -26,6 +26,28 @@ struct RidMessage: Decodable {
     var s: Int? = nil
     var n: Int? = nil
     var msg: String? = nil
+    var total: Int? = nil
+
+    // match log records (log / log_done), see DeviceLog
+    var i: Int? = nil
+    var active: Bool? = nil
+    var uas: String? = nil
+    var srcs: Int? = nil
+    var fmts: Int? = nil
+    var ua_type: Int? = nil
+    var first: Int? = nil
+    var last: Int? = nil
+    var dur: Int? = nil
+    var lat: Double? = nil
+    var lon: Double? = nil
+    var max_h: Int? = nil
+    var peak_rssi: Int? = nil
+    var auth_state: String? = nil
+    var tfr: Bool? = nil
+    var emerg: Bool? = nil
+    var msgs: Int? = nil
+    var live: Int? = nil
+    var clock: Bool? = nil
 
     // heartbeat / boot fields
     var up: Int? = nil

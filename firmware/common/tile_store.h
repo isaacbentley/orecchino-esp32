@@ -148,7 +148,7 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
   } else if (!strcmp(cmd, "fs_begin")) {
     char path[72];
     if (!ts_field_str(line, "p", path, sizeof(path)) || strncmp(path, "/tiles/", 7) != 0) {
-      Serial.println("{\"type\":\"fs_err\",\"msg\":\"bad path\"}");
+      Serial.print("{\"type\":\"fs_err\",\"msg\":\"bad path\"}\n");
       return true;
     }
     if (s_ts_file) s_ts_file.close();
@@ -157,7 +157,7 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
     uint32_t needed = size + 16384;  // block-granularity + metadata margin
     while (LittleFS.totalBytes() - LittleFS.usedBytes() < needed) {
       if (!ts_evict_one()) {
-        Serial.println("{\"type\":\"fs_err\",\"msg\":\"full\"}");
+        Serial.print("{\"type\":\"fs_err\",\"msg\":\"full\"}\n");
         return true;
       }
     }
@@ -165,16 +165,16 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
     s_ts_file = LittleFS.open(path, "w");
     s_ts_crc = 0;
     if (!s_ts_file) {
-      Serial.println("{\"type\":\"fs_err\",\"msg\":\"open failed\"}");
+      Serial.print("{\"type\":\"fs_err\",\"msg\":\"open failed\"}\n");
       return true;
     }
-    Serial.println("{\"type\":\"ack\",\"q\":0}");
+    Serial.print("{\"type\":\"ack\",\"q\":0}\n");
   } else if (!strcmp(cmd, "fs_data")) {
     uint32_t seq = 0;
     ts_field_u32(line, "q", &seq);
     const char* p = strstr(line, "\"b64\":\"");
     if (!s_ts_file || !p) {
-      Serial.println("{\"type\":\"fs_err\",\"msg\":\"no file/data\"}");
+      Serial.print("{\"type\":\"fs_err\",\"msg\":\"no file/data\"}\n");
       return true;
     }
     p += 7;
@@ -183,7 +183,7 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
     static uint8_t raw[1024];
     size_t rawlen = 0;
     if (mbedtls_base64_decode(raw, sizeof(raw), &rawlen, (const uint8_t*)p, e - p) != 0) {
-      Serial.println("{\"type\":\"fs_err\",\"msg\":\"b64\"}");
+      Serial.print("{\"type\":\"fs_err\",\"msg\":\"b64\"}\n");
       return true;
     }
     s_ts_file.write(raw, rawlen);

@@ -53,6 +53,13 @@
 
 #include "monocypher.h"
 
+// orecchino: build this file for size even where a sketch's build_opt.h
+// asks for -O2. On an ESP32-S3 the -O2 code outgrows the 16 KB instruction
+// cache: Ed25519 verification measured 24.2 ms at -O2, 16.4 ms at -Os.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize ("Os")
+#endif
+
 // we don't need Argon2
 #define MONOCYPHER_ARGON2_ENABLE 0
 

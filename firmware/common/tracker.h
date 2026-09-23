@@ -33,6 +33,7 @@ struct Track {
   uint8_t  alt_macs[TRK_ALT_MACS][6];  // earlier addresses of the same aircraft
   uint8_t  alt_mac_count;
   char     uas[41];
+  uint8_t  ua_type;     // ODID UA type from the Basic ID, 0 unknown
   int8_t   rssi;
   uint8_t  src_mask;    // bit0 wifi, bit1 nan, bit2 ble
   uint8_t  fmt;         // bit0 ASTM F3411 seen, bit1 GB 46750-2025 seen
@@ -55,13 +56,28 @@ struct Track {
   uint16_t msgs;
   int8_t   peak_rssi;
   float    max_height;   // NAN until known
+  bool     tfr_ever;     // was inside a TFR at some point (for the match log)
+  bool     emerg_ever;   // reported status 3 (emergency) at some point
+  // Duplicate suppression for the serial feed, per source (wifi/nan/ble):
+  // a transmitter repeating an identical frame is reported once a second.
+  uint32_t emit_hash[3];
+  uint32_t emit_ms[3];
 };
 
 // One table for the whole program. Defined in rx_core.h (included exactly
 // once, by the sketch); a `static` here would hand every source file that
 // includes this header its own empty copy — the radio core filling one while
 // the screen reads another.
+//
+// g_tracks is what screens read. On the device the radio core decodes on
+// its own task into a private live table (g_trk_live) and copies it into
+// g_tracks from the loop, so a screen never sees a half-written contact;
+// on the host tests both names are the same table.
 extern Track g_tracks[TRK_MAX];
+extern Track* g_trk_live;
+/// A contact is about to leave the table (expired or evicted): the match
+/// log's chance to record it. Defined in rx_core.h.
+void trk_on_end(const Track* t);
 
 static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
                                     uint32_t now, bool* created) {
@@ -71,7 +87,7 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
   Track* free_slot = nullptr;
   Track* oldest = nullptr;
   for (int i = 0; i < TRK_MAX; i++) {
-    Track* t = &g_tracks[i];
+    Track* t = &g_trk_live[i];
     if (!t->used) {
       if (!free_slot) free_slot = t;
       continue;
@@ -98,6 +114,7 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
   if (!t && by_mac && (!uas || !uas[0] || !by_mac->uas[0])) t = by_mac;
   if (!t) {
     t = free_slot ? free_slot : oldest;   // LRU eviction, never slot 0 forever
+    if (t->used) trk_on_end(t);
     memset(t, 0, sizeof(*t));
     t->used = true;
     t->first_ms = now;
@@ -145,11 +162,18 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
   return t;
 }
 
-static inline void tracker_expire(uint32_t now) {
+/// Drop contacts unheard for TRK_EXPIRE_MS. Returns how many went.
+static inline int tracker_expire(uint32_t now) {
+  int n = 0;
   for (int i = 0; i < TRK_MAX; i++) {
-    if (g_tracks[i].used && now - g_tracks[i].last_ms > TRK_EXPIRE_MS)
-      g_tracks[i].used = false;
+    Track* t = &g_trk_live[i];
+    if (t->used && now - t->last_ms > TRK_EXPIRE_MS) {
+      trk_on_end(t);
+      t->used = false;
+      n++;
+    }
   }
+  return n;
 }
 
 static inline int tracker_count() {

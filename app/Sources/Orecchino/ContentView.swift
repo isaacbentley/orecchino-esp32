@@ -31,13 +31,18 @@ struct ContentView: View {
                 }
                 .help("Inject two simulated drones")
                 Menu {
+                    Button("Match Log…") { model.deviceLog.isPresented = true }
+                    Divider()
                     Button("Sync Map Tiles to Receiver") { model.tileSync.start() }
                     if let l = model.tileSync.phase.label { Text(l) }
                 } label: {
                     Label("Device", systemImage: "square.and.arrow.down.on.square")
                 }
-                .help("Download map tiles and push them to the receiver's screen")
+                .help("The receiver's match log, and map tiles for its screen")
             }
+        }
+        .sheet(isPresented: Bindable(model.deviceLog).isPresented) {
+            DeviceLogView().environment(model)
         }
     }
 }

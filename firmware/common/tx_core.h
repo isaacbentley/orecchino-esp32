@@ -20,9 +20,7 @@
 #define TX_NAME      "orecchino-tx"
 #define TX_VERSION   "0.3.0"
 #define WIFI_CHANNEL 6      // Open Drone ID default / NAN social channel
-#define BEACON_MS    300    // WiFi beacon, ~3 Hz
-#define NAN_MS       400    // WiFi NAN SDF
-#define BLE_MS       500    // per BLE instance
+#define TX_PERIOD_MS 5000   // every path transmits once every 5 s
 #define ORBIT_M      50.0   // each aircraft's own little circle
 
 // ---------------------------------------------------------------- paths
@@ -354,6 +352,7 @@ static NimBLEExtAdvertising* s_adv = nullptr;
 // started set repeats its last payload for ever (duration 0), so whoever
 // switches a path off has to stop its set as well -- see tx_set_enabled().
 static int s_inst_path[2] = {-1, -1};
+static uint32_t s_inst_ms[2] = {0, 0};   // when each set last started
 // The precompiled BLE controller only grants two advertising sets, so the
 // three BLE flavours time-share them: 1M keeps set 0, while coded (long
 // range) and legacy alternate on set 1. Each transmission fully
@@ -393,6 +392,10 @@ static void tx_ble(int pid, const uint8_t* payload, int payload_len,
       pid == P_BLELR ? BLE_HCI_LE_PHY_CODED : BLE_HCI_LE_PHY_1M);
   adv.setConnectable(false);
   adv.setScannable(false);
+  // The set repeats its payload on its own between updates; at the same
+  // interval (units of 0.625 ms) it adds no transmissions of its own.
+  adv.setMinInterval(TX_PERIOD_MS * 8 / 5);
+  adv.setMaxInterval(TX_PERIOD_MS * 8 / 5);
   // Each aircraft advertises from its own address, like real hardware.
   // Random *static* addresses need their top two bits set; NimBLE takes
   // the bytes LSB-first, so mac[0] is the significant end.
@@ -414,6 +417,7 @@ static void tx_ble(int pid, const uint8_t* payload, int payload_len,
   bool start_ok = set_ok && s_adv->start(inst);
   if (start_ok) {
     s_inst_path[inst] = pid;
+    s_inst_ms[inst] = now;
     s_tx[pid]++;
     s_counter[pid]++;
   } else {
@@ -543,19 +547,24 @@ static void tx_tick(uint32_t now) {
   poll_serial();
 
   // One aircraft per loop pass, round-robin, so the shared 2.4 GHz front
-  // end is never asked to serve two paths at once. Location must go out at
-  // 1 Hz; everything here is comfortably faster.
+  // end is never asked to serve two paths at once. Each path goes out once
+  // every TX_PERIOD_MS: a message pack carries Location every time, while
+  // the single-message paths (SINGLE, BLE4) need five transmissions to
+  // cycle through Basic ID, Location, Self ID, System and Operator ID.
   static uint32_t last_tx_ms[P_COUNT] = {0};
   static int rr = 0;
   if (s_running) {
-    static const uint16_t PATH_MS[P_COUNT] = {
-      BEACON_MS, NAN_MS, BLE_MS, 2000, 2000,
-      450, 450, 450, 450, 450,
-    };
     uint8_t payload[240];
     for (int k = 0; k < P_COUNT; k++) {
       int pid = (rr + k) % P_COUNT;
-      if (!s_enabled[pid] || now - last_tx_ms[pid] < PATH_MS[pid]) continue;
+      if (!s_enabled[pid] || now - last_tx_ms[pid] < TX_PERIOD_MS) continue;
+      // Coded and legacy share advertising set 1. Taking it straight after
+      // the other started would cut that one off before its first packet
+      // (the set only repeats once a period), so each holds it for half a
+      // period; the two settle half a period apart.
+      if ((pid == P_BLELR || pid == P_BLE4) && s_inst_path[1] >= 0 && s_inst_path[1] != pid &&
+          now - s_inst_ms[1] < TX_PERIOD_MS / 2)
+        continue;
       last_tx_ms[pid] = now;
       rr = (pid + 1) % P_COUNT;
 

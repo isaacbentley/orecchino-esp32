@@ -38,6 +38,12 @@ if [ -d "$GFX/Fonts" ]; then
     -I tests/host_shim -I firmware/common -I firmware/orecchino_t5epd -I "$GFX" \
     tests/t5_render_test.cpp tests/host_shim/shim.cpp -o /tmp/orecchino_t5_render
   T5_OUT=/tmp /tmp/orecchino_t5_render     # scenes land in /tmp/t5_*.pgm
+  echo "== T-Embed handheld render (C++ against host shims: text on screen and clear, range rate, partial flush)"
+  c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wno-unused-function \
+    -Wno-unused-variable -Wno-unused-but-set-variable -Wno-deprecated-declarations \
+    -I tests/host_shim -I firmware/common -I firmware/orecchino_tembed -I "$GFX" \
+    tests/tembed_render_test.cpp tests/host_shim/shim.cpp -o /tmp/orecchino_tembed_render
+  TEMBED_OUT=/tmp /tmp/orecchino_tembed_render   # scenes land in /tmp/tembed_*.ppm
 else
   echo "(skipped: Adafruit GFX library with its Fonts/ not found at $GFX)"
 fi

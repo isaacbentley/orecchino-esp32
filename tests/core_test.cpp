@@ -81,14 +81,41 @@ static void test_tx(void) {
   for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, i == P_BLE4);
   NimBLEDevice::adv.starts.clear();
   g_millis = 10000;
-  run_ticks(20000 / 7);
+  run_ticks(60000 / 7);
   bool seen[6] = {false}; int nb = 0;
   for (auto& r : NimBLEDevice::adv.starts)
     if (r.adv.data.size() > 6) { seen[(r.adv.data[6] >> 4) % 6] = true; nb++; }
-  CHECK(nb >= 9 && nb <= 11, "tx: BLE4 sent ~10 advertisements in 20 s");
+  const int per60 = 60000 / TX_PERIOD_MS;
+  CHECK(nb >= per60 - 1 && nb <= per60 + 1, "tx: BLE4 sent one advertisement per TX_PERIOD_MS over 60 s");
   CHECK(seen[0] && seen[1] && seen[3] && seen[4] && seen[5], "tx: BLE4 rotated through Basic/Location/Self/System/Operator");
 
   for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, true);
+  uint32_t sent0[P_COUNT]; memcpy(sent0, s_tx, sizeof sent0);
+  size_t start0 = NimBLEDevice::adv.starts.size();
+  run_ticks(60000 / 7);
+  bool every_5s = true;
+  for (int i = 0; i < P_COUNT; i++) {
+    uint32_t d = s_tx[i] - sent0[i];
+    if (i == P_NAN) d /= 2;   // each NAN transmission is a sync beacon plus the SDF
+    if ((int)d < 60000 / TX_PERIOD_MS - 1 || (int)d > 60000 / TX_PERIOD_MS + 1) every_5s = false;
+  }
+  CHECK(every_5s && TX_PERIOD_MS == 5000, "tx: with every path on, each transmits once every TX_PERIOD_MS (5 s)");
+  // Set 1 carries coded and legacy in turn; each must keep it long enough to
+  // go out (on air, BLE4 retaking the set 2 ms after BLELR meant BLELR was
+  // never heard).
+  uint32_t shortest = UINT32_MAX;
+  for (size_t i = start0 + 1; i < NimBLEDevice::adv.starts.size(); i++) {
+    const AdvStartRec& a = NimBLEDevice::adv.starts[i];
+    if (a.inst != 1) continue;
+    for (size_t j = i; j-- > start0;) {
+      const AdvStartRec& p = NimBLEDevice::adv.starts[j];
+      if (p.inst != 1) continue;
+      if (p.adv.pri != a.adv.pri || p.adv.legacy != a.adv.legacy) shortest = std::min(shortest, a.at - p.at);
+      break;
+    }
+  }
+  CHECK(shortest != UINT32_MAX && shortest >= TX_PERIOD_MS / 2 - 50,
+        "tx: coded and legacy each hold the shared set for half a period");
   run_ticks(400);
   CHECK(NimBLEDevice::adv.active[0] && NimBLEDevice::adv.active[1], "tx: both advertising sets active while running");
   tx_set_running(false);
@@ -274,11 +301,95 @@ static void test_sniffer(void) {
   CHECK(t && !t->has_pos, "sniffer: 0,0 is no position");
 }
 
+// The fixed-point JSON writer against printf, the duplicate filter, and the
+// match log: contacts that end are recorded, survive a save and reload, and
+// come back over log_get.
+static void test_json_and_log(void) {
+  bool same = true;
+  const double vals[] = { 0, 1, -1, 37.8039, -122.464, 0.05, 123.456789, 1e-8, -0.0000001, 359.4, 99999.99 };
+  for (double v : vals) for (int d = 0; d <= 7; d++) {
+    char want[64]; snprintf(want, sizeof want, "%.*f", d, v);
+    if (!strcmp(want, "-0") || !strncmp(want, "-0.", 3)) {       // printf keeps the sign of a value that rounds to 0
+      bool zero = true; for (const char* c = want + 1; *c; c++) if (*c != '0' && *c != '.') zero = false;
+      if (zero) memmove(want, want + 1, strlen(want));
+    }
+    jbegin(s_jb, sizeof s_jb); jfix(v, d); *s_jp = 0;
+    if (strcmp(s_jb, want)) { printf("     jfix(%g, %d) = %s, printf %s\n", v, d, s_jb, want); same = false; }
+  }
+  CHECK(same, "json: fixed-point numbers match printf");
+  jbegin(s_jb, sizeof s_jb); jfix(NAN, 2); *s_jp = 0;
+  CHECK(!strcmp(s_jb, "null"), "json: a non-finite number is null, not nan");
+
+  uint8_t pack[240];
+  int n = build_signed(pack, false);
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 1), 25);
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 1), 25);
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 1), 25);
+  CHECK(count_in(Serial.out, "\"type\":\"rid\"") == 1, "json: an unchanged frame repeated within a second is reported once");
+  CHECK(by_mac(M1) && by_mac(M1)->msgs == 3, "json: ...but every repeat still updates the contact");
+  s_rx_now += 1000;
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 1), 25);
+  CHECK(count_in(Serial.out, "\"type\":\"rid\"") == 2, "json: ...and again after a second");
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 0), 25);
+  CHECK(count_in(Serial.out, "\"type\":\"rid\"") == 3, "json: a different frame is reported at once");
+  feed(SRC_BLE, M1, MSG(pack, 0), 25);
+  CHECK(count_in(Serial.out, "\"type\":\"rid\"") == 4, "json: the same frame on another source is reported at once");
+  CHECK(Serial.out.find("\"lat\":37.8000000") != std::string::npos && Serial.out.find("\"dir\":90,") != std::string::npos,
+        "json: location fields keep their precision");
+  (void)n;
+
+  // Match log.
+  log_clear();
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  Serial.in = "{\"cmd\":\"set_time\",\"utc\":1790000000}\n"; Serial.in_pos = 0;
+  uint32_t set_ms = s_rx_now;
+  rx_tick(s_rx_now);
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 0), 25);    // Basic ID: ORECCHINO-TX-AUTH
+  uint32_t first = s_rx_now;
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 1), 25);    // Location
+  s_rx_now += TRK_EXPIRE_MS + 10000;
+  rx_tick(s_rx_now);
+  CHECK(tracker_count() == 0 && s_log_n == 1, "log: an expired contact becomes a record");
+  const LogRec* r = log_at(0);
+  CHECK(!strcmp(r->uas, "ORECCHINO-TX-AUTH") && r->src_mask == 1 && r->lat_e5 == 3780000 && r->max_height == 60,
+        "log: the record keeps ID, source, position and height");
+  CHECK(r->first_utc == 1790000000 - set_ms / 1000 + first / 1000 && r->last_utc >= r->first_utc,
+        "log: times are wall-clock once set_time has arrived");
+  s_rx_now += LOG_SAVE_MS + 1;
+  rx_tick(s_rx_now);                              // debounced save
+  CHECK(!s_log_dirty, "log: saved to NVS after it settles");
+  memset(s_log, 0, sizeof s_log); s_log_n = 0; s_log_head = 0; s_log_total = 0;
+  log_load();
+  CHECK(s_log_n == 1 && !strcmp(log_at(0)->uas, "ORECCHINO-TX-AUTH"), "log: a reload restores it");
+
+  // Evictions are recorded too: fill the table past TRK_MAX.
+  for (int i = 0; i < TRK_MAX + 2; i++) {
+    uint8_t m[6] = { 0x02, 0, 0, 0, 0x10, (uint8_t)i };
+    bool c; tracker_upsert(m, nullptr, s_rx_now + i, &c);
+  }
+  CHECK(s_log_n == 3, "log: a contact evicted for room is recorded");
+
+  Serial.out.clear();
+  Serial.in = "{\"cmd\":\"log_get\"}\n"; Serial.in_pos = 0;
+  rx_tick(s_rx_now);
+  CHECK(count_in(Serial.out, "\"type\":\"log\"") == 3 + TRK_MAX && count_in(Serial.out, "\"active\":true") == TRK_MAX &&
+        Serial.out.find("\"type\":\"log_done\",\"n\":3,\"live\":16") != std::string::npos,
+        "log: log_get sends every record, the live contacts, then log_done");
+  CHECK(Serial.out.find("\"uas\":\"ORECCHINO-TX-AUTH\"") != std::string::npos && Serial.out.find("\"clock\":true") != std::string::npos,
+        "log: records carry the ID, and log_done says the clock is set");
+  Serial.out.clear();
+  Serial.in = "{\"cmd\":\"log_clear\"}\n"; Serial.in_pos = 0;
+  rx_tick(s_rx_now);
+  CHECK(s_log_n == 0 && Serial.out.find("log_cleared") != std::string::npos, "log: log_clear empties it and says so");
+}
+
 int main(void) {
   test_tracker();
   test_tx();
   test_rx();
   test_sniffer();
+  test_json_and_log();
   if (g_fails) printf("%d FAILED\n", g_fails); else printf("all core checks passed\n");
   return g_fails ? 1 : 0;
 }

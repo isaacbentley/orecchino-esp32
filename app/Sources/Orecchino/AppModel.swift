@@ -237,6 +237,7 @@ final class AppModel {
     var updateTick = 0
     let tfr = TFRService()
     let tileSync = TileSync()
+    let deviceLog = DeviceLog()
     let location = LocationService()
     /// False whenever the device needs a fresh home/TFR context push (on
     /// connect, first location fix, TFR refresh, and daily).
@@ -334,6 +335,7 @@ final class AppModel {
                         if self.tileSync.running {
                             self.tileSync.cancel()
                         }
+                        self.deviceLog.cancel()
                     }
                 }
             }
@@ -409,6 +411,8 @@ final class AppModel {
             ingestRid(msg, demo: demo)
         case "ack", "fs_ok", "fs_err", "fs_f", "fs_ls_done":
             tileSync.handle(msg)
+        case "log", "log_done", "log_cleared":
+            deviceLog.handle(msg)
         default:
             break
         }

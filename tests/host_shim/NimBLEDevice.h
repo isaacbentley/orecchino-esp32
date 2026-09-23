@@ -10,6 +10,7 @@ class NimBLEAddress { public: uint8_t v[6] = {0}; uint8_t type = 0; NimBLEAddres
 class NimBLEExtAdvertisement { public:
   NimBLEExtAdvertisement(uint8_t p = 1, uint8_t s = 1) : pri(p), sec(s) {}
   void setConnectable(bool) {} void setScannable(bool) {}
+  void setMinInterval(uint32_t) {} void setMaxInterval(uint32_t) {}
   void setAddress(const NimBLEAddress& a) { addr = a; }
   void setLegacyAdvertising(bool b) { legacy = b; }
   void setData(const uint8_t* d, size_t n) { data.assign(d, d + n); }

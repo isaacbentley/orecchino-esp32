@@ -16,8 +16,11 @@ Compiled into or referenced by this project. Audited 2026-08-17.
 ## Vendored / derived code
 
 - `firmware/libraries/Monocypher/` — [Monocypher](https://monocypher.org)
-  3.1.2 (BSD-2-Clause OR CC0-1.0), vendored unmodified. Ed25519 signing for
-  the test beacon's Authentication messages.
+  3.1.2 (BSD-2-Clause OR CC0-1.0), vendored with one change: a
+  `#pragma GCC optimize ("Os")` so the file builds for size even where a
+  sketch asks for `-O2` (Ed25519 verification measured 24.2 ms at `-O2`,
+  16.4 ms at `-Os` on an ESP32-S3). Ed25519 signing for the test beacon's
+  Authentication messages and verification on the receivers.
 - `firmware/libraries/epdiy/` — [epdiy](https://github.com/vroland/epdiy)
   2.1.3 (LGPL-3.0-or-later): `src/`, its `library.properties`, `LICENSE`
   and `README.md`. Drives the T5 E-Paper S3 Pro's ED047TC1 panel as an

@@ -46,6 +46,21 @@ the board adds — a screen, a buzzer, a spectrum view, a tile store — hangs
 off four small hook functions, so a new board is a display driver and a
 layout, nothing more. The headless USB stick is twenty lines.
 
+Nothing on the detection path waits for the board's screen. The radio
+callbacks queue matched frames; a decode task wakes the moment one lands,
+decodes it, updates the contact and writes its JSON line; a timer hops the
+Wi-Fi channel. The sketch's loop only reads commands from the app, ages
+contacts out, saves the match log, and copies the track table for the
+screen, so an e-paper refresh that takes a second no longer delays or drops
+a detection.
+
+Every receiver also keeps a **match log**: one record for each drone it
+has lost track of (ID, addresses, how it was heard, first and last heard,
+last position, highest altitude, strongest signal, whether it was ever in
+a flight restriction or reported an emergency, and its signature verdict).
+The last 48 records are kept in flash and survive power cycles, so a
+receiver left out on its own can be read back later from the Mac app.
+
 ## USB receiver — `firmware/orecchino_fw`
 
 Install the one library it needs, then build and flash:
@@ -110,17 +125,22 @@ The LilyGO T-Embed CC1101 is a battery handheld: a 1.9-inch strip screen,
 a rotary encoder, a side button, an 8-LED ring, and a CC1101 sub-GHz
 radio. Its console is built around the knob. The left of the strip is the
 contact list; the right is the selected contact's live numbers — signal,
-height, speed, and when the Mac app has pushed your position, range and
-bearing. Turn the knob to walk the list, click it for a full-screen
-contact with big range and bearing digits (the handheld's job is to walk
-toward the drone), click again to return.
+height, speed, and when the Mac app has pushed your position, a small
+north-up compass with a needle toward the aircraft, its range and bearing,
+and whether it is **closing** on you or opening (worked out from its
+range over successive fixes). A contact with no ID yet is listed by the
+end of its address. Turn the knob to walk the list, click it for a
+full-screen contact with big range and bearing digits, the compass and the
+closing speed (the handheld's job is to walk toward the drone), click
+again to return. Only the parts of the screen that changed are sent to
+the panel, so a clock tick costs a tenth of a full frame.
 
 The handheld does two jobs, chosen from a boot menu you reach by holding
 the knob for a second; the choice is saved and survives a power cycle.
 **Receiver** is the default. **Test beacon** turns the handheld into the
 Remote ID transmitter described under "Test beacon" below, with the ten
-transmit variants shown as a list on the strip — turn the knob to a variant
-and click to switch it on or off, so you can radiate exactly one air
+transmit variants listed by name (WIFI, BLE5, AUTHBAD, ...) with their
+carrier — turn the knob to a variant and click to switch it on or off, so you can radiate exactly one air
 interface or all of them, with a master transmit toggle and an emergency
 flag at the top. Switching modes reboots into the other one, because the
 two use the radios differently.
@@ -132,7 +152,9 @@ LEDs light follows the strongest contact's signal, so the ring reads as a
 signal meter from across the room.
 
 The backlight dims to 25% after two minutes without input and wakes on any touch of
-the knob or key — never while a danger alert is live. The side button is
+the knob or key — never while a danger alert is live. After sunset where
+the Mac app last placed you it runs 30% dimmer (the app sets the clock
+this needs whenever it connects). The side button is
 **Back** from anywhere — detail, menu, beacon list, spectrum — and brightness
 is a menu item; hold the side button for a spectrum view that
 shows 2.4 GHz activity by Wi-Fi channel and uses the CC1101 to sweep
@@ -164,8 +186,18 @@ tail that tells a fleet apart survives, and plot labels are placed only
 where they fit, the selected aircraft's and any alert's first. A loud row
 says why in words — `EMERGENCY REPORTED`, `ID SIG INVALID`, `TFR MATCH` —
 never one word for all three. Without a pushed operator position the plot
-becomes a selected-contact card instead. The header turns solid black as
-the alert bar.
+becomes a selected-contact card instead; with one, the card's range rate
+says whether the aircraft is closing on you or opening. The header turns
+solid black as the alert bar. In test beacon mode each card is titled by
+its variant (WIFI, NAN, BLE5, ... AUTHBAD).
+
+Left untouched for five minutes, the board switches to **glance mode**, a
+screen meant to be read across a room: how many drones are in range in
+numerals a fifth of the screen tall, the nearest one's range, bearing and
+height, and a black band that appears only when there is an alert, saying
+which (`1 EMERGENCY | 1 IN A TFR`). E-paper holds it without power, and it
+refreshes only when what it says changes. Any touch or button brings back
+the board exactly as it was, without acting on that touch.
 
 It also carries an offline map — the same tiles the SenseCAP uses, pushed
 by the Mac app's "Sync Map Tiles" button over USB. There is no second tile
@@ -318,6 +350,11 @@ What it does:
 - Finds the receiver's USB port by itself and reconnects after unplugs,
   and sets the receiver's clock whenever it connects and with each
   airspace-data refresh (the boards have no network of their own)
+- Device > Match Log reads the receiver's match log: every drone it has
+  lost track of, even while no Mac was connected, newest first, with the
+  ones it still holds on top. It can be exported as CSV or cleared. Times
+  need the receiver's clock, which the app sets on connect; records made
+  before that say so instead of showing a wrong date
 - A demo mode with two simulated drones, so the UI can be tried with no
   hardware: a persistent SIMULATION ACTIVE banner, a SIMULATED badge on
   every simulated row, marker and card, and "(N simulated)" in the count
@@ -341,6 +378,34 @@ Each decoded broadcast is one JSON object per line:
 
 Any device that speaks this format over a serial port can feed the app —
 an SDR pipeline works just as well as the ESP32 receivers.
+
+A transmitter repeating an identical frame (a BLE advertisement is resent
+many times a second) is reported at most once a second per path; the
+contact on the receiver still counts every copy. Any change in the frame
+is reported at once.
+
+The app can also send commands, one JSON object per line: `set_time`
+(UTC seconds; every receiver uses it for match-log times, the T5 also sets
+its RTC and answers with what the RTC holds), `set_home`, `tfr_clear` and
+`tfr_add` (the flight restrictions around the Mac), the `fs_*` tile-sync
+commands (T5 and SenseCAP only), and the match log's `log_get` and
+`log_clear`. `log_get` answers with one line per record, oldest first,
+then one per contact still being tracked (`"active":true`), then a
+`log_done` line:
+
+```json
+{"type":"log","i":7,"active":false,"uas":"1581F5FHD23AB00D","mac":"60:60:1F:AA:BB:CC",
+ "srcs":5,"fmts":1,"ua_type":2,"first":1790000000,"last":1790000312,"dur":312,
+ "lat":37.80390,"lon":-122.46400,"max_h":118,"peak_rssi":-58,
+ "auth_state":"none","tfr":true,"emerg":false,"msgs":644}
+{"type":"log_done","n":1,"live":0,"total":7,"clock":true}
+```
+
+`srcs` is a bit mask (1 Wi-Fi beacon, 2 NAN, 4 BLE), `fmts` another (1 ASTM
+F3411, 2 GB 46750). `first` and `last` are UTC seconds, 0 when the clock was
+not set when the record was made; `clock` in `log_done` says whether it is
+set now. `total` counts every record ever written, so a gap between it and
+the records returned is how many have been overwritten.
 
 Every line says which wire format spoke: `"proto"` is the ASTM F3411
 protocol version from the message header, and `"fmt":"gb46750"` replaces
@@ -381,11 +446,17 @@ names the path that isn't getting through:
 
 | UAS ID | Path | Height |
 | --- | --- | --- |
-| `ORECCHINO-TEST-WIFI` | WiFi beacon, vendor IE, channel 6 | 60 m |
-| `ORECCHINO-TEST-NAN` | WiFi NAN service discovery frame | 75 m |
-| `ORECCHINO-TEST-BLE5` | BLE 5 extended advertising, 1M PHY | 90 m |
-| `ORECCHINO-TEST-BLELR` | BLE 5 extended, coded PHY (long range) | 105 m |
-| `ORECCHINO-TEST-BLE4` | BLE 4 legacy, one message per advertisement | 120 m |
+| `ORECCHINO-TX-WIFI` | WiFi beacon, vendor IE, channel 6 | 60 m |
+| `ORECCHINO-TX-NAN` | WiFi NAN service discovery frame | 75 m |
+| `ORECCHINO-TX-BLE5` | BLE 5 extended advertising, 1M PHY | 90 m |
+| `ORECCHINO-TX-BLELR` | BLE 5 extended, coded PHY (long range) | 105 m |
+| `ORECCHINO-TX-BLE4` | BLE 4 legacy, one message per advertisement | 120 m |
+
+Every path transmits once every 5 seconds, which keeps the air quiet on a
+bench full of receivers. A message pack carries Location each time; the
+paths that send one message per transmission (BLE4, and the SINGLE format
+variant) take five transmissions, 25 seconds, to cycle through all of them.
+This is slower than the 1 Hz Location rate a real aircraft must keep.
 
 The five orbit centres sit on a 200 m (~⅛ mile) ring around the home point
 at 72° intervals, each at its own altitude, so the markers are clearly
@@ -443,15 +514,19 @@ and the app are generated from `tools/uas_models.json` by
 on the host too, against the shims in `tests/host_shim`: one aircraft staying
 one contact across its Wi-Fi and BLE addresses, Authentication pages
 assembled across frames, the beacon's format variants reaching the encoder,
-and the transmitter's off switches actually silencing its BLE advertising
-sets. The T5 board's drawing code is rendered on the host too, with the
+the transmitter's off switches actually silencing its BLE advertising
+sets and its once-every-5-seconds schedule, the JSON writer's numbers
+against printf's, repeated frames reported once a second, and the match
+log recording expired and evicted contacts, surviving a save and reload,
+and answering `log_get` and `log_clear`. The T5 board's drawing code is rendered on the host too, with the
 real font bitmaps, against a stress fixture of twelve contacts sharing a
 serial prefix: every scene must come out with no two text runs colliding,
 and the selection must survive a re-sort, an alert and an expiry (the
 scenes are written to `/tmp/t5_*.pgm` for eyes). That check needs the
 Adafruit GFX library's `Fonts/` in `~/Documents/Arduino/libraries` and is
 skipped without it. App tests cover the serial format, checksums, tile
-math, identity conflicts between tracks, and tile-sync state.
+math, identity conflicts between tracks, tile-sync state, and reading,
+ordering and exporting the match log.
 
 ## License
 

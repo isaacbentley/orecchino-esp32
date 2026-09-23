@@ -19,8 +19,20 @@
 //
 // Output: one JSON object per line on the serial port.
 //   {"type":"boot", ...}   once at startup
-//   {"type":"rid",  ...}   one per decoded Remote ID transmission
+//   {"type":"rid",  ...}   per decoded Remote ID frame; a frame repeated
+//                          unchanged is reported at most once a second
 //   {"type":"hb",   ...}   heartbeat with counters every 2 s
+//   {"type":"log",  ...}   match log records, on {"cmd":"log_get"}
+//
+// Timing. On the device nothing on the detection path waits for the
+// sketch's loop(): the radio callbacks queue matched frames, a decode task
+// blocks on that queue and handles each frame as it lands, and an esp_timer
+// hops the Wi-Fi channel. loop() only reads host lines, expires contacts,
+// saves the match log and copies the track table for the screen, so a slow
+// e-paper refresh no longer delays or drops a detection. Every JSON line
+// goes out in a single Serial write (each write is atomic across tasks).
+// The host tests build without ESP_PLATFORM and run the same code
+// synchronously from rx_tick().
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
@@ -31,6 +43,19 @@
 #include "odid_decode.h"
 #include "odid_verify.h"
 #include "tracker.h"
+#include "match_log.h"
+
+#ifndef RX_ASYNC                 // a sketch may force the synchronous path
+#if defined(ESP_PLATFORM)
+#define RX_ASYNC 1
+#else
+#define RX_ASYNC 0
+#endif
+#endif
+#if defined(ESP_PLATFORM)
+#include "esp_timer.h"
+#include <sys/time.h>
+#endif
 
 #define FW_NAME    "orecchino"
 #define FW_VERSION "0.5.0"
@@ -72,7 +97,19 @@ static volatile uint32_t s_cnt_rid         = 0;
 static volatile uint32_t s_cnt_pfail       = 0;  // matched but failed decode
 static volatile uint32_t s_cnt_dropped     = 0;
 uint32_t                 g_seen_count      = 0;  // unique drones since boot
-Track                    g_tracks[TRK_MAX];      // the one track table
+Track                    g_tracks[TRK_MAX];      // what the screens read
+#if RX_ASYNC
+static Track             s_live[TRK_MAX];        // the decode task's table
+Track*                   g_trk_live        = s_live;
+static SemaphoreHandle_t s_mx;                   // guards s_live, TFRs, home, log
+#define RX_LOCK()   xSemaphoreTake(s_mx, portMAX_DELAY)
+#define RX_UNLOCK() xSemaphoreGive(s_mx)
+#else
+Track*                   g_trk_live        = g_tracks;
+#define RX_LOCK()   ((void)0)
+#define RX_UNLOCK() ((void)0)
+#endif
+static volatile uint32_t s_live_gen        = 0;  // bumped on every table change
 static volatile uint8_t  s_cur_chan        = 6;
 static bool s_ble_ok  = false;
 static bool s_ble_ext = false;
@@ -88,7 +125,9 @@ static bool s_ble_ext = false;
 /// Every promiscuous frame's energy (Wi-Fi task context: be quick).
 void rx_hook_wifi_frame(uint8_t chan, int8_t rssi);
 /// True while something else owns the radios (spectrum view): the core
-/// stops hopping, drops matches, and leaves the BLE scanner down.
+/// stops hopping, drops matches, and leaves the BLE scanner down. Called
+/// from the radio callbacks and the hop timer, so it must be a plain read:
+/// no locks, no drawing.
 bool rx_hook_paused();
 /// A host line the core does not recognise. Return true if handled.
 bool rx_hook_host_line(const char* cmd, char* line, uint32_t now);
@@ -188,6 +227,28 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
   }
 }
 
+static void rx_set_channel(uint8_t ch) {
+  s_cur_chan = ch;
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+}
+
+#if RX_ASYNC
+// Channel hopping on an esp_timer: dwell times hold even while the loop is
+// busy drawing. While a board hook has the radios (spectrum view) the timer
+// just checks back every 50 ms and leaves the channel to the sketch.
+static esp_timer_handle_t s_hop_timer;
+static size_t s_hop_idx = 0;
+static void hop_cb(void*) {
+  uint32_t next_ms = 50;
+  if (!rx_hook_paused()) {
+    s_hop_idx = (s_hop_idx + 1) % HOP_N;
+    rx_set_channel(HOP[s_hop_idx].chan);
+    next_ms = HOP[s_hop_idx].dwell_ms;
+  }
+  esp_timer_start_once(s_hop_timer, (uint64_t)next_ms * 1000);
+}
+#endif
+
 static void wifi_start_sniffer() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -227,6 +288,95 @@ static void handle_adv(const uint8_t* addr, int rssi, uint8_t phy,
   }
 }
 
+#if defined(ESP_PLATFORM) && CONFIG_BT_NIMBLE_EXT_ADV
+// Straight on NimBLE's GAP layer rather than through NimBLEScan: that class
+// builds a NimBLEAdvertisedDevice (a heap object with a copy of the payload)
+// for every advertiser in range, searches its result list on every report
+// and frees the object again -- per phone, watch and tag, dozens a second,
+// almost none of them Remote ID. Here a report is scanned where it lies;
+// only an extended advertisement that arrives in fragments is copied, into
+// a small fixed table, until its last fragment lands.
+
+struct BleFrag { bool used; uint8_t addr[6], sid; uint16_t len; uint32_t ms; uint8_t data[256]; };
+static BleFrag s_frag[4];
+static bool    s_ble_scanning = false;
+static void    rx_ble_scan(bool on);
+
+static void ble_report(const ble_addr_t* a, int rssi, uint8_t phy, const uint8_t* data, int len) {
+  uint8_t mac[6];
+  for (int i = 0; i < 6; i++) mac[i] = a->val[5 - i];   // NimBLE keeps addresses LSB first
+  handle_adv(mac, rssi, phy, data, len);
+}
+
+static int rx_gap_event(struct ble_gap_event* ev, void*) {
+  if (ev->type == BLE_GAP_EVENT_EXT_DISC) {
+    const struct ble_gap_ext_disc_desc& d = ev->ext_disc;
+    uint8_t phy = d.prim_phy;                        // 1 = 1M, 3 = coded
+    if (d.sec_phy == 3) phy = 3;                     // payload rode long range
+    // A fragment continues an assembly for the same advertiser and set.
+    // One whose last fragment never came (older than a second) is dropped,
+    // not continued: the next advertisement must not land on its tail.
+    BleFrag* f = nullptr;
+    uint32_t now_ms = millis();
+    for (auto& x : s_frag)
+      if (x.used && x.sid == d.sid && !memcmp(x.addr, d.addr.val, 6)) {
+        if (now_ms - x.ms > 1000) x.used = false; else f = &x;
+        break;
+      }
+    bool more = d.data_status == BLE_GAP_EXT_ADV_DATA_STATUS_INCOMPLETE;
+    if (!f && !more) {                               // the common case: one whole report
+      ble_report(&d.addr, d.rssi, phy, d.data, d.length_data);
+      return 0;
+    }
+    if (!f) {                                        // first fragment: take a slot (oldest if full)
+      for (auto& x : s_frag) if (!x.used || now_ms - x.ms > 1000) { f = &x; break; }
+      if (!f) f = &s_frag[0];
+      f->used = true; f->sid = d.sid; f->len = 0; f->ms = now_ms;
+      memcpy(f->addr, d.addr.val, 6);
+    }
+    size_t room = sizeof(f->data) - f->len, n = d.length_data < room ? d.length_data : room;
+    memcpy(f->data + f->len, d.data, n);
+    f->len += n;
+    if (!more) {                                     // complete (or truncated): report it
+      ble_report(&d.addr, d.rssi, phy, f->data, f->len);
+      f->used = false;
+    }
+  } else if (ev->type == BLE_GAP_EVENT_DISC_COMPLETE) {
+    // Forever means forever -- unless a board hook has the radios.
+    s_ble_scanning = false;
+    if (!rx_hook_paused()) rx_ble_scan(true);
+  }
+  return 0;
+}
+
+static void rx_ble_scan(bool on) {
+  if (on && !s_ble_scanning) {
+    // Both radios share one 2.4 GHz front end. A 50% BLE duty cycle starved
+    // the WiFi paths -- bench-measured 4 beacon matches against 234 BLE in
+    // the same window -- so BLE listens 30 ms in every 100 and WiFi gets the
+    // rest. Passive, no duplicate filter (repeats carry fresh Location), on
+    // both the 1M and the coded (long-range) PHY.
+    struct ble_gap_ext_disc_params p = {};
+    p.itvl = 160;      // 100 ms, 0.625 ms units
+    p.window = 48;     // 30 ms
+    p.passive = 1;
+    int rc = ble_gap_ext_disc(BLE_OWN_ADDR_PUBLIC, 0 /* forever */, 0, 0 /* no dup filter */,
+                              0, 0, &p, &p, rx_gap_event, nullptr);
+    s_ble_scanning = rc == 0 || rc == BLE_HS_EALREADY;
+  } else if (!on && s_ble_scanning) {
+    ble_gap_disc_cancel();
+    s_ble_scanning = false;
+    for (auto& x : s_frag) x.used = false;
+  }
+}
+
+static bool ble_start_scanner() {
+  NimBLEDevice::init("");
+  s_ble_ext = true;          // scanning 1M + coded PHY
+  rx_ble_scan(true);
+  return s_ble_scanning;
+}
+#else
 static NimBLEScan* s_scan = nullptr;
 
 class RidScanCallbacks : public NimBLEScanCallbacks {
@@ -248,6 +398,12 @@ class RidScanCallbacks : public NimBLEScanCallbacks {
     if (s_scan && !rx_hook_paused()) s_scan->start(0, false, true);
   }
 };
+
+static void rx_ble_scan(bool on) {
+  if (!s_scan) return;
+  if (on) s_scan->start(0, false, true);
+  else s_scan->stop();               // onScanEnd guard keeps it down
+}
 
 static bool ble_start_scanner() {
   NimBLEDevice::init("");
@@ -271,80 +427,137 @@ static bool ble_start_scanner() {
   return s_scan->start(0 /* forever */, false, true);
 }
 
+#endif
+
 // ODID decoding lives in firmware/common/odid_decode.h (shared with
 // the host-side unit tests in tests/).
 
 // --------------------------------------------------------------- JSON output
+// Lines are built by appending into one buffer, numbers by integer
+// arithmetic: printf's %f was most of the cost of a line (measured on an
+// ESP32-S3: ~233 us per rid line with vsnprintf, of which decoding the
+// frame is ~11 us). Non-finite numbers come out as null.
 
-static char s_jb[1536];
-static int  s_jl;
+static char  s_jb[1536];        // loop-side lines (log records), built under the lock
+static char  s_rid_line[1536];  // the decode task's own: sent after the lock is released
+static char* s_jbase = s_jb;
+static char* s_jp = s_jb;
+static char* s_jlim = s_jb + sizeof(s_jb) - 3;   // room for "}\n\0"
 
-static void jput(const char* fmt, ...) {
-  if (s_jl >= (int)sizeof(s_jb) - 1) return;
-  va_list ap;
-  va_start(ap, fmt);
-  int n = vsnprintf(s_jb + s_jl, sizeof(s_jb) - s_jl, fmt, ap);
-  va_end(ap);
-  if (n > 0) s_jl = min(s_jl + n, (int)sizeof(s_jb) - 1);
+/// Start a line in `buf` (always under RX_LOCK: the cursor is shared).
+static inline void jbegin(char* buf, size_t cap) { s_jbase = s_jp = buf; s_jlim = buf + cap - 3; }
+
+static inline void jchar(char c) { if (s_jp < s_jlim) *s_jp++ = c; }
+static inline void jraw(const char* s) { while (*s && s_jp < s_jlim) *s_jp++ = *s++; }
+static void ju64(uint64_t v) {
+  char t[20]; int n = 0;
+  do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+  while (n) jchar(t[--n]);
+}
+static inline void juint(uint32_t v) { ju64(v); }
+static inline void jint(int32_t v) {
+  if (v < 0) { jchar('-'); ju64((uint64_t)(-(int64_t)v)); } else ju64((uint64_t)v);
+}
+/// Fixed-point with `dec` decimals (0..7), rounded half away from zero.
+static void jfix(double v, int dec) {
+  static const uint32_t P10[] = { 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000 };
+  if (!isfinite(v) || fabs(v) > 1e12) { jraw("null"); return; }
+  bool neg = v < 0;
+  uint64_t q = (uint64_t)((neg ? -v : v) * P10[dec] + 0.5);
+  if (neg && q) jchar('-');
+  ju64(q / P10[dec]);
+  if (dec) {
+    jchar('.');
+    uint32_t f = (uint32_t)(q % P10[dec]);
+    for (int d = dec - 1; d >= 0; d--) { jchar((char)('0' + (f / P10[d]) % 10)); }
+  }
+}
+static void jmac(const uint8_t* m) {
+  static const char H[] = "0123456789ABCDEF";
+  for (int i = 0; i < 6; i++) {
+    if (i) jchar(':');
+    jchar(H[m[i] >> 4]); jchar(H[m[i] & 15]);
+  }
+}
+static inline void jkey(const char* k) { jchar(','); jchar('"'); jraw(k); jraw("\":"); }
+static inline void jstrv(const char* v) { jchar('"'); jraw(v); jchar('"'); }
+/// Close the object and terminate the line; returns its length.
+static size_t jfinish() {
+  *s_jp++ = '}'; *s_jp++ = '\n'; *s_jp = 0;
+  return (size_t)(s_jp - s_jbase);
+}
+/// Finish the line and send it in one write.
+static void jsend() {
+  size_t n = jfinish();
+  Serial.write((const uint8_t*)s_jbase, n);
 }
 
-static void emit_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
-  s_jl = 0;
-  jput("{\"type\":\"rid\",\"src\":\"%s\",\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-       "\"rssi\":%d", SRC_NAMES[e->src], e->mac[0], e->mac[1], e->mac[2],
-       e->mac[3], e->mac[4], e->mac[5], e->rssi);
-  if (e->chan) jput(",\"ch\":%u", e->chan);
+/// Format a rid line into s_rid_line; the caller sends it once the track
+/// table is unlocked, so a stalled USB host can never hold the loop up.
+static size_t format_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
+  jbegin(s_rid_line, sizeof(s_rid_line));
+  jraw("{\"type\":\"rid\",\"src\":"); jstrv(SRC_NAMES[e->src]);
+  jkey("mac"); jchar('"'); jmac(e->mac); jchar('"');
+  jkey("rssi"); jint(e->rssi);
+  if (e->chan) { jkey("ch"); juint(e->chan); }
   if (e->src == SRC_BLE && e->phy)
-    jput(",\"phy\":\"%s\"", e->phy == 3 ? "coded" : (e->phy == 2 ? "2m" : "1m"));
+    { jkey("phy"); jstrv(e->phy == 3 ? "coded" : (e->phy == 2 ? "2m" : "1m")); }
   // Which wire format spoke, and for a beacon its SSID -- with the verdict
   // when that SSID names a serial (DJI's "RID-" convention).
-  if (u->gb46750) jput(",\"fmt\":\"gb46750\"");
-  else jput(",\"proto\":%u", u->proto_ver);
+  if (u->gb46750) { jkey("fmt"); jstrv("gb46750"); }
+  else { jkey("proto"); juint(u->proto_ver); }
   if (e->ssid[0]) {
     char s[33]; odid_copy_text(s, sizeof(s), (const uint8_t*)e->ssid, strlen(e->ssid));
-    jput(",\"ssid\":\"%s\"", s);
-    if (t->ssid_check) jput(",\"ssid_id_match\":%s", t->ssid_check == 1 ? "true" : "false");
+    jkey("ssid"); jstrv(s);
+    if (t->ssid_check) { jkey("ssid_id_match"); jraw(t->ssid_check == 1 ? "true" : "false"); }
   }
 
   if (u->has_basic[0] || u->has_basic[1]) {
-    jput(",\"basic_id\":[");
+    jkey("basic_id"); jchar('[');
     bool first = true;
     for (int i = 0; i < 2; i++) {
       if (!u->has_basic[i]) continue;
-      jput("%s{\"id_type\":%u,\"ua_type\":%u,\"uas_id\":\"%s\"}",
-           first ? "" : ",", u->id_type[i], u->ua_type[i], u->uas_id[i]);
+      if (!first) jchar(',');
+      jraw("{\"id_type\":"); juint(u->id_type[i]);
+      jkey("ua_type"); juint(u->ua_type[i]);
+      jkey("uas_id"); jstrv(u->uas_id[i]);
+      jchar('}');
       first = false;
     }
-    jput("]");
+    jchar(']');
   }
   if (u->has_loc) {
-    jput(",\"loc\":{\"status\":%u,\"lat\":%.7f,\"lon\":%.7f", u->status, u->lat, u->lon);
-    jput(",\"alt_geo\":%.1f,\"alt_baro\":%.1f,\"height\":%.1f,\"height_ref\":%u",
-         u->alt_geo, u->alt_baro, u->height, u->height_ref);
-    jput(",\"speed\":%.2f,\"dir\":%.0f,\"ts\":%.1f",
-         u->speed, u->dir, u->ts);
-    if (u->vspeed > -900) jput(",\"vspeed\":%.2f", u->vspeed);
-    jput("}");
+    jkey("loc"); jraw("{\"status\":"); juint(u->status);
+    jkey("lat"); jfix(u->lat, 7);        jkey("lon"); jfix(u->lon, 7);
+    jkey("alt_geo"); jfix(u->alt_geo, 1); jkey("alt_baro"); jfix(u->alt_baro, 1);
+    jkey("height"); jfix(u->height, 1);   jkey("height_ref"); juint(u->height_ref);
+    jkey("speed"); jfix(u->speed, 2);     jkey("dir"); jfix(u->dir, 0);
+    jkey("ts"); jfix(u->ts, 1);
+    if (u->vspeed > -900) { jkey("vspeed"); jfix(u->vspeed, 2); }
+    jchar('}');
   }
-  if (u->has_self)
-    jput(",\"self_id\":{\"desc_type\":%u,\"desc\":\"%s\"}", u->self_type, u->self_desc);
+  if (u->has_self) {
+    jkey("self_id"); jraw("{\"desc_type\":"); juint(u->self_type);
+    jkey("desc"); jstrv(u->self_desc); jchar('}');
+  }
   if (u->has_sys) {
-    jput(",\"system\":{\"op_lat\":%.7f,\"op_lon\":%.7f,\"op_alt\":%.1f",
-         u->op_lat, u->op_lon, u->op_alt);
-    jput(",\"op_loc_type\":%u,\"area_count\":%u,\"ts\":%lu}",
-         u->op_loc_type, u->area_count, (unsigned long)u->sys_ts);
+    jkey("system"); jraw("{\"op_lat\":"); jfix(u->op_lat, 7);
+    jkey("op_lon"); jfix(u->op_lon, 7); jkey("op_alt"); jfix(u->op_alt, 1);
+    jkey("op_loc_type"); juint(u->op_loc_type); jkey("area_count"); juint(u->area_count);
+    jkey("ts"); juint(u->sys_ts); jchar('}');
   }
-  if (u->has_op)
-    jput(",\"op_id\":{\"id_type\":%u,\"id\":\"%s\"}", u->op_id_type, u->op_id);
+  if (u->has_op) {
+    jkey("op_id"); jraw("{\"id_type\":"); juint(u->op_id_type);
+    jkey("id"); jstrv(u->op_id); jchar('}');
+  }
   if (u->has_auth) {
     // The verdict comes from the track: pages are assembled there across
     // frames, and verified once per change rather than once per line.
-    jput(",\"auth\":{\"type\":%u,\"len\":%u,\"pages\":%u,\"state\":\"%s\"}",
-         u->auth_type, u->auth_len, u->auth_last_page + 1,
-         odid_auth_state_name((OdidAuthState)t->auth_state));
+    jkey("auth"); jraw("{\"type\":"); juint(u->auth_type);
+    jkey("len"); juint(u->auth_len); jkey("pages"); juint(u->auth_last_page + 1);
+    jkey("state"); jstrv(odid_auth_state_name((OdidAuthState)t->auth_state)); jchar('}');
   }
-  jput("}");
-  Serial.println(s_jb);
+  return jfinish();
 }
 
 static void emit_heartbeat() {
@@ -414,11 +627,33 @@ static bool json_field_dbl(const char* line, const char* key, double* out) {
 
 // ------------------------------------------------------ track ingest + host
 
+#if RX_ASYNC
+// Board hooks run in the loop, never on the decode task: the task notes
+// which slot changed and rx_tick() calls the hook against the screen copy.
+struct HookEvt { uint8_t slot; bool created, entered; uint32_t first_ms; };
+static HookEvt s_hev[16];
+static uint8_t s_hev_n = 0;
+static void rx_note_track(Track* t, bool created, bool entered) {
+  if (!created && !entered) {
+    // A plain update: the loop's copy is enough, unless a board wants every
+    // update; none does today (the SenseCAP only beeps on TFR entry).
+    return;
+  }
+  if (s_hev_n < sizeof(s_hev) / sizeof(s_hev[0]))
+    s_hev[s_hev_n++] = { (uint8_t)(t - s_live), created, entered, t->first_ms };
+}
+#else
+static void rx_note_track(Track* t, bool created, bool entered) {
+  rx_hook_track(t, created, entered);
+}
+#endif
+
 static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
   const char* uas = (u->has_basic[0] && u->uas_id[0][0]) ? u->uas_id[0] : nullptr;
   bool created = false;
   Track* t = tracker_upsert(e->mac, uas, now, &created);
   if (created) g_seen_count++;
+  if (u->has_basic[0] && u->ua_type[0]) t->ua_type = u->ua_type[0];
   bool entered = false;
   t->rssi = e->rssi;
   if (e->rssi > t->peak_rssi) t->peak_rssi = e->rssi;
@@ -514,6 +749,7 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
   }
   if (u->has_loc) {
     t->status = u->status;
+    if (u->status == 3) t->emerg_ever = true;
     if (odid_coord_plausible(u->lat, u->lon)) {
       t->has_pos = true;
       t->lat = u->lat;
@@ -530,11 +766,70 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
     if (t->has_pos) {
       bool was = t->in_tfr;
       t->in_tfr = tfr_lookup(t->lat, t->lon, t->tfr_id, sizeof(t->tfr_id));
+      if (t->in_tfr) t->tfr_ever = true;
       entered = t->in_tfr && !was;
     }
   }
-  rx_hook_track(t, created, entered);
+  rx_note_track(t, created, entered);
   return t;
+}
+
+void trk_on_end(const Track* t) { log_add(t, millis()); }
+
+/// One match-log record as a JSON line in s_jb (loop only, under the lock).
+/// `active` marks a contact still in the table, `i` numbers ended ones.
+static size_t format_log_rec(const LogRec* r, int32_t i, bool active) {
+  jbegin(s_jb, sizeof(s_jb));
+  jraw("{\"type\":\"log\",\"i\":"); jint(i);
+  jkey("active"); jraw(active ? "true" : "false");
+  jkey("uas"); { char s[25]; odid_copy_text(s, sizeof(s), (const uint8_t*)r->uas, strnlen(r->uas, sizeof(r->uas))); jstrv(s); }
+  jkey("mac"); jchar('"'); jmac(r->mac); jchar('"');
+  jkey("srcs"); juint(r->src_mask); jkey("fmts"); juint(r->fmt);
+  jkey("ua_type"); juint(r->ua_type);
+  jkey("first"); juint(r->first_utc); jkey("last"); juint(r->last_utc);
+  jkey("dur"); juint(r->dur_s);
+  if (r->lat_e5 != INT32_MIN) { jkey("lat"); jfix(r->lat_e5 / 1e5, 5); jkey("lon"); jfix(r->lon_e5 / 1e5, 5); }
+  if (r->max_height != INT16_MIN) { jkey("max_h"); jint(r->max_height); }
+  jkey("peak_rssi"); jint(r->peak_rssi);
+  jkey("auth_state"); jstrv(odid_auth_state_name((OdidAuthState)r->auth_state));
+  jkey("tfr"); jraw(r->flags & 1 ? "true" : "false");
+  jkey("emerg"); jraw(r->flags & 2 ? "true" : "false");
+  jkey("msgs"); juint(r->msgs);
+  return jfinish();
+}
+
+/// {"cmd":"log_get"}: every held record oldest first, then the contacts
+/// still live, then log_done. The records are copied under the lock, then
+/// each line is formatted under it (the line cursor is shared with the
+/// decode task) and written outside it, so a stalled USB host cannot hold
+/// up decoding.
+static void emit_log(uint32_t now) {
+  static LogRec recs[LOG_MAX + TRK_MAX];
+  int n = 0, live = 0;
+  RX_LOCK();
+  int held = s_log_n;
+  uint32_t total = s_log_total;
+  bool clock = s_utc_at_boot != 0;
+  for (int i = 0; i < held; i++) recs[n++] = *log_at(i);
+  for (int i = 0; i < TRK_MAX; i++)
+    if (g_trk_live[i].used) { log_fill(&recs[n++], &g_trk_live[i]); live++; }
+  RX_UNLOCK();
+  int32_t first = (int32_t)(total - held);
+  for (int i = 0; i < n; i++) {
+    RX_LOCK();
+    size_t len = format_log_rec(&recs[i], i < held ? first + i : -1, i >= held);
+    RX_UNLOCK();
+    Serial.write((const uint8_t*)s_jb, len);
+  }
+  RX_LOCK();
+  jbegin(s_jb, sizeof(s_jb));
+  jraw("{\"type\":\"log_done\",\"n\":"); juint(held);
+  jkey("live"); jint(live); jkey("total"); juint(total);
+  jkey("clock"); jraw(clock ? "true" : "false");
+  size_t len = jfinish();
+  RX_UNLOCK();
+  Serial.write((const uint8_t*)s_jb, len);
+  (void)now;
 }
 
 static void handle_host_line(char* line, uint32_t now) {
@@ -543,7 +838,25 @@ static void handle_host_line(char* line, uint32_t now) {
     if (rx_hook_host_line("", line, now)) return;
     return;
   }
+  if (!strcmp(cmd, "set_time")) {   // every board keeps the log's clock;
+    double u = 0;                    // a board with an RTC also sets that
+    if (json_field_dbl(line, "utc", &u) && u > 0) {
+      RX_LOCK(); log_set_utc((uint32_t)u, now); RX_UNLOCK();
+#if defined(ESP_PLATFORM)
+      // The system clock too: screens run their sunset dimming off time().
+      struct timeval tv = { (time_t)u, 0 };
+      settimeofday(&tv, nullptr);
+#endif
+    }
+  }
   if (rx_hook_host_line(cmd, line, now)) return;
+  if (!strcmp(cmd, "log_get")) { emit_log(now); return; }
+  if (!strcmp(cmd, "log_clear")) {
+    RX_LOCK(); log_clear(); RX_UNLOCK();
+    Serial.print("{\"type\":\"log_cleared\"}\n");
+    return;
+  }
+  RX_LOCK();
   if (!strcmp(cmd, "set_home")) {
     if (json_field_dbl(line, "lat", &g_home_lat) &&
         json_field_dbl(line, "lon", &g_home_lon))
@@ -552,15 +865,13 @@ static void handle_host_line(char* line, uint32_t now) {
     g_tfr_n = 0;
     g_tfr_loaded = true;
     g_tfr_ms = now;
-  } else if (!strcmp(cmd, "tfr_add")) {
-    if (g_tfr_n >= TFR_MAX) return;
+  } else if (!strcmp(cmd, "tfr_add") && g_tfr_n < TFR_MAX) {
     TfrPoly* poly = &s_tfrs[g_tfr_n];
     poly->n = 0;
     json_field_str(line, "id", poly->id, sizeof(poly->id));
     const char* q = strstr(line, "\"pts\":[");
-    if (!q) return;
-    q += 7;
-    while (poly->n < TFR_PTS_MAX) {
+    if (q) q += 7;
+    while (q && poly->n < TFR_PTS_MAX) {
       q = strchr(q, '[');
       if (!q) break;
       q++;
@@ -585,6 +896,7 @@ static void handle_host_line(char* line, uint32_t now) {
       g_tfr_ms = now;
     }
   }
+  RX_UNLOCK();
 }
 
 static void poll_host_serial(uint32_t now) {
@@ -636,34 +948,76 @@ static void rx_set_wide_filter(bool wide) {
                           : WIFI_PROMIS_FILTER_MASK_MGMT;
   esp_wifi_set_promiscuous_filter(&filt);
 }
-static void rx_ble_scan(bool on) {
-  if (!s_scan) return;
-  if (on) s_scan->start(0, false, true);
-  else s_scan->stop();               // onScanEnd guard keeps it down
+
+/// Everything that happens to one queued frame: decode, update the
+/// contact, and report it unless it repeats the last report of the same
+/// frame from the same source within a second.
+static void rx_process(const RidEvt* e, uint32_t now) {
+  OdidUas u;
+  if (!odid_decode_payload(e->data, e->len, &u)) { s_cnt_pfail++; return; }
+  s_cnt_rid++;
+  RX_LOCK();
+  Track* t = tracker_ingest(e, &u, now);
+  s_live_gen++;
+  // FNV-1a over the frame, plus what the track adds to the line.
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < e->len; i++) h = (h ^ e->data[i]) * 16777619u;
+  h = (h ^ t->auth_state) * 16777619u;
+  h = (h ^ t->ssid_check) * 16777619u;
+  uint8_t si = e->src < 3 ? e->src : 0;
+  bool repeat = t->emit_hash[si] == h && now - t->emit_ms[si] < 1000;
+  size_t n = 0;
+  if (!repeat) {
+    t->emit_hash[si] = h;
+    t->emit_ms[si] = now;
+    n = format_rid(e, &u, t);
+  }
+  RX_UNLOCK();
+  // s_rid_line belongs to this task alone, so it is safe to send unlocked.
+  if (n) Serial.write((const uint8_t*)s_rid_line, n);
 }
-static void rx_set_channel(uint8_t ch) {
-  s_cur_chan = ch;
-  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+
+#if RX_ASYNC
+static void rx_task(void*) {
+  RidEvt e;
+  for (;;)
+    if (xQueueReceive(s_q, &e, portMAX_DELAY) == pdTRUE) rx_process(&e, millis());
 }
+#endif
 
 /// Bring up the radios and print the boot line. `extra_json` is appended
 /// inside the boot object (e.g. ",\"display\":true"), may be null.
 static void rx_begin(const char* extra_json) {
+  log_load();
   s_q = xQueueCreate(36, sizeof(RidEvt));
+#if RX_ASYNC
+  s_mx = xSemaphoreCreateMutex();
+  // Above loopTask (priority 1) so a frame preempts screen drawing, on the
+  // loop's core so the Wi-Fi and BT stacks keep core 0 to themselves.
+  xTaskCreatePinnedToCore(rx_task, "rx_decode", 8192, nullptr, 2, nullptr,
+                          CONFIG_ARDUINO_RUNNING_CORE);
+#endif
   s_ble_ok = ble_start_scanner();  // bring up BT before promiscuous WiFi
   wifi_start_sniffer();
   s_cur_chan = HOP[0].chan;
+#if RX_ASYNC
+  esp_timer_create_args_t ta = {};
+  ta.callback = hop_cb;
+  ta.name = "rx_hop";
+  esp_timer_create(&ta, &s_hop_timer);
+  esp_timer_start_once(s_hop_timer, (uint64_t)HOP[0].dwell_ms * 1000);
+#endif
   Serial.printf("{\"type\":\"boot\",\"fw\":\"%s\",\"ver\":\"%s\",\"board\":\"%s\","
                 "\"ble\":%s,\"ble_ext\":%s%s}\n",
                 FW_NAME, FW_VERSION, FW_BOARD, s_ble_ok ? "true" : "false",
                 s_ble_ext ? "true" : "false", extra_json ? extra_json : "");
 }
 
-/// One pass: channel hop, host serial, decode queue, expiry, heartbeat.
-/// Call from loop() as often as possible; every step self-throttles.
+/// One loop pass: host lines, expiry, match-log saves, the screen's copy of
+/// the track table, heartbeat. Call from loop() as often as possible; every
+/// step self-throttles. (On the host build it also hops and decodes.)
 static void rx_tick(uint32_t now) {
-  static uint32_t last_hop = 0, last_hb = 0, last_expire = 0;
-  static size_t hop_idx = 0;
+  static uint32_t last_hb = 0, last_expire = 0;
   static bool was_paused = false;
 
   bool paused = rx_hook_paused();
@@ -671,32 +1025,61 @@ static void rx_tick(uint32_t now) {
     was_paused = paused;
     rx_set_wide_filter(paused);
     rx_ble_scan(!paused);
-    last_hop = 0;  // re-park immediately in the new pattern
   }
+#if !RX_ASYNC
+  static uint32_t last_hop = 0;
+  static size_t hop_idx = 0;
   if (!paused && now - last_hop >= HOP[hop_idx].dwell_ms) {
     last_hop = now;
     hop_idx = (hop_idx + 1) % HOP_N;
     rx_set_channel(HOP[hop_idx].chan);
   }
+#endif
 
   poll_host_serial(now);
 
+#if !RX_ASYNC
   RidEvt e;
-  while (xQueueReceive(s_q, &e, 0) == pdTRUE) {
-    OdidUas u;
-    if (odid_decode_payload(e.data, e.len, &u)) {
-      s_cnt_rid++;
-      Track* t = tracker_ingest(&e, &u, now);
-      emit_rid(&e, &u, t);
-    } else {
-      s_cnt_pfail++;
-    }
-  }
+  while (xQueueReceive(s_q, &e, 0) == pdTRUE) rx_process(&e, now);
+#endif
 
   if (now - last_expire >= 5000) {
     last_expire = now;
-    tracker_expire(now);
+    RX_LOCK();
+    if (tracker_expire(now)) s_live_gen++;
+    RX_UNLOCK();
   }
+
+  // Match log: snapshot under the lock, write flash outside it.
+  static LogImage s_img;
+  bool save = false;
+  RX_LOCK();
+  if (log_due(now)) { log_snapshot(&s_img); save = true; }
+  RX_UNLOCK();
+  if (save) log_write(&s_img);
+
+#if RX_ASYNC
+  // The screen's copy, refreshed only when the live table moved.
+  static uint32_t copied_gen = 0;
+  HookEvt hev[16];
+  uint8_t hn = 0;
+  if (copied_gen != s_live_gen || s_hev_n) {
+    RX_LOCK();
+    memcpy(g_tracks, s_live, sizeof(g_tracks));
+    copied_gen = s_live_gen;
+    hn = s_hev_n;
+    memcpy(hev, s_hev, hn * sizeof(HookEvt));
+    s_hev_n = 0;
+    RX_UNLOCK();
+  }
+  // A slot can change hands between the note and the copy; a hook only
+  // ever sees the contact the event was about.
+  for (uint8_t i = 0; i < hn; i++) {
+    Track* t = &g_tracks[hev[i].slot];
+    if (t->used && t->first_ms == hev[i].first_ms) rx_hook_track(t, hev[i].created, hev[i].entered);
+  }
+#endif
+
   if (now - last_hb >= 2000) {
     last_hb = now;
     emit_heartbeat();

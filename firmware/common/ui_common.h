@@ -235,3 +235,49 @@ static inline const char* ui_auth_text(uint8_t st) {
 static inline uint16_t ui_auth_color(uint8_t st) {
   return st == 3 ? C_OK : st == 4 ? C_DANGER : st == 2 ? C_AMBER : C_MUTED;
 }
+
+/// The part of a test-beacon UAS ID that tells the variants apart:
+/// "ORECCHINO-TX-BLELR" -> "BLELR". Any other ID comes back whole.
+static inline const char* ui_tx_variant(const char* id) {
+  if (!id) return "";
+  const char* p = strstr(id, "-TX-");
+  return p && p[4] ? p + 4 : id;
+}
+
+// ---- range rate: is the aircraft closing on this receiver or opening?
+// Worked out by the screen from the ranges it computes itself, per track
+// slot (reset when the slot changes hands), smoothed so one jumpy position
+// does not flip the arrow. Needs a home position and at least two fixes a
+// second or more apart.
+struct UiTrend { uint32_t first_ms, t_ms; float range_m, rate; bool ok; double home_lat, home_lon; };
+
+/// Metres per second along the line of sight, negative while closing.
+/// Returns false until there is a rate to show.
+static inline bool ui_range_rate(int slot, const Track* t, uint32_t now, float* rate) {
+  static UiTrend trend[TRK_MAX];
+  if (slot < 0 || slot >= TRK_MAX || !g_home_set || !t->has_pos) return false;
+  UiTrend* s = &trend[slot];
+  float r = (float)ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
+  // A new contact in the slot, or a new home (ranges from two different
+  // points would read as motion): start again.
+  if (s->first_ms != t->first_ms || s->t_ms == 0 ||
+      s->home_lat != g_home_lat || s->home_lon != g_home_lon) {
+    *s = { t->first_ms, t->last_ms, r, 0, false, g_home_lat, g_home_lon };
+  } else if (t->last_ms != s->t_ms && t->last_ms - s->t_ms >= 1000) {
+    float v = (r - s->range_m) * 1000.0f / (float)(t->last_ms - s->t_ms);
+    s->rate = s->ok ? s->rate * 0.5f + v * 0.5f : v;
+    s->ok = true;
+    s->range_m = r;
+    s->t_ms = t->last_ms;
+  }
+  if (!s->ok || ui_stale(t, now)) return false;
+  *rate = s->rate;
+  return true;
+}
+
+/// "closing 4.2 m/s", "opening 1.0 m/s" or "holding range".
+static inline void ui_rate_text(char* b, size_t n, float rate) {
+  if (rate < -0.5f) snprintf(b, n, "closing %.1f m/s", -rate);
+  else if (rate > 0.5f) snprintf(b, n, "opening %.1f m/s", rate);
+  else snprintf(b, n, "holding range");
+}

@@ -65,7 +65,9 @@ int txui_count() { return 10; }
 static const char* TXIDS[10] = {"ORECCHINO-TX-WIFI", "ORECCHINO-TX-NAN", "ORECCHINO-TX-BLE5", "ORECCHINO-TX-BLELR", "ORECCHINO-TX-BLE4", "ORECCHINO-TX-V0", "ORECCHINO-TX-SINGLE", "ORECCHINO-TX-DUAL", "ORECCHINO-TX-AUTH", "ORECCHINO-TX-AUTHBAD"};
 const char* txui_id(int i) { return TXIDS[i]; }
 const char* txui_carrier(int i) { return i == 1 ? "NAN" : i == 2 ? "BLE5" : i == 3 ? "BLE LR" : i == 4 ? "BLE4" : "Wi-Fi"; }
-const char* txui_desc(int i) { return "TEST fmt=AUTH-BADSIG"; }
+static const char* TXDESC[10] = {"TEST path=WIFI-BEACON", "TEST path=WIFI-NAN", "TEST path=BLE5-1M", "TEST path=BLE5-CODED",
+  "TEST path=BLE4-LEGACY", "TEST fmt=F3411-19-v0", "TEST fmt=SINGLE-MSG", "TEST fmt=DUAL-BASIC-ID", "TEST fmt=AUTH-SIGNED", "TEST fmt=AUTH-BADSIG"};
+const char* txui_desc(int i) { return TXDESC[i]; }
 bool txui_enabled(int i) { return i != 3; } void txui_set_enabled(int, bool) {}
 uint32_t txui_sent(int i) { return 1234 * (i + 1); } bool txui_running() { return true; } void txui_set_running(bool) {}
 bool txui_emergency() { return false; } void txui_set_emergency(bool) {}
@@ -155,6 +157,7 @@ int main() {
   s_map = false; s_cam_manual = false;
   s_diag = true; draw_board(true); scene_check("t5_diag"); s_diag = false;
   s_mode = UI_MODE_TX; draw_board(true); scene_check("t5_tx"); s_mode = UI_MODE_RX;
+  draw_glance();              scene_check("t5_glance");
   memset(g_tracks, 0, sizeof(g_tracks)); build_order(); draw_board(true); scene_check("t5_empty");
   fixture();
 

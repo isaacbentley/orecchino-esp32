@@ -401,3 +401,65 @@ private func decode(_ s: String) throws -> RidMessage {
         #expect(obj["utc"] as? Int == 1_790_101_127)
     }
 }
+
+@Suite struct DeviceLogTests {
+    // A line as rx_core's emit_log_rec writes it.
+    static let ended = #"{"type":"log","i":7,"active":false,"uas":"1581F5FHD23AB00D","mac":"60:60:1F:AA:BB:CC","srcs":5,"fmts":1,"ua_type":2,"first":1790000000,"last":1790000312,"dur":312,"lat":37.80390,"lon":-122.46400,"max_h":118,"peak_rssi":-58,"auth_state":"none","tfr":true,"emerg":false,"msgs":644}"#
+    static let live = #"{"type":"log","i":-1,"active":true,"uas":"","mac":"02:00:5E:7E:57:01","srcs":4,"fmts":1,"ua_type":0,"first":0,"last":0,"dur":3,"peak_rssi":-70,"auth_state":"partial","tfr":false,"emerg":true,"msgs":4}"#
+
+    @Test func endedRecordDecodes() throws {
+        let e = try #require(DeviceLogEntry(try decode(Self.ended)))
+        #expect(e.index == 7 && !e.active)
+        #expect(e.sourceText == "Wi-Fi + BLE")
+        #expect(e.first == Date(timeIntervalSince1970: 1_790_000_000))
+        #expect(e.duration == 312 && e.maxHeight == 118 && e.inTFR)
+        #expect(e.lat == 37.8039)
+    }
+
+    @Test func liveRecordWithoutClockOrPosition() throws {
+        let e = try #require(DeviceLogEntry(try decode(Self.live)))
+        #expect(e.active && e.index == nil)
+        #expect(e.first == nil && e.last == nil)       // clock never set
+        #expect(e.lat == nil && e.maxHeight == nil)
+        #expect(e.displayName == "02:00:5E:7E:57:01")  // no UAS ID: the MAC stands in
+        #expect(e.emergency)
+    }
+
+    @MainActor @Test func fetchCollectsUntilDoneAndOrdersLiveFirst() throws {
+        let log = DeviceLog()
+        log.phase = .fetching                           // as fetch() leaves it
+        log.handle(try decode(Self.ended.replacingOccurrences(of: #""i":7"#, with: #""i":3"#)))
+        log.handle(try decode(Self.ended))
+        log.handle(try decode(Self.live))
+        #expect(log.entries.isEmpty)                    // nothing shown until log_done
+        log.handle(try decode(#"{"type":"log_done","n":2,"live":1,"total":9,"clock":false}"#))
+        #expect(log.phase == .done && !log.clockSet && log.totalEver == 9)
+        #expect(log.entries.map(\.index) == [nil, 7, 3])  // live, then newest ended first
+        log.handle(try decode(#"{"type":"log_cleared"}"#))
+        #expect(log.entries.count == 1 && log.entries[0].active)
+    }
+
+    @MainActor @Test func disconnectMidReadSaysSoAndDropsPartialRecords() throws {
+        let log = DeviceLog()
+        log.phase = .fetching
+        log.handle(try decode(Self.ended))
+        log.cancel()
+        #expect(log.phase == .failed("receiver disconnected while reading"))
+        log.handle(try decode(#"{"type":"log_done","n":1,"live":0,"total":1,"clock":true}"#))
+        #expect(log.entries.isEmpty)                    // a late log_done does not resurrect them
+    }
+
+    @Test func liveContactsSharingAnIdStayDistinct() throws {
+        let a = try #require(DeviceLogEntry(try decode(Self.live.replacingOccurrences(of: #""uas":"""#, with: #""uas":"SAME""#))))
+        let b = try #require(DeviceLogEntry(try decode(Self.live.replacingOccurrences(of: #""uas":"""#, with: #""uas":"SAME""#)
+                                                          .replacingOccurrences(of: "57:01", with: "57:02"))))
+        #expect(a.id != b.id)
+    }
+
+    @Test func csvQuotesAndLeavesUnknownsEmpty() throws {
+        let e = try #require(DeviceLogEntry(try decode(Self.live)))
+        let csv = DeviceLog.csv([e])
+        let row = csv.split(separator: "\n")[1]
+        #expect(row == #"live,"",02:00:5E:7E:57:01,"BLE",,,3,,,,-70,partial,no,yes,4"#)
+    }
+}
