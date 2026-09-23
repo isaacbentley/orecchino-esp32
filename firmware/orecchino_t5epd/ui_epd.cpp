@@ -22,6 +22,8 @@
 #define ROWS  8
 #define TABLE_X 20
 #define TABLE_W 540
+#define TAB_X 322     // header view tabs: three of TAB_W from here
+#define TAB_W 84
 #define PLOT_CX 760
 #define PLOT_CY 275
 #define PLOT_R  145
@@ -36,6 +38,7 @@ static bool s_ble_ok = true;
 static int  s_batt = -1;
 static int  s_sel = 0, s_n = 0, s_order[TRK_MAX];
 static bool s_map = false;        // table (false) or map (true) board
+static bool s_side = false;       // side view: height against range (s_map stays false)
 static bool s_map_touched = false; // first-use guidance
 static int  s_cam_z = 13;         // map camera: zoom and centre in world px
 static double s_cam_wx = 0, s_cam_wy = 0;
@@ -307,7 +310,7 @@ static uint32_t signature() {
     mix(t->status); mix(t->auth_state); mix(t->in_tfr); mix(ui_stale(t, s_now));
   }
   mix(s_n); mix(s_sel); mix(s_table_page); mix(g_seen_count / 100); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
-  mix(s_map); mix(s_map_touched); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
+  mix(s_map); mix(s_side); mix(s_map_touched); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
   mix(periph_gps_detected()); mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
   return h;
 }
@@ -338,38 +341,25 @@ static void draw_header(const UiSummary& sm, const char* title) {
     }
   }
 
-  // Persistent Segmented View Switcher: [ TABLE | MAP ]
-  // (Available whenever in RX mode and not in modal diagnostics)
+  // Persistent Segmented View Switcher: [ TABLE | MAP | SIDE ]
+  // (Available whenever in RX mode and not in modal diagnostics). It sits
+  // between the title (which stops at x=310) and the status cluster (584).
   if (s_mode != UI_MODE_TX && !s_diag) {
-    const int bx = 330, by = 12, bw = 200, bh = 46;
+    const int bx = TAB_X, by = 12, tw = TAB_W, bh = 46, bw = tw * 3;
     uint8_t border_col = loud ? WHITE : BLACK;
     box(bx, by, bw, bh, border_col);
     box(bx + 1, by + 1, bw - 2, bh - 2, border_col);
-    rect(bx + 100 - 1, by, 2, bh, border_col);
-
-    bool is_table = !s_map;
-    bool is_map = s_map;
-
-    // Tab 1: TABLE (bx .. bx + 100)
-    int tw_table = text_w(&FreeSansBold12pt7b, "TABLE");
-    int tx_table = bx + (100 - tw_table) / 2;
-    if (is_table) {
-      rect(bx + 2, by + 2, 97, bh - 4, loud ? WHITE : BLACK);
-      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, loud ? BLACK : WHITE);
-    } else {
-      rect(bx + 2, by + 2, 97, bh - 4, loud ? BLACK : WHITE);
-      text(&FreeSansBold12pt7b, "TABLE", tx_table, 41, loud ? WHITE : BLACK);
-    }
-
-    // Tab 2: MAP (bx + 100 .. bx + 200)
-    int tw_map = text_w(&FreeSansBold12pt7b, "MAP");
-    int tx_map = bx + 100 + (100 - tw_map) / 2;
-    if (is_map) {
-      rect(bx + 100 + 1, by + 2, 97, bh - 4, loud ? WHITE : BLACK);
-      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, loud ? BLACK : WHITE);
-    } else {
-      rect(bx + 100 + 1, by + 2, 97, bh - 4, loud ? BLACK : WHITE);
-      text(&FreeSansBold12pt7b, "MAP", tx_map, 41, loud ? WHITE : BLACK);
+    rect(bx + tw - 1, by, 2, bh, border_col);
+    rect(bx + 2 * tw - 1, by, 2, bh, border_col);
+    const char* names[3] = { "TABLE", "MAP", "SIDE" };
+    int cur = s_side ? 2 : s_map ? 1 : 0;
+    for (int i = 0; i < 3; i++) {
+      bool on = i == cur;
+      // The chosen tab is inked in the header's opposite colour.
+      bool ink = on != loud;
+      rect(bx + i * tw + (i ? 1 : 2), by + 2, tw - 3, bh - 4, ink ? BLACK : WHITE);
+      int w = text_w(&FreeSansBold12pt7b, names[i]);
+      text(&FreeSansBold12pt7b, names[i], bx + i * tw + (tw - w) / 2, 41, ink ? WHITE : BLACK);
     }
   }
 
@@ -435,7 +425,7 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
   int left_edge = TABLE_X + text_w(f9, b) + 16;   // where a hint may start
 
   // Pagination button on Table
-  if (!s_map && s_n > ROWS) {
+  if (!s_map && !s_side && s_n > ROWS) {
     int total_pages = (s_n + ROWS - 1) / ROWS;
     char page_str[24];
     snprintf(page_str, sizeof(page_str), "PAGE %d/%d", s_table_page + 1, total_pages);
@@ -1657,6 +1647,149 @@ static void draw_diagnostics() {
   text(f9, "ORECCHINO | LILYGO T5 E-PAPER S3 PRO", 24, 528, BLACK);
 }
 
+// ---- side view: height against range, with the ceiling drawn in. The
+// plan views say where; this says how high, and who is over the limit.
+#define CEILING_M 120          // US Part 107 and EU open category: 120 m / 400 ft
+#define SV_X0 90
+#define SV_X1 650
+#define SV_Y0 100
+#define SV_Y1 440
+static int  s_sv_px[TRK_MAX], s_sv_py[TRK_MAX];
+static bool s_sv_on[TRK_MAX];
+
+static void draw_side() {
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  rect(0, 72, W, 424, WHITE);
+  memset(s_sv_on, 0, sizeof(s_sv_on));
+  char b[64];
+  int no_pos = 0, no_h = 0;
+  // Right panel: who is above the ceiling, highest first (live only).
+  int above[TRK_MAX], na = 0;
+  for (int k = 0; k < s_n; k++) {
+    const Track* t = &g_tracks[s_order[k]];
+    if (!ui_stale(t, s_now) && !isnan(t->height) && t->height > CEILING_M) above[na++] = k;
+  }
+  for (int i = 1; i < na; i++)
+    for (int j = i; j > 0 && g_tracks[s_order[above[j]]].height > g_tracks[s_order[above[j - 1]]].height; j--) {
+      int x = above[j]; above[j] = above[j - 1]; above[j - 1] = x;
+    }
+  const int px0 = 690;
+  rect(px0 - 20, 90, 1, 390, BLACK);
+  snprintf(b, sizeof(b), "ABOVE %d M", CEILING_M);
+  text(f12, b, px0, 118, BLACK);
+  int y = 132;
+  const int SV_LIST = 4;
+  for (int i = 0; i < na && i < SV_LIST; i++) {
+    const Track* t = &g_tracks[s_order[above[i]]];
+    rect(px0, y, W - 20 - px0, 34, BLACK);
+    snprintf(b, sizeof(b), "%d m", (int)t->height);
+    text_r(f12, b, W - 30, y + 25, WHITE);
+    char id[32]; snprintf(id, sizeof(id), "%s", label_id(above[i]));
+    fit_text(id, sizeof(id), f12, W - 30 - text_w(f12, b) - 16 - (px0 + 10));
+    text(f12, id, px0 + 10, y + 25, WHITE);
+    y += 40;
+  }
+  if (na > SV_LIST) { snprintf(b, sizeof(b), "+ %d more", na - SV_LIST); text(f9, b, px0, y + 14, BLACK); y += 22; }
+  if (!na) { text(f9, "none of the live contacts", px0, y + 14, GREY); y += 22; }
+
+  if (!g_home_set) {
+    const char* l[3] = { "NO POSITION", "The side view plots range from this", "board: it needs a GPS fix or the app." };
+    text(f12, l[0], SV_X0 + (SV_X1 - SV_X0 - text_w(f12, l[0])) / 2, 250, BLACK);
+    for (int i = 1; i < 3; i++) text(f9, l[i], SV_X0 + (SV_X1 - SV_X0 - text_w(f9, l[i])) / 2, 254 + 26 * i, GREY);
+  } else {
+    double far = 0; float top = CEILING_M;
+    for (int k = 0; k < s_n; k++) {
+      const Track* t = &g_tracks[s_order[k]];
+      if (!t->has_pos) { no_pos++; continue; }
+      if (isnan(t->height)) { no_h++; continue; }
+      double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
+      if (d > far) far = d;
+      if (t->height > top) top = t->height;
+    }
+    double rmax = nice_scale(far > 0 ? far * 1.1 : 500);
+    double hmax = ceil(top * 1.15 / 50.0) * 50.0;
+    if (hmax < 150) hmax = 150;
+    auto X = [&](double d) { return SV_X0 + (int)(d / rmax * (SV_X1 - SV_X0)); };
+    auto Y = [&](double h) { return SV_Y1 - (int)((h < 0 ? 0 : h) / hmax * (SV_Y1 - SV_Y0)); };
+    // Above the ceiling: a dot screen, light enough for labels to sit on.
+    int yc = Y(CEILING_M);
+    for (int yy = SV_Y0 + 4; yy < yc - 2; yy += 8)
+      for (int xx = SV_X0 + 4 + ((yy / 8) & 1) * 4; xx < SV_X1; xx += 8) rect(xx, yy, 2, 2, LIGHT);
+    for (int xx = SV_X0; xx < SV_X1; xx += 16) rect(xx, yc - 1, 10, 3, BLACK);   // the ceiling, dashed
+    // axes and scale
+    rect(SV_X0, SV_Y1, SV_X1 - SV_X0, 2, BLACK);
+    rect(SV_X0 - 2, SV_Y0, 2, SV_Y1 - SV_Y0 + 2, BLACK);
+    lb_reset();
+    for (int i = 0; i <= 2; i++) {
+      double d = rmax * i / 2;
+      if (d >= 1000) snprintf(b, sizeof(b), "%.1f km", d / 1000); else snprintf(b, sizeof(b), "%d m", (int)d);
+      int x = X(d), w = text_w(f9, b);
+      int lx = i == 0 ? x : i == 2 ? x - w : x - w / 2;
+      text(f9, b, lx, SV_Y1 + 22, GREY);
+      rect(x, SV_Y1, 2, 6, BLACK);
+    }
+    for (int i = 0; i <= 2; i++) {
+      double h = hmax * i / 2;
+      snprintf(b, sizeof(b), "%d m", (int)h);
+      int yy = Y(h);
+      text_r(f9, b, SV_X0 - 10, yy + (i == 2 ? 12 : i == 0 ? 0 : 6), GREY);
+      lb_block(SV_X0 - 10 - text_w(f9, b), yy - 12, text_w(f9, b), 18);
+    }
+    snprintf(b, sizeof(b), "%d M / %d FT CEILING", CEILING_M, (int)lround(CEILING_M * 3.28084 / 100) * 100);
+    int cw = text_w(f9, b);
+    rect(SV_X1 - cw - 8, yc - 24, cw + 8, 18, WHITE);
+    text(f9, b, SV_X1 - cw - 4, yc - 10, BLACK);
+    lb_block(SV_X1 - cw - 8, yc - 24, cw + 8, 20);
+    // marks: selected and alerts last so they sit on top
+    int rows[TRK_MAX]; int nr = priority_rows(rows);
+    for (int i = nr - 1; i >= 0; i--) {
+      int k = rows[i];
+      const Track* t = &g_tracks[s_order[k]];
+      if (!t->has_pos || isnan(t->height)) continue;
+      int x = X(ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon)), yy = Y(t->height);
+      if (yy < SV_Y0) yy = SV_Y0;
+      s_sv_px[k] = x; s_sv_py[k] = yy; s_sv_on[k] = true;
+      bool stale = ui_stale(t, s_now), over = t->height > CEILING_M;
+      uint8_t ink = stale ? GREY : BLACK;
+      if (over) rect(x - 7, yy - 7, 14, 14, ink); else epd_fill_circle(x, yy, 6, ink, s_fb);
+      if (k == s_sel) epd_draw_circle(x, yy, 13, BLACK, s_fb);
+      if (ui_danger(t, s_now)) epd_draw_circle(x, yy, 17, BLACK, s_fb);
+    }
+    // labels: the selected aircraft and alerts first, then the rest where they fit
+    for (int pass = 0; pass < 2; pass++) {
+      if (pass == 1) for (int k = 0; k < s_n; k++) if (s_sv_on[k]) lb_block(s_sv_px[k] - 10, s_sv_py[k] - 10, 20, 20);
+      for (int i = 0; i < nr; i++) {
+        int k = rows[i];
+        if (!s_sv_on[k]) continue;
+        const Track* t = &g_tracks[s_order[k]];
+        bool first = (k == s_sel) || ui_danger(t, s_now);
+        if (first != (pass == 0)) continue;
+        snprintf(b, sizeof(b), "%s %dm", label_id(k), (int)t->height);
+        int w = text_w(f9, b) + 6, lx, ly;
+        if (!lb_place(s_sv_px[k], s_sv_py[k], w, 16, SV_X0 + 2, SV_Y0 - 14, px0 - 24, SV_Y1 - 2, &lx, &ly)) continue;   // clear of the panel rule
+        bool stale = ui_stale(t, s_now);
+        rect(lx, ly, w, 16, WHITE);
+        box(lx, ly, w, 16, stale ? GREY : BLACK);
+        text(f9, b, lx + 3, ly + 12, stale ? GREY : BLACK);
+      }
+    }
+  }
+  // What is on the panel and what is not.
+  y += 6;
+  const char* note[3] = { "Heights as each aircraft sends", "them: above take-off or above", "ground, which is not the same." };
+  for (int i = 0; i < 3; i++) text(f9, note[i], px0, y + 16 + 20 * i, GREY);
+  y += 66;
+  if (no_pos || no_h) {
+    text(f9, "not plotted:", px0, y + 16, GREY);
+    b[0] = 0;
+    if (no_pos) snprintf(b, sizeof(b), "%d no position", no_pos);
+    if (no_h) snprintf(b + strlen(b), sizeof(b) - strlen(b), "%s%d no height", b[0] ? ", " : "", no_h);
+    fit_text(b, sizeof(b), f9, W - 20 - px0);
+    text(f9, b, px0, y + 36, GREY);
+  }
+}
+
 // ---- glance mode: after GLANCE_IDLE_MS without a touch or a button, one
 // screen meant to be read across a room -- how many are in range, the
 // nearest, and a black band only when there is an alert. E-paper holds it
@@ -1785,6 +1918,16 @@ static void draw_board(bool force_full) {
     if (s_inspector) draw_inspector_modal();
     if (s_confirm_switch) draw_switch_modal();
     refresh(force_full);
+    s_alert_prev = sm.alert;
+    return;
+  }
+  if (s_side) {
+    draw_header(sm, nullptr);
+    draw_side();
+    draw_footer(sm, "tap a mark: select | again: details");
+    if (s_inspector) draw_inspector_modal();
+    if (s_confirm_switch) draw_switch_modal();
+    refresh(force_full || sm.alert != s_alert_prev);
     s_alert_prev = sm.alert;
     return;
   }
@@ -1934,7 +2077,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       draw_board(false);
       return;
     }
-    s_map = !s_map;
+    if (s_side) { s_side = false; }
+    else if (s_map) { s_map = false; s_side = true; }
+    else s_map = true;
     s_sig_prev = 0;
     draw_board(true);
     return;
@@ -2013,6 +2158,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         if (tap_x >= btn1_x - 15 && tap_x <= btn1_x + btn_w + 20) {
           s_inspector = false;
           s_map = true;
+          s_side = false;   // may be opened from the side view
           if (s_sel >= 0 && s_sel < s_n) {
             const Track* t = &g_tracks[s_order[s_sel]];
             if (t->has_pos) {
@@ -2196,13 +2342,42 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
 
   // ===================== RX MODE UI & INPUT =====================
   if (tap_x >= 0) {
-    // Top bar view switcher tabs: [ TABLE | MAP ] (bx = 330, width = 200, divider at 430)
-    if (tap_y <= 92 && tap_x >= 300 && tap_x <= 560) {
-      if (tap_x < 430) {
-        if (s_map) { s_map = false; s_sig_prev = 0; draw_board(true); return; }
-      } else {
-        if (!s_map) { s_map = true; s_sig_prev = 0; draw_board(true); return; }
+    // Top bar view switcher tabs: [ TABLE | MAP | SIDE ]
+    if (tap_y <= 92 && tap_x >= TAB_X - 12 && tap_x <= TAB_X + 3 * TAB_W + 8) {
+      int want = (tap_x - TAB_X) / TAB_W;
+      if (want < 0) want = 0;
+      if (want > 2) want = 2;
+      int cur = s_side ? 2 : s_map ? 1 : 0;
+      if (want != cur) {
+        s_map = want == 1;
+        s_side = want == 2;
+        s_sig_prev = 0;
+        draw_board(true);
+        return;
       }
+    }
+    if (s_side) {
+      if (tap_y >= 485) {                                     // footer buttons
+        if (tap_x >= W - 230 && tap_x <= W - 115 && s_n > 0 && s_sel >= 0 && s_sel < s_n) {
+          s_inspector = true; s_sig_prev = 0; draw_board(false); return;
+        } else if (tap_x >= W - 115 && tap_x <= W - 10) {
+          s_diag = true; s_sig_prev = 0; draw_board(true); return;
+        }
+        return;
+      }
+      int hit = -1, best = 30 * 30;
+      for (int k = 0; k < s_n; k++) {
+        if (!s_sv_on[k]) continue;
+        int dx = s_sv_px[k] - tap_x, dy = s_sv_py[k] - tap_y;
+        if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; hit = k; }
+      }
+      if (hit >= 0) {
+        if (hit == s_sel) { s_inspector = true; s_sig_prev = 0; draw_board(false); return; }
+        select_row(hit);
+        draw_board(false);
+        s_sig_prev = signature();
+      }
+      return;
     }
     if (!s_map) {
       if (tap_y >= 92 && tap_y < 104 + ROWS * ROW_H && tap_x < TABLE_X + TABLE_W) {          // a table row
@@ -2377,7 +2552,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   // then back to the table's first row.
   if (tap) {
     if (s_map && s_cam_manual) { s_cam_manual = false; map_camera(); draw_map(); refresh_area(RECT_MAP, false); s_sig_prev = signature(); return; }
-    else if (s_map) { s_map = false; select_row(0); draw_board(true); s_sig_prev = signature(); return; }
+    else if (s_map) { s_map = false; s_side = true; draw_board(true); s_sig_prev = signature(); return; }
+    else if (s_side) { s_side = false; select_row(0); draw_board(true); s_sig_prev = signature(); return; }
     else if (s_n > 0 && s_sel < s_n - 1) {
       select_row(s_sel + 1);
       draw_table();

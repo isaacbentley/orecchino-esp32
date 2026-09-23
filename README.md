@@ -222,7 +222,7 @@ gauge with the 1500 mAh cell profile LilyGO publishes for this board and
 rewrites it only when they differ, which costs a few seconds once. The
 settings screen shows the capacity the percentage is counted against.
 
-It has touch. The header has TABLE and MAP tabs. On the table, tap a row to
+It has touch. The header has TABLE, MAP and SIDE tabs. On the table, tap a row to
 select it, then DETAILS (or a second tap) for its details; tap an aircraft
 on the plot to select it, or an empty spot on the plot to open the map.
 With more than eight contacts, a PAGE button in the footer turns the pages.
@@ -236,11 +236,21 @@ aircraft, not the row: a packet from another drone can reorder the table
 without changing what you have selected. E-paper is slow, so gestures are
 whole taps and drag-releases rather than live tracking.
 
+The SIDE tab plots height against range: the plan views say where, this
+says how high. A dashed line marks the 120 m (400 ft) ceiling of US Part
+107 and the EU open category, the band above it is dotted, and aircraft
+over it are drawn as squares and ranked by height beside the plot. Heights
+are what each aircraft broadcasts, above take-off or above ground as it
+says, and the panel says so; contacts with no position or no height are
+counted rather than guessed at. Tap a mark to select it, again for its
+details. The round home button steps table, map, side.
+
 E-paper is slow and ghosts, so the board only redraws when its content
 actually changes: fast partial updates for routine table and map changes,
 a clean full refresh every ten updates, on any alert change, when you
 switch views, and at least every five minutes. The BOOT button steps
-through contacts on the table, then over to the map, then back; hold it
+through contacts on the table, then over to the map, the side view, and
+back; hold it
 for two seconds to power the board off (the key labelled IO48 does the
 same after a short hold; in test beacon mode the BOOT hold returns to
 receiver mode instead). The PWR key only switches the board on: it is not

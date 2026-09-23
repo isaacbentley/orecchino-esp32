@@ -158,6 +158,9 @@ int main() {
   s_diag = true; draw_board(true); scene_check("t5_diag"); s_diag = false;
   s_mode = UI_MODE_TX; draw_board(true); scene_check("t5_tx"); s_mode = UI_MODE_RX;
   draw_glance();              scene_check("t5_glance");
+  s_side = true; draw_board(true); scene_check("t5_side");
+  g_home_set = false; draw_board(true); scene_check("t5_side_nopos"); g_home_set = true;
+  s_side = false;
   memset(g_tracks, 0, sizeof(g_tracks)); build_order(); draw_board(true); scene_check("t5_empty");
   fixture();
 
