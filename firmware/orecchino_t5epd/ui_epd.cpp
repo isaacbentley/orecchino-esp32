@@ -17,7 +17,7 @@
 #define BLACK 0x00
 #define WHITE 0xFF
 #define GREY  0x60
-#define LIGHT 0xC8
+#define LIGHT 0x88   // grey 8: the lightest tone the panel shows distinctly
 #define ROW_H 46
 #define ROWS  8
 #define TABLE_X 20
@@ -184,6 +184,38 @@ static int text_wrap2(const GFXfont* f, const char* s, int x, int y, int line_h,
   fit_text(l2, sizeof(l2), f, max_w);
   text(f, l2, x, y + line_h, color);
   return 2;
+}
+
+// ---- wording shared by every screen, so each says these things one way
+/// The transports a contact was heard on: "Wi-Fi, NAN, BLE".
+static void carriers_text(char* b, size_t n, uint8_t mask) {
+  static const char* names[3] = { "Wi-Fi", "NAN", "BLE" };
+  b[0] = 0;
+  for (int i = 0; i < 3; i++) {
+    if (!(mask & (1 << i))) continue;
+    size_t o = strlen(b);
+    snprintf(b + o, n - o, "%s%s", o ? ", " : "", names[i]);
+  }
+}
+/// How long ago: "now", "12s ago", "3min ago" ("m" is metres here).
+static void age_text(char* b, size_t n, uint32_t age_s) {
+  if (age_s < 10) snprintf(b, n, "now");
+  else if (age_s < 60) snprintf(b, n, "%lus ago", (unsigned long)age_s);
+  else snprintf(b, n, "%lumin ago", (unsigned long)(age_s / 60));
+}
+/// A distance in running text: "350 m", "1.5 km". Table cells and plot
+/// labels keep the compact ui_fmt_range() form.
+static void dist_text(char* b, size_t n, double m) {
+  if (m >= 1000) snprintf(b, n, "%.1f km", m / 1000); else snprintf(b, n, "%d m", (int)m);
+}
+static const char* cardinal(float deg) {
+  static const char* C[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+  return C[(int)((deg + 22.5f) / 45.0f) % 8];
+}
+/// The ID signature state in words (the table's AUTH column is the short form).
+static const char* sig_state(uint8_t st) {
+  return st == 3 ? "valid" : st == 4 ? "INVALID" : st == 2 ? "unknown key"
+       : st == 1 ? "partial" : "none";
 }
 
 /// Table form of the k-th listed ID: the whole thing when it fits `max_w`,
@@ -366,7 +398,7 @@ static void draw_header(const UiSummary& sm, const char* title) {
   // (which ends at x=570) instead of printing over the tabs.
   const int cluster_min_x = 584;
   if (periph_gps_fix()) snprintf(b, sizeof(b), "GPS %d", periph_gps_sats());
-  else if (periph_gps_detected()) snprintf(b, sizeof(b), "GPS ?");
+  else if (periph_gps_detected()) snprintf(b, sizeof(b), "GPS --");
   else snprintf(b, sizeof(b), g_home_set ? "APP POS" : "NO POS");
   int gw = text_w(&FreeSansBold9pt7b, b);
   if (xr - gw >= cluster_min_x) {
@@ -388,15 +420,15 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
   const GFXfont* f9 = &FreeSansBold9pt7b;
   char b[64];
   if (sm.newest_age_s == UINT32_MAX) snprintf(b, sizeof(b), "SCANNING");
-  else if (sm.newest_age_s < 10) snprintf(b, sizeof(b), "ACTIVE RX");
-  else if (sm.newest_age_s < 60) snprintf(b, sizeof(b), "RX <1m");
-  else snprintf(b, sizeof(b), "RX %lum ago", (unsigned long)(sm.newest_age_s / 60));
+  else if (sm.newest_age_s < 10) snprintf(b, sizeof(b), "RECEIVING");
+  else if (sm.newest_age_s < 60) snprintf(b, sizeof(b), "QUIET <1 MIN");
+  else snprintf(b, sizeof(b), "QUIET %lu MIN", (unsigned long)(sm.newest_age_s / 60));
 
   char count_buf[32];
   snprintf(count_buf, sizeof(count_buf), " | %d LIVE", sm.active);
   strncat(b, count_buf, sizeof(b) - strlen(b) - 1);
   if (g_seen_count) {
-    snprintf(count_buf, sizeof(count_buf), " | %lu seen", (unsigned long)g_seen_count);
+    snprintf(count_buf, sizeof(count_buf), " | %lu SEEN", (unsigned long)g_seen_count);
     strncat(b, count_buf, sizeof(b) - strlen(b) - 1);
   }
   text(f9, b, TABLE_X, 524, BLACK);
@@ -422,17 +454,17 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
   text(f9, "SYSTEM", sys_x + (sys_w - text_w(f9, "SYSTEM")) / 2, btn_y + 22, BLACK);
   int right_edge = sys_x - 16;
 
-  // Button: [ INSPECT ] (if an aircraft is selected on Table)
+  // Button: [ DETAILS ] (if an aircraft is selected on Table)
   if (!s_map && s_n > 0 && s_sel >= 0 && s_sel < s_n) {
     int ins_w = 100, ins_x = sys_x - 12 - ins_w;
     rect(ins_x, btn_y, ins_w, btn_h, BLACK);
-    text(f9, "INSPECT", ins_x + (ins_w - text_w(f9, "INSPECT")) / 2, btn_y + 22, WHITE);
+    text(f9, "DETAILS", ins_x + (ins_w - text_w(f9, "DETAILS")) / 2, btn_y + 22, WHITE);
     right_edge = ins_x - 16;
   }
 
   // What a tap does here, in whatever room is left between the status and
   // the buttons -- the board should never rely on the reader discovering it.
-  if (!hint) hint = "tap: select | again: details | plot: map";
+  if (!hint) hint = "tap row: select | tap plot: map";
   char h[96]; snprintf(h, sizeof(h), "%s", hint);
   int max_w = right_edge - left_edge;
   if (max_w > 80) { fit_text(h, sizeof(h), f9, max_w); text_r(f9, h, right_edge, 524, GREY); }
@@ -444,8 +476,8 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
 // Units sit in the headings; the values are bare numbers.
 struct TableCol { const char* head; const char* widest; int x, w; };
 static TableCol s_cols[5] = {
-  {"HGT m", "1250", 0, 0}, {"SPD m/s", "99.9", 0, 0}, {"RANGE", "99.9km", 0, 0},
-  {"BRG", "359", 0, 0}, {"AUTH", "BAD", 0, 0},
+  {"HGT m", "1250", 0, 0}, {"SPD m/s", "99.9", 0, 0}, {"RNG", "99.9km", 0, 0},
+  {"BRG", "359", 0, 0}, {"AUTH", "KEY?", 0, 0},
 };
 /// Lay the columns out from the right edge; returns the width left for the ID.
 static int layout_columns(const GFXfont* f) {
@@ -491,14 +523,9 @@ static void draw_table() {
     char b[64];
     short_id(b, sizeof(b), k, f12, id_w);
     text(f12, b, TABLE_X + 8, y + 20, ink);
-    uint32_t age_s = (s_now - t->last_ms) / 1000;
-    char age[16];
-    if (age_s < 10) snprintf(age, sizeof(age), "now");
-    else if (age_s < 60) snprintf(age, sizeof(age), "%lus ago", (unsigned long)age_s);
-    else snprintf(age, sizeof(age), "%lum ago", (unsigned long)(age_s / 60));
+    char age[16]; age_text(age, sizeof(age), (s_now - t->last_ms) / 1000);
     char al[48]; ui_alert_text(al, sizeof(al), t, s_now);
-    if (al[0]) snprintf(b, sizeof(b), "%s | %s", al, age);
-    else snprintf(b, sizeof(b), "%s | heard %s", stale ? "history" : ui_status_name(t->status), age);
+    snprintf(b, sizeof(b), "%s | %s", al[0] ? al : stale ? "history" : ui_status_name(t->status), age);
     fit_text(b, sizeof(b), f9, TABLE_W - 16);   // the numbers all sit on line one
     text(f9, b, TABLE_X + 8, y + 36, sel ? WHITE : (al[0] ? BLACK : GREY));
 
@@ -518,7 +545,7 @@ static void draw_table() {
     }
     if (t->auth_state) {
       const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
-                    : t->auth_state == 2 ? "?" : "...";       // column is headed AUTH
+                    : t->auth_state == 2 ? "KEY?" : "...";    // unknown key; pages still coming
       if (!sel && t->auth_state == 4) {
         rect(s_cols[4].x - 4, y + 4, text_w(f9, a) + 8, 18, BLACK);
         text(f9, a, s_cols[4].x, y + 17, WHITE);
@@ -555,12 +582,12 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   bool stale = ui_stale(t, s_now);
   bool danger = ui_danger(t, s_now);
-  const char* status_badge = danger ? "ALERT" : stale ? "STALE" : "ACTIVE";
+  const char* status_badge = danger ? "ALERT" : stale ? "HISTORY" : "LIVE";
   text_r(f9, status_badge, cx + cw - 12, cy + 22, WHITE);
 
   // UAS ID / Call sign, then the literal reasons it is loud, if any
   int y = cy + 58;
-  snprintf(b, sizeof(b), "%s", t->uas[0] ? t->uas : "(UNIDENTIFIED UAS)");
+  snprintf(b, sizeof(b), "%s", t->uas[0] ? t->uas : "NO ID");
   fit_text(b, sizeof(b), f12, cw - 24);
   text(f12, b, cx + 12, y, BLACK);
   ui_alert_text(b, sizeof(b), t, s_now);
@@ -568,11 +595,9 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   // Subtitle: Manufacturer & Transport
   y += 24;
-  snprintf(b, sizeof(b), "%s | %s%s%s",
-           ui_uas_type_name(t->uas),
-           (t->src_mask & 1) ? "Wi-Fi " : "",
-           (t->src_mask & 2) ? "NAN " : "",
-           (t->src_mask & 4) ? "BLE" : "");
+  char via[24]; carriers_text(via, sizeof(via), t->src_mask);
+  snprintf(b, sizeof(b), "%s | %s", ui_uas_type_name(t->uas), via);
+  fit_text(b, sizeof(b), f9, cw - 24);
   text(f9, b, cx + 12, y, GREY);
 
   // Divider
@@ -582,9 +607,9 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
   // Grid Row 1: Altitude & Speed
   y += 22;
   if (isnan(t->height)) snprintf(b, sizeof(b), "HEIGHT");
-  else snprintf(b, sizeof(b), "HEIGHT (%s)", ui_height_ref(t->height_ref));
+  else snprintf(b, sizeof(b), "HEIGHT %s", t->height_ref ? "AGL" : "ABOVE T/O");
   text(f9, b, cx + 12, y, GREY);
-  text(f9, "SPEED", cx + 200, y, GREY);
+  text(f9, "SPEED", cx + 210, y, GREY);
 
   y += 20;
   if (!isnan(t->height)) {
@@ -599,25 +624,23 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
   } else {
     snprintf(b, sizeof(b), "--");
   }
-  text(f9, b, cx + 200, y, BLACK);
+  text(f9, b, cx + 210, y, BLACK);
 
-  // Grid Row 2: Heading & Packets
+  // Grid Row 2: Heading & Messages
   y += 24;
   text(f9, "HEADING", cx + 12, y, GREY);
-  text(f9, "PACKETS", cx + 200, y, GREY);
+  text(f9, "MESSAGES", cx + 210, y, GREY);
 
   y += 20;
   if (!isnan(t->heading)) {
-    static const char* CARDINALS[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW", "N"};
-    int c_idx = (int)((t->heading + 22.5f) / 45.0f) % 8;
-    snprintf(b, sizeof(b), "%03d deg (%s)", (int)t->heading, CARDINALS[c_idx]);
+    snprintf(b, sizeof(b), "%03d deg (%s)", (int)t->heading, cardinal(t->heading));
   } else {
     snprintf(b, sizeof(b), "--");
   }
   text(f9, b, cx + 12, y, BLACK);
 
-  snprintf(b, sizeof(b), "%u msgs", t->msgs);
-  text(f9, b, cx + 200, y, BLACK);
+  snprintf(b, sizeof(b), "%u", t->msgs);
+  text(f9, b, cx + 210, y, BLACK);
 
   // Divider
   y += 10;
@@ -625,13 +648,13 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   // Grid Row 3: Position / Coordinates
   y += 22;
-  text(f9, "GNSS POSITION", cx + 12, y, GREY);
+  text(f9, "POSITION", cx + 12, y, GREY);
   y += 20;
   if (t->has_pos) {
     snprintf(b, sizeof(b), "%.6f, %.6f", t->lat, t->lon);
     text(f9, b, cx + 12, y, BLACK);
   } else {
-    text(f9, "NO COORDINATES REPORTED", cx + 12, y, GREY);
+    text(f9, "not reported", cx + 12, y, GREY);
   }
 
   // Divider
@@ -640,8 +663,8 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   // Grid Row 4: Signal & Peak RSSI
   y += 22;
-  text(f9, "SIGNAL STRENGTH", cx + 12, y, GREY);
-  snprintf(b, sizeof(b), "%d dBm (Peak %d)", t->rssi, t->peak_rssi);
+  text(f9, "SIGNAL", cx + 12, y, GREY);
+  snprintf(b, sizeof(b), "%d dBm (peak %d)", t->rssi, t->peak_rssi);
   text_r(f9, b, cx + cw - 12, y, BLACK);
 
   y += 8;
@@ -652,15 +675,11 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   // Grid Row 5: Authentication & Seen History
   y += 26;
-  const char* auth_str = (t->auth_state == 3) ? "VALID (Ed25519)" :
-                         (t->auth_state == 4) ? "INVALID SIGNATURE" :
-                         (t->auth_state == 2) ? "Untrusted Key" :
-                         (t->auth_state == 1) ? "Partial Page" : "None";
-  snprintf(b, sizeof(b), "Auth: %s", auth_str);
+  snprintf(b, sizeof(b), "ID sig: %s", sig_state(t->auth_state));
   text(f9, b, cx + 12, y, t->auth_state == 4 ? BLACK : GREY);
 
-  uint32_t age_s = (s_now - t->last_ms) / 1000;
-  snprintf(b, sizeof(b), "Heard: %lus ago", (unsigned long)age_s);
+  char age[16]; age_text(age, sizeof(age), (s_now - t->last_ms) / 1000);
+  snprintf(b, sizeof(b), "Heard %s", age);
   text_r(f9, b, cx + cw - 12, y, BLACK);
 
   // Airspace, qualified by what TFR data the host has actually pushed
@@ -671,8 +690,8 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   // Footer tap banner
   rect(cx + 1, cy + ch - 24, cw - 2, 23, LIGHT);
-  int tw_tap = text_w(f9, "TAP CARD FOR AIRCRAFT DETAILS");
-  text(f9, "TAP CARD FOR AIRCRAFT DETAILS", cx + (cw - tw_tap) / 2, cy + ch - 8, BLACK);
+  int tw_tap = text_w(f9, "TAP FOR DETAILS");
+  text(f9, "TAP FOR DETAILS", cx + (cw - tw_tap) / 2, cy + ch - 8, BLACK);
 }
 
 static void draw_plot() {
@@ -760,18 +779,40 @@ static void draw_plot() {
       const Track* t = &g_tracks[s_order[s_sel]];
       draw_target_card(t, s_sel, s_n);
     } else {
-      int tw1 = text_w(&FreeSansBold12pt7b, "WAITING FOR TARGETS");
-      text(&FreeSansBold12pt7b, "WAITING FOR TARGETS", PLOT_CX - tw1 / 2, 230, BLACK);
-      int tw2 = text_w(&FreeSansBold9pt7b, "Listening on BLE4, BLE5, Wi-Fi Beacon & NAN");
-      text(&FreeSansBold9pt7b, "Listening on BLE4, BLE5, Wi-Fi Beacon & NAN", PLOT_CX - tw2 / 2, 260, GREY);
-      int tw3 = text_w(&FreeSansBold9pt7b, "Remote ID: Wi-Fi Beacon, NAN & BLE");
-      text(&FreeSansBold9pt7b, "Remote ID: Wi-Fi Beacon, NAN & BLE", PLOT_CX - tw3 / 2, 286, GREY);
+      // No position, so no rings: say what would bring them.
+      const char* l[3] = { "NO POSITION", "Range rings need a GPS fix",
+                           s_n ? "or the Mac app. Tap a row for its card." : "or a position from the Mac app." };
+      text(&FreeSansBold12pt7b, l[0], PLOT_CX - text_w(&FreeSansBold12pt7b, l[0]) / 2, 230, BLACK);
+      for (int i = 1; i < 3; i++) {
+        char c[64]; snprintf(c, sizeof(c), "%s", l[i]);
+        fit_text(c, sizeof(c), &FreeSansBold9pt7b, RECT_PLOT.width - 24);
+        text(&FreeSansBold9pt7b, c, PLOT_CX - text_w(&FreeSansBold9pt7b, c) / 2, 234 + 26 * i, GREY);
+      }
     }
   }
 }
 
 
 // ---- offline map: tiles from the shared store, inverted into greys
+
+// CARTO dark_all re-toned as a printed street map. A plain inversion put
+// every feature at grey 11-15, and roads, drawn darker than land in that
+// style, came out white on white. Here land is paper, anything lighter than
+// land (streets, road edges) becomes a dark line, anything darker
+// (buildings, major-road fill) a faint tint, water light grey, labels black.
+// Tones come from the range the panel shows distinctly (grey 3-10); the
+// thresholds follow dark_all's palette (land 9, streets 17-29, water 34).
+static inline uint8_t map_tone(int luma) {
+  if (luma <= 6)  return 10;   // buildings, major-road fill
+  if (luma <= 11) return 15;   // land
+  if (luma <= 14) return 12;   // landuse variants
+  if (luma <= 18) return 7;    // paths, street edges
+  if (luma <= 23) return 6;
+  if (luma <= 31) return 5;    // streets, road casings
+  if (luma <= 40) return 8;    // water
+  if (luma <= 54) return 3;    // label edges
+  return 0;                    // label text
+}
 #define MAP_Y0   72
 #define MAP_H    424   // ends at the footer rule; must match RECT_MAP
 #define MAP_CX   (W / 2)
@@ -860,9 +901,7 @@ static int pngDrawCb(PNGDRAW* d) {
     uint16_t c = line[x - s_blit_x];
     int r = (c >> 11) << 3, g = ((c >> 5) & 0x3F) << 2, b = (c & 0x1F) << 3;
     int luma = (r * 77 + g * 150 + b * 29) >> 8;
-    // Inverted dark_all tile style: background near white, roads mid-grey.
-    // Clamp faint features to preserve visibility on e-paper.
-    int g4 = (255 - luma) >> 4;  // 8-bit greyscale → 4-bit nibble
+    int g4 = map_tone(luma);
     uint8_t* bp = &row[x / 2];
     if (x & 1) *bp = (*bp & 0x0F) | (uint8_t)(g4 << 4);
     else       *bp = (*bp & 0xF0) | (uint8_t)(g4);
@@ -921,23 +960,25 @@ static void draw_map() {
     text(&FreeSansBold9pt7b, "E", cx + 246, cy + 4, GREY);
 
     // Pill badge: Tactical basemap
-    rect(20, MAP_Y0 + 8, 220, 28, WHITE);
-    box(20, MAP_Y0 + 8, 220, 28, BLACK);
-    box(21, MAP_Y0 + 9, 218, 26, BLACK);
-    text(&FreeSansBold9pt7b, "TACTICAL GRID", 32, MAP_Y0 + 26, BLACK);
+    rect(20, MAP_Y0 + 8, 130, 28, WHITE);
+    box(20, MAP_Y0 + 8, 130, 28, BLACK);
+    box(21, MAP_Y0 + 9, 128, 26, BLACK);
+    text(&FreeSansBold9pt7b, "NO TILES", 30, MAP_Y0 + 26, BLACK);
 
     if (!s_n && !g_home_set) {
       rect(cx - 160, cy - 28, 320, 56, WHITE);
       box(cx - 160, cy - 28, 320, 56, BLACK);
-      text(&FreeSansBold12pt7b, "TACTICAL MAP ACTIVE", cx - 110, cy - 4, BLACK);
-      text(&FreeSansBold9pt7b, "Sync CARTO tiles via Orecchino app", cx - 120, cy + 18, GREY);
+      const char* t1 = "NO MAP TILES";
+      const char* t2 = "Sync them from the Mac app.";
+      text(&FreeSansBold12pt7b, t1, cx - text_w(&FreeSansBold12pt7b, t1) / 2, cy - 4, BLACK);
+      text(&FreeSansBold9pt7b, t2, cx - text_w(&FreeSansBold9pt7b, t2) / 2, cy + 18, GREY);
     }
   } else {
     // Raster tiles present
     rect(20, MAP_Y0 + 8, 130, 28, WHITE);
     box(20, MAP_Y0 + 8, 130, 28, BLACK);
     box(21, MAP_Y0 + 9, 128, 26, BLACK);
-    char b[32]; snprintf(b, sizeof(b), "MAP  Z%d", s_cam_z);
+    char b[32]; snprintf(b, sizeof(b), "ZOOM %d", s_cam_z);
     text(&FreeSansBold9pt7b, b, 30, MAP_Y0 + 26, BLACK);
   }
 
@@ -970,7 +1011,9 @@ static void draw_map() {
     on[k] = px[k] >= 0 && px[k] < W && py[k] >= MAP_Y0 && py[k] < MAP_Y0 + MAP_H;
   }
   lb_reset();
-  lb_block(20, MAP_Y0 + 8, 240, s_cam_manual ? 62 : 28);   // zoom badge (+ MANUAL PAN button)
+  static const char* PAN_LABEL = "MANUAL VIEW | TAP TO FIT ALL";
+  int pan_reserve = max(240, text_w(&FreeSansBold9pt7b, PAN_LABEL) + 24);
+  lb_block(20, MAP_Y0 + 8, s_cam_manual ? pan_reserve : 240, s_cam_manual ? 62 : 28);   // zoom badge (+ manual-view button)
   lb_block(20, MAP_Y0 + MAP_H - 32, 160, 26);            // scale bar
   lb_block(W - 60, MAP_Y0, 60, 240);                     // compass, zoom, follow
   if (home_x >= 0) lb_block(home_x - 12, home_y - 14, 74, 28);   // the HOME marker and its label
@@ -1013,7 +1056,7 @@ static void draw_map() {
   double clat, clon; px_world(s_cam_wx, s_cam_wy, s_cam_z, &clat, &clon);
   double m_per_px = 156543.03 * cos(clat * M_PI / 180) / (double)(1L << s_cam_z);
   double bar_m = m_per_px * 100;
-  if (bar_m >= 1000) snprintf(b, sizeof(b), "%.1f km", bar_m / 1000); else snprintf(b, sizeof(b), "%d m", (int)bar_m);
+  dist_text(b, sizeof(b), bar_m);
   rect(20, MAP_Y0 + MAP_H - 32, 160, 26, WHITE);
   box(20, MAP_Y0 + MAP_H - 32, 160, 26, BLACK);
   box(21, MAP_Y0 + MAP_H - 31, 158, 24, BLACK);
@@ -1047,7 +1090,7 @@ static void draw_map() {
 
   // Mode feedback that is also the way out: a button, not a badge.
   if (s_cam_manual) {
-    const char* lbl = "MANUAL PAN - TAP TO FOLLOW";
+    const char* lbl = PAN_LABEL;   // back to framing you and every live contact
     s_pan_bw = text_w(&FreeSansBold9pt7b, lbl) + 24;
     s_pan_bx = 20;                                     // under the zoom badge
     int py = MAP_Y0 + 42, ph = 28;
@@ -1069,25 +1112,25 @@ static void draw_map() {
     box(21, hud_y + 1, W - 42, hud_h - 2, BLACK);
 
     char hb[16] = "--", sb[16] = "--", rb[16] = "--";
-    if (!isnan(sel_t->height)) snprintf(hb, sizeof(hb), "%dm", (int)sel_t->height);
-    if (!isnan(sel_t->speed)) snprintf(sb, sizeof(sb), "%.0fm/s", sel_t->speed);
+    if (!isnan(sel_t->height)) snprintf(hb, sizeof(hb), "%d m", (int)sel_t->height);
+    if (!isnan(sel_t->speed)) snprintf(sb, sizeof(sb), "%.0f m/s", sel_t->speed);
     if (g_home_set && sel_t->has_pos) {
-      ui_fmt_range(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, sel_t->lat, sel_t->lon));
+      dist_text(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, sel_t->lat, sel_t->lon));
     }
     char hud_str[128], al[48];
     ui_alert_text(al, sizeof(al), sel_t, s_now);
-    snprintf(hud_str, sizeof(hud_str), "%s | %s | Hgt %s | Spd %s | Rng %s",
-             sel_t->uas[0] ? sel_t->uas : "(no id)",
+    snprintf(hud_str, sizeof(hud_str), "%s | %s | HGT %s | SPD %s | RNG %s",
+             sel_t->uas[0] ? sel_t->uas : "NO ID",
              al[0] ? al : ui_status_name(sel_t->status), hb, sb, rb);
     // [ DETAILS ] and [ X ] buttons, finger-sized; the text stops short of them
     int d_w = 100, d_h = 36;
-    int d_x = W - 152, d_y = hud_y + 5;
+    int d_x = W - 170, d_y = hud_y + 5;
     fit_text(hud_str, sizeof(hud_str), &FreeSansBold9pt7b, d_x - 12 - 32);
     text(&FreeSansBold9pt7b, hud_str, 32, hud_y + 29, BLACK);
     rect(d_x, d_y, d_w, d_h, BLACK);
     text(&FreeSansBold9pt7b, "DETAILS", d_x + (d_w - text_w(&FreeSansBold9pt7b, "DETAILS")) / 2, d_y + 24, WHITE);
     int x_w = 36, x_h = 36;
-    int x_x = W - 44, x_y = hud_y + 5;
+    int x_x = W - 62, x_y = hud_y + 5;
     box(x_x, x_y, x_w, x_h, BLACK);
     box(x_x + 1, x_y + 1, x_w - 2, x_h - 2, BLACK);
     text(&FreeSansBold9pt7b, "X", x_x + (x_w - text_w(&FreeSansBold9pt7b, "X")) / 2, x_y + 24, BLACK);
@@ -1095,7 +1138,7 @@ static void draw_map() {
 
   UiSummary sm; ui_summarize(&sm, s_now);
   draw_header(sm, nullptr);
-  draw_footer(sm, !s_map_touched ? "tap marker: select | tap: recentre | drag: pan" : "tap or button: table | hold BOOT: power off");
+  draw_footer(sm, !s_map_touched ? "tap marker: select | tap map: recentre | drag: pan" : "BOOT: table | hold BOOT: power off");
 }
 
 static void refresh_area(EpdRect area, bool force_full, bool fast_mode = false) {
@@ -1150,7 +1193,7 @@ static void draw_inspector_modal() {
   int close_w = 40, close_h = 34;
   int close_x = mx + mw - close_w - 6, close_y = my + 7;
   char b[96];
-  snprintf(b, sizeof(b), "AIRCRAFT DETAILS: %s", t->uas[0] ? t->uas : "(no id)");
+  snprintf(b, sizeof(b), "AIRCRAFT %s", t->uas[0] ? t->uas : "NO ID");
   fit_text(b, sizeof(b), f12, close_x - 12 - (mx + 16));
   text(f12, b, mx + 16, my + 28, WHITE);
   rect(close_x, close_y, close_w, close_h, WHITE);
@@ -1161,20 +1204,20 @@ static void draw_inspector_modal() {
   int col2 = mx + 350;
   int y = my + 68;
 
-  // Section 1: IDENTITY & SIGNALS (Left column)
-  text(f9, "IDENTITY & SIGNALS", col1, y, BLACK);
+  // Section 1: IDENTITY & SIGNAL (Left column)
+  text(f9, "IDENTITY & SIGNAL", col1, y, BLACK);
   rect(col1, y + 4, 300, 1, BLACK);
   y += 24;
   char al[64]; ui_alert_text(al, sizeof(al), t, s_now);
-  if (al[0]) { snprintf(b, sizeof(b), "ALERT: %s", al); ins_line(col1, &y, b); }
-  snprintf(b, sizeof(b), "UAS ID: %s", t->uas[0] ? t->uas : "(not reported)");
+  if (al[0]) { snprintf(b, sizeof(b), "Alert: %s", al); ins_line(col1, &y, b); }
+  snprintf(b, sizeof(b), "UAS ID: %s", t->uas[0] ? t->uas : "not reported");
   ins_line(col1, &y, b);
   snprintf(b, sizeof(b), "%s: %s", uas_model_name(t->uas) ? "Type" : "Make", ui_uas_type_name(t->uas));
   ins_line(col1, &y, b);
   if (t->ssid[0]) {
     snprintf(b, sizeof(b), "SSID: %s", t->ssid);
     ins_line(col1, &y, b, GREY);
-    if (t->ssid_check == 2) ins_line(col1, &y, "SSID names another serial!", BLACK);
+    if (t->ssid_check == 2) ins_line(col1, &y, "SSID names a different serial", BLACK);
   }
   snprintf(b, sizeof(b), "MAC: %02X:%02X:%02X:%02X:%02X:%02X", t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5]);
   if (t->alt_mac_count) {
@@ -1182,35 +1225,27 @@ static void draw_inspector_modal() {
     strncat(b, more, sizeof(b) - strlen(b) - 1);
   }
   ins_line(col1, &y, b);
-  snprintf(b, sizeof(b), "Via: %s%s%s%s%s",
-           (t->src_mask & 1) ? "Wi-Fi" : "",
-           (t->src_mask & 1) && (t->src_mask & 6) ? ", " : "",
-           (t->src_mask & 2) ? "NAN" : "",
-           (t->src_mask & 2) && (t->src_mask & 4) ? ", " : "",
-           (t->src_mask & 4) ? "BLE" : "");
+  char via[24]; carriers_text(via, sizeof(via), t->src_mask);
+  snprintf(b, sizeof(b), "Via: %s", via);
   if (t->fmt & 2) strncat(b, " (GB 46750)", sizeof(b) - strlen(b) - 1);
   ins_line(col1, &y, b);
-  snprintf(b, sizeof(b), "RSSI: %d dBm (peak %d)", t->rssi, t->peak_rssi);
+  snprintf(b, sizeof(b), "Signal: %d dBm (peak %d)", t->rssi, t->peak_rssi);
   ins_line(col1, &y, b);
-  uint32_t age_s = (s_now - t->last_ms) / 1000;
+  char age[16]; age_text(age, sizeof(age), (s_now - t->last_ms) / 1000);
   uint32_t dur_s = (s_now - t->first_ms) / 1000;
-  snprintf(b, sizeof(b), "Heard %lus ago | %lum%02lus | %u msgs", (unsigned long)age_s,
-           (unsigned long)(dur_s / 60), (unsigned long)(dur_s % 60), t->msgs);
+  snprintf(b, sizeof(b), "Heard %s | %u msgs in %lu:%02lu", age, t->msgs,
+           (unsigned long)(dur_s / 60), (unsigned long)(dur_s % 60));
   ins_line(col1, &y, b);
-  const char* auth_str = (t->auth_state == 3) ? "VALID (Ed25519 ASTM)" :
-                         (t->auth_state == 4) ? "SIGNATURE INVALID!" :
-                         (t->auth_state == 2) ? "Untrusted Key" :
-                         (t->auth_state == 1) ? "Partial Page" : "None";
-  snprintf(b, sizeof(b), "ID signature: %s", auth_str);
+  snprintf(b, sizeof(b), "ID signature: %s", sig_state(t->auth_state));
   ins_line(col1, &y, b, (t->auth_state == 4) ? BLACK : GREY);
 
-  // Section 2: FLIGHT TELEMETRY (Right column)
+  // Section 2: FLIGHT (Right column)
   int y2 = my + 68;
-  text(f9, "FLIGHT TELEMETRY", col2, y2, BLACK);
+  text(f9, "FLIGHT", col2, y2, BLACK);
   rect(col2, y2 + 4, 300, 1, BLACK);
   y2 += 24;
-  if (t->has_pos) snprintf(b, sizeof(b), "Pos: %.6f, %.6f", t->lat, t->lon);
-  else snprintf(b, sizeof(b), "Pos: NO POSITION REPORTED");
+  if (t->has_pos) snprintf(b, sizeof(b), "Position: %.6f, %.6f", t->lat, t->lon);
+  else snprintf(b, sizeof(b), "Position: not reported");
   ins_line(col2, &y2, b);
   char mb[16] = "--";
   if (!isnan(t->max_height)) snprintf(mb, sizeof(mb), "%d m", (int)t->max_height);
@@ -1224,15 +1259,15 @@ static void draw_inspector_modal() {
   snprintf(b, sizeof(b), "Speed: %s", sb);
   ins_line(col2, &y2, b);
   char cb[16] = "--";
-  if (!isnan(t->heading)) snprintf(cb, sizeof(cb), "%03d deg True", (int)t->heading);
+  if (!isnan(t->heading)) snprintf(cb, sizeof(cb), "%03d deg (%s)", (int)t->heading, cardinal(t->heading));
   snprintf(b, sizeof(b), "Heading: %s", cb);
   ins_line(col2, &y2, b);
   if (g_home_set && t->has_pos) {
-    char rb[16]; ui_fmt_range(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+    char rb[16]; dist_text(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
     int brg = (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon);
-    snprintf(b, sizeof(b), "Range: %s  BRG: %03d deg", rb, brg);
+    snprintf(b, sizeof(b), "Range: %s, bearing %03d deg", rb, brg);
   } else {
-    snprintf(b, sizeof(b), "Range: NO RECEIVER POSITION");
+    snprintf(b, sizeof(b), "Range: no receiver position");
   }
   ins_line(col2, &y2, b);
   snprintf(b, sizeof(b), "Status: %s", t->status == 3 ? "EMERGENCY REPORTED" : ui_status_name(t->status));
@@ -1270,18 +1305,20 @@ static void draw_switch_modal() {
   box(mx + 3, my + 3, mw - 6, mh - 6, BLACK);
 
   bool pwr = s_target_mode == UI_TARGET_POWER_OFF;
-  const char* title = pwr ? "POWER OFF DEVICE?" : (s_target_mode == UI_MODE_TX) ? "SWITCH TO TEST BEACON?" : "SWITCH TO RECEIVER?";
+  const char* title = pwr ? "POWER OFF?" : (s_target_mode == UI_MODE_TX) ? "SWITCH TO TEST BEACON?" : "SWITCH TO RECEIVER?";
   int tw = text_w(&FreeSansBold18pt7b, title);
   text(&FreeSansBold18pt7b, title, mx + (mw - tw) / 2, my + 48, BLACK);
 
-  const char* l1 = pwr ? "The board will power down." :
+  // On USB the board sleeps and BOOT wakes it; on battery it cuts its
+  // power and only PWR brings it back (periph_power_off).
+  const char* l1 = pwr ? "The radios and screen turn off." :
     (s_target_mode == UI_MODE_TX) ?
-    "The board will reboot into Test Beacon mode." :
-    "The board will reboot into Remote ID Receiver mode.";
-  const char* l2 = pwr ? "Use the power button to start it again." :
+    "The board restarts as a Remote ID test beacon." :
+    "The board restarts as a Remote ID receiver.";
+  const char* l2 = pwr ? (periph_on_vbus() ? "Press BOOT to wake it." : "Press PWR to turn it back on.") :
     (s_target_mode == UI_MODE_TX) ?
-    "Radios will reinitialize to transmit test signals on 2.4 GHz." :
-    "Radios will listen for Remote ID broadcasts on BLE and Wi-Fi.";
+    "It transmits test broadcasts on 2.4 GHz." :
+    "It listens for drones on Wi-Fi and BLE.";
 
   text(&FreeSansBold9pt7b, l1, mx + (mw - text_w(&FreeSansBold9pt7b, l1)) / 2, my + 92, BLACK);
   text(&FreeSansBold9pt7b, l2, mx + (mw - text_w(&FreeSansBold9pt7b, l2)) / 2, my + 118, GREY);
@@ -1292,7 +1329,7 @@ static void draw_switch_modal() {
 
   // OK button (solid black)
   rect(bx_ok, by, bw, bh, BLACK);
-  const char* ok_txt = pwr ? "POWER OFF" : (s_target_mode == UI_MODE_TX) ? "REBOOT TO TX" : "REBOOT TO RX";
+  const char* ok_txt = pwr ? "POWER OFF" : "SWITCH";
   text(&FreeSansBold12pt7b, ok_txt, bx_ok + (bw - text_w(&FreeSansBold12pt7b, ok_txt)) / 2, by + 35, WHITE);
 
   // Cancel button (outline)
@@ -1321,26 +1358,22 @@ static void draw_tx() {
     total_sent += txui_sent(i);
   }
   char st_b[48];
-  snprintf(st_b, sizeof(st_b), "%d/%d ACTIVE | %lu PKTS", on, n, (unsigned long)total_sent);
+  snprintf(st_b, sizeof(st_b), "%d/%d ON | %lu SENT", on, n, (unsigned long)total_sent);
   text(&FreeSansBold9pt7b, st_b, tally_x, 45, mut);
 
-  // Battery, backlight, and RX mode button on right
-  int xr = W - 170;
+  // Battery, then the button back to the receiver
+  int xr = W - 184;
   if (s_batt >= 0) {
     char bb[16]; snprintf(bb, sizeof(bb), "%d%%", s_batt);
     text_r(&FreeSansBold12pt7b, bb, xr, 44, mut);
-    xr -= text_w(&FreeSansBold12pt7b, bb) + 16;
-  }
-  if (periph_bl_is_active()) {
-    text_r(&FreeSansBold12pt7b, "[BL]", xr, 44, fg);
   }
 
-  // [ RX MODE ] button
-  const int rx_btn_w = 130, rx_btn_h = 46, rx_btn_x = W - 150, rx_btn_y = 12;
+  // [ RECEIVER ] button
+  const int rx_btn_w = 146, rx_btn_h = 46, rx_btn_x = W - 166, rx_btn_y = 12;
   box(rx_btn_x, rx_btn_y, rx_btn_w, rx_btn_h, fg);
   box(rx_btn_x + 1, rx_btn_y + 1, rx_btn_w - 2, rx_btn_h - 2, fg);
-  int tw_rx = text_w(&FreeSansBold12pt7b, "RX MODE");
-  text(&FreeSansBold12pt7b, "RX MODE", rx_btn_x + (rx_btn_w - tw_rx) / 2, 41, fg);
+  int tw_rx = text_w(&FreeSansBold12pt7b, "RECEIVER");
+  text(&FreeSansBold12pt7b, "RECEIVER", rx_btn_x + (rx_btn_w - tw_rx) / 2, 41, fg);
 
   // Master Controls Row (y: 78..138)
   rect(TABLE_X, 138, W - TABLE_X * 2, 2, BLACK);
@@ -1390,7 +1423,7 @@ static void draw_tx() {
     int band_w = W - 20 - (aoff_x + aoff_w + 12);
     snprintf(band, sizeof(band), "CH 6 | 2.4 GHz"); fit_text(band, sizeof(band), &FreeSansBold9pt7b, band_w);
     text_r(&FreeSansBold9pt7b, band, W - 20, 102, BLACK);
-    snprintf(band, sizeof(band), "BENCH RADIATOR"); fit_text(band, sizeof(band), &FreeSansBold9pt7b, band_w);
+    snprintf(band, sizeof(band), "BENCH TEST ONLY"); fit_text(band, sizeof(band), &FreeSansBold9pt7b, band_w);
     text_r(&FreeSansBold9pt7b, band, W - 20, 120, BLACK);
   }
 
@@ -1435,7 +1468,7 @@ static void draw_tx() {
 
       // Packet count on right
       char cb[20];
-      snprintf(cb, sizeof(cb), "%lu pkts", (unsigned long)txui_sent(i));
+      snprintf(cb, sizeof(cb), "%lu sent", (unsigned long)txui_sent(i));
       int cnt_w = text_w(f9, cb);
 
       // UAS ID, shortened from the head: the variant name after the last
@@ -1464,11 +1497,11 @@ static void draw_tx() {
   // Footer (y: 496..540)
   rect(0, 496, W, 44, WHITE);
   rect(0, 496, W, 2, BLACK);
-  const char* hint = "tap card: toggle | hold BOOT: rx mode";
+  const char* hint = "tap card: on/off | hold BOOT: receiver";
   int hint_x = W - 20 - text_w(f9, hint);
   char note[96];
   snprintf(note, sizeof(note), "%s", running ? "ON AIR | do not radiate near live airspace"
-                                             : "PAUSED | configure paths, tap TRANSMIT to radiate");
+                                             : "PAUSED | pick variants, then tap TRANSMIT");
   fit_text(note, sizeof(note), f9, hint_x - 16 - TABLE_X);
   text(f9, note, TABLE_X, 524, BLACK);
   text(f9, hint, hint_x, 524, BLACK);
@@ -1482,7 +1515,7 @@ static void draw_diagnostics() {
 
   // Header banner
   rect(0, 0, W, 68, BLACK);
-  text(f18, "SYSTEM SETTINGS & DIAGNOSTICS", 24, 46, WHITE);
+  text(f18, "SYSTEM", 24, 46, WHITE);
 
   // [ CLOSE ] button in header
   int cl_w = 100, cl_h = 42, cl_x = W - 120, cl_y = 13;
@@ -1491,11 +1524,11 @@ static void draw_diagnostics() {
   text(f12, "CLOSE", cl_x + (cl_w - text_w(f12, "CLOSE")) / 2, cl_y + 28, BLACK);
 
   // Section 1: DISPLAY BACKLIGHT -- the control people actually reach for
-  text(f12, "1. DISPLAY BACKLIGHT (PT4103 & SOLAR TIME)", 24, 98, BLACK);
+  text(f12, "BACKLIGHT", 24, 98, BLACK);
   BlMode bm = periph_bl_get_mode();
   struct BlBtn { const char* lbl; BlMode m; int x; int w; } bl_btns[] = {
-    { "AUTO (Sunset)", BL_AUTO, 24, 150 },
-    { "MANUAL ON", BL_ON, 184, 130 },
+    { "AUTO", BL_AUTO, 24, 150 },
+    { "ON", BL_ON, 184, 130 },
     { "OFF", BL_OFF, 324, 90 }
   };
   int bl_btn_y = DG_BL_BTN_Y, bl_btn_h = DG_BL_BTN_H;
@@ -1513,7 +1546,7 @@ static void draw_diagnostics() {
   box(430, bl_btn_y, 40, bl_btn_h, BLACK);
   text(f12, "-", 430 + (40 - text_w(f12, "-")) / 2, bl_btn_y + 24, BLACK);
   uint8_t duty = periph_bl_get_duty();
-  char duty_str[32]; snprintf(duty_str, sizeof(duty_str), "Duty: %u%% (%u)", (duty * 100) / 255, duty);
+  char duty_str[32]; snprintf(duty_str, sizeof(duty_str), "%u%%", (duty * 100) / 255);
   box(478, bl_btn_y, 140, bl_btn_h, BLACK);
   text(f9, duty_str, 478 + (140 - text_w(f9, duty_str)) / 2, bl_btn_y + 23, BLACK);
   box(626, bl_btn_y, 40, bl_btn_h, BLACK);
@@ -1521,33 +1554,34 @@ static void draw_diagnostics() {
 
   char sun_buf[64];
   double sun_el = periph_sun_elevation();
-  snprintf(sun_buf, sizeof(sun_buf), "Sun %+.0f deg | %s | BL %s",
-           sun_el, periph_is_after_sundown() ? "Night" : "Day",
-           periph_bl_is_active() ? "ON" : "OFF");
+  // AUTO lights the panel after sunset at the home position.
+  snprintf(sun_buf, sizeof(sun_buf), "Sun %+.0f deg | %s | light %s",
+           sun_el, periph_is_after_sundown() ? "night" : "day",
+           periph_bl_is_active() ? "on" : "off");
   text(f9, sun_buf, 680, bl_btn_y + 23, GREY);
 
   rect(24, 154, W - 48, 1, LIGHT);
 
   // Section 2: OPERATING MODE & POWER
-  text(f12, "2. OPERATING MODE & POWER", 24, 176, BLACK);
+  text(f12, "MODE & POWER", 24, 176, BLACK);
   int tx_btn_w = 380, tx_btn_h = DG_MODE_BTN_H, tx_btn_x = 24, tx_btn_y = DG_MODE_BTN_Y;
   box(tx_btn_x, tx_btn_y, tx_btn_w, tx_btn_h, BLACK);
   box(tx_btn_x + 1, tx_btn_y + 1, tx_btn_w - 2, tx_btn_h - 2, BLACK);
-  text(f9, "SWITCH TO TX BEACON MODE", tx_btn_x + (tx_btn_w - text_w(f9, "SWITCH TO TX BEACON MODE")) / 2, tx_btn_y + 25, BLACK);
+  text(f9, "SWITCH TO TEST BEACON", tx_btn_x + (tx_btn_w - text_w(f9, "SWITCH TO TEST BEACON")) / 2, tx_btn_y + 25, BLACK);
   int pwr_btn_x = 420, pwr_btn_y = DG_MODE_BTN_Y, pwr_btn_w = 210, pwr_btn_h = DG_MODE_BTN_H;
   rect(pwr_btn_x, pwr_btn_y, pwr_btn_w, pwr_btn_h, BLACK);
-  text(f9, "POWER OFF DEVICE", pwr_btn_x + (pwr_btn_w - text_w(f9, "POWER OFF DEVICE")) / 2, pwr_btn_y + 25, WHITE);
-  text(f9, "Each asks for confirmation first.", pwr_btn_x + pwr_btn_w + 14, pwr_btn_y + 25, GREY);
+  text(f9, "POWER OFF", pwr_btn_x + (pwr_btn_w - text_w(f9, "POWER OFF")) / 2, pwr_btn_y + 25, WHITE);
+  text(f9, "Both ask to confirm.", pwr_btn_x + pwr_btn_w + 14, pwr_btn_y + 25, GREY);
 
   rect(24, 236, W - 48, 1, LIGHT);
 
   // Section 3: HARDWARE RESOURCE TELEMETRY
-  text(f12, "3. HARDWARE TELEMETRY & RESOURCES", 24, 258, BLACK);
+  text(f12, "HARDWARE", 24, 258, BLACK);
   int t_y = 282;
   // Col 1: ESP32 Memory
   char m1[48], m2[48];
-  snprintf(m1, sizeof(m1), "PSRAM: %lu KB free / %lu KB", (unsigned long)(ESP.getFreePsram() / 1024), (unsigned long)(ESP.getPsramSize() / 1024));
-  snprintf(m2, sizeof(m2), "Heap:   %lu KB free (internal)", (unsigned long)(ESP.getFreeHeap() / 1024));
+  snprintf(m1, sizeof(m1), "PSRAM: %lu of %lu KB free", (unsigned long)(ESP.getFreePsram() / 1024), (unsigned long)(ESP.getPsramSize() / 1024));
+  snprintf(m2, sizeof(m2), "Heap: %lu KB free", (unsigned long)(ESP.getFreeHeap() / 1024));
   text(f9, m1, 24, t_y, BLACK);
   text(f9, m2, 24, t_y + 22, BLACK);
 
@@ -1557,39 +1591,39 @@ static void draw_diagnostics() {
   // percentage by: 1500 mAh once the boot check has configured it.
   int mv = periph_batt_mv();
   int cap = periph_batt_full_mah();
+  char pct[8] = "--";
+  if (s_batt >= 0) snprintf(pct, sizeof(pct), "%d%%", s_batt);
   if (mv > 0 && cap > 0 && periph_gauge_configured())
-    snprintf(p1, sizeof(p1), "Cell:   %d mV  %d%% of %d mAh", mv, s_batt, cap);
-  else if (mv > 0) snprintf(p1, sizeof(p1), "Cell:   %d mV  %d%%  (gauge not set)", mv, s_batt);
-  else snprintf(p1, sizeof(p1), "Cell:   No Gauge Detected");
+    snprintf(p1, sizeof(p1), "Battery: %s, %d.%02d V, %d mAh", pct, mv / 1000, (mv % 1000) / 10, cap);
+  else if (mv > 0) snprintf(p1, sizeof(p1), "Battery: %s, %d.%02d V (gauge not set up)", pct, mv / 1000, (mv % 1000) / 10);
+  else snprintf(p1, sizeof(p1), "Battery: no gauge");
   fit_text(p1, sizeof(p1), f9, 660 - 340 - 12);   // column 3 starts at x=660
   if (periph_has_utc_time()) {
     uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
     periph_get_utc_time(&cy, &cm, &cd, &ch, &cmi, &cs);
-    snprintf(p2, sizeof(p2), "RTC:    %04u-%02u-%02u %02u:%02u:%02uZ", cy, cm, cd, ch, cmi, cs);
+    snprintf(p2, sizeof(p2), "Clock: %04u-%02u-%02u %02u:%02u:%02uZ", cy, cm, cd, ch, cmi, cs);
   } else {
-    snprintf(p2, sizeof(p2), "RTC:    No Time Sync");
+    snprintf(p2, sizeof(p2), "Clock: not set");
   }
   text(f9, p1, 340, t_y, BLACK);
   text(f9, p2, 340, t_y + 22, BLACK);
 
   // Col 3: GPS & LittleFS Map Cache
   char g1[48], g2[48];
-  if (periph_gps_fix()) snprintf(g1, sizeof(g1), "GPS:    3D Fix (%d satellites)", periph_gps_sats());
-  else if (periph_gps_detected()) snprintf(g1, sizeof(g1), "GPS:    Searching (UART1)");
-  else snprintf(g1, sizeof(g1), "GPS:    Not Detected");
+  if (periph_gps_fix()) snprintf(g1, sizeof(g1), "GPS: fix, %d satellites", periph_gps_sats());
+  else if (periph_gps_detected()) snprintf(g1, sizeof(g1), "GPS: searching");
+  else snprintf(g1, sizeof(g1), "GPS: not detected");
   size_t fs_used = LittleFS.usedBytes() / 1024;
   size_t fs_tot  = LittleFS.totalBytes() / 1024;
-  snprintf(g2, sizeof(g2), "Tiles:  %lu KB / %lu KB (%d%%)", (unsigned long)fs_used, (unsigned long)fs_tot, fs_tot ? (int)((fs_used * 100) / fs_tot) : 0);
+  snprintf(g2, sizeof(g2), "Map tiles: %lu of %lu KB", (unsigned long)fs_used, (unsigned long)fs_tot);
   text(f9, g1, 660, t_y, BLACK);
   text(f9, g2, 660, t_y + 22, BLACK);
 
   rect(24, 318, W - 48, 1, LIGHT);
 
   // Section 4: PANEL VCOM VOLTAGE TUNING (engineering)
-  text(f12, "4. PANEL VCOM VOLTAGE TUNING (ENGINEERING)", 24, 340, BLACK);
-  char v_str[64];
-  snprintf(v_str, sizeof(v_str), "Current: -%.2f V (%u mV)", (float)s_vcom / 1000.0f, s_vcom);
-  text(f9, v_str, 680, 340, GREY);
+  text(f12, "PANEL VOLTAGE (VCOM)", 24, 340, BLACK);
+  text(f9, "Match the VCOM on the panel's cable label.", 580, 380, GREY);
   int b_y = DG_VCOM_BTN_Y, b_h = DG_VCOM_BTN_H;
   struct Vbtn { const char* lbl; int x; int w; } vbtns[] = {
     { "-50 mV", 24, 90 }, { "-10 mV", 124, 90 },
@@ -1607,7 +1641,7 @@ static void draw_diagnostics() {
   rect(24, 398, W - 48, 1, LIGHT);
 
   // Section 5: 16-LEVEL GREYSCALE CALIBRATION TEST STRIP
-  text(f12, "5. 16-LEVEL GREYSCALE TEST STRIP (4-BIT DAC)", 24, 420, BLACK);
+  text(f12, "GREYSCALE TEST", 24, 420, BLACK);
   int strip_x = 24, strip_y = 430, swatch_w = 56, swatch_h = 34;
   for (int i = 0; i < 16; i++) {
     int sx = strip_x + i * swatch_w;
@@ -1618,12 +1652,12 @@ static void draw_diagnostics() {
     uint8_t text_col = (i < 8) ? WHITE : BLACK;
     text(f9, num_buf, sx + (swatch_w - text_w(f9, num_buf)) / 2, strip_y + 23, text_col);
   }
-  text(f9, "Uniform monotonic gradation across all 16 levels, no clipping or banding.", 24, strip_y + swatch_h + 18, GREY);
+  text(f9, "Each step should be a little lighter than the one before.", 24, strip_y + swatch_h + 18, GREY);
 
   // Footer note
   rect(0, 506, W, 34, WHITE);
   rect(0, 506, W, 1, BLACK);
-  text(f9, "T5 E-PAPER S3 PRO | ORECCHINO TACTICAL CONSOLE", 24, 528, BLACK);
+  text(f9, "ORECCHINO | LILYGO T5 E-PAPER S3 PRO", 24, 528, BLACK);
 }
 
 static void draw_board(bool force_full) {
@@ -1677,6 +1711,10 @@ bool ui_set_vcom(uint16_t vcom) {
   s_vcom = vcom;
   if (s_ok) {
     epd_set_vcom(s_vcom);
+    // epdiy hands VCOM to the TPS65185 only at power-up, and the rails are
+    // held on between redraws: drop them, or the redraw below (and every
+    // one after it until the hold lapses) still runs at the old VCOM.
+    if (s_epd_powered) { epd_poweroff(); s_epd_powered = false; }
     draw_board(true);
   }
   return true;
@@ -1702,7 +1740,7 @@ bool ui_begin(uint8_t mode) {
   epd_hl_set_all_white(&s_hl);
   int w_ore = text_w(&FreeSansBold24pt7b, "ORECCHINO");
   text(&FreeSansBold24pt7b, "ORECCHINO", (W - w_ore) / 2, 250, BLACK);
-  const char* sub = (s_mode == UI_MODE_TX) ? "Remote ID test beacon  -  starting transmitter" : "Remote ID receiver  -  starting radios";
+  const char* sub = (s_mode == UI_MODE_TX) ? "Remote ID test beacon | starting transmitter" : "Remote ID receiver | starting radios";
   int w_sub = text_w(&FreeSansBold12pt7b, sub);
   text(&FreeSansBold12pt7b, sub, (W - w_sub) / 2, 300, BLACK);
   epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
@@ -1971,7 +2009,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       return;
     }
     if (tap_x >= 0) {
-      if (tap_y <= 70 && tap_x >= W - 160) {
+      if (tap_y <= 70 && tap_x >= W - 170) {   // the RECEIVER button
         s_confirm_switch = true;
         s_target_mode = UI_MODE_RX;
         s_sig_prev = 0;
@@ -2139,13 +2177,13 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         const int hud_h = MAP_HUD_H;
         const int hud_y = MAP_Y0 + MAP_H - hud_h - 40;
         if (tap_y >= hud_y && tap_y <= hud_y + hud_h) {
-          if (tap_x >= W - 152 && tap_x <= W - 48) {
+          if (tap_x >= W - 172 && tap_x <= W - 66) {
             // [ DETAILS ] button
             s_inspector = true;
             s_sig_prev = 0;
             draw_board(false);
             return;
-          } else if (tap_x >= W - 46 && tap_x <= W - 4) {
+          } else if (tap_x >= W - 64 && tap_x <= W - 14) {
             // [ X ] button -> deselect
             select_row(-1);
             draw_map();
@@ -2240,7 +2278,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     if (now - last_prog >= 5000) {          // progress line, sparingly
       last_prog = now;
       rect(0, 496, W, 44, WHITE);
-      char b[48]; snprintf(b, sizeof(b), "SYNCING MAP TILES  %d received", sync_files);
+      char b[48]; snprintf(b, sizeof(b), "SYNCING MAP TILES | %d RECEIVED", sync_files);
       text(&FreeSansBold9pt7b, b, TABLE_X, 524, BLACK);
       EpdRect r = {0, 496, W, 44};
       epd_ensure_on(); epd_hl_update_area(&s_hl, MODE_GL16, TEMP_C, r);
@@ -2267,7 +2305,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   epd_idle_check(now);
 }
 
-void ui_show_shutdown_screen() {
+void ui_show_shutdown_screen(bool boot_wakes) {
   if (!s_ok) return;
   epd_hl_set_all_white(&s_hl);
   const GFXfont* f9  = &FreeSansBold9pt7b;
@@ -2276,7 +2314,7 @@ void ui_show_shutdown_screen() {
 
   // Header banner
   rect(0, 0, W, 68, BLACK);
-  text(f18, "ORECCHINO T5 TACTICAL CONSOLE", 24, 46, WHITE);
+  text(f18, "ORECCHINO", 24, 46, WHITE);
 
   // Central dialog frame
   int box_w = 580, box_h = 240;
@@ -2288,32 +2326,26 @@ void ui_show_shutdown_screen() {
 
   // Inner dark title band
   rect(box_x + 6, box_y + 6, box_w - 12, 46, BLACK);
-  const char* title = "DEVICE POWERED OFF";
+  const char* title = "POWERED OFF";
   text(f18, title, box_x + (box_w - text_w(f18, title)) / 2, box_y + 38, WHITE);
 
   // Subtitle
-  const char* sub = "All radio receivers, sensors, and displays are shut down.";
+  const char* sub = "The radios and screen are off.";
   text(f9, sub, box_x + (box_w - text_w(f9, sub)) / 2, box_y + 88, BLACK);
 
-  // Instructions
-  const char* ins1 = "• Battery Mode: Press PWR button to power on";
-  text(f12, ins1, box_x + 45, box_y + 130, BLACK);
+  // How to bring it back, as periph_power_off decided before drawing. The
+  // font has no bullet glyph, so none is drawn.
+  const char* ins = boot_wakes ? "Press BOOT to wake it." : "Press PWR to turn it on.";
+  text(f12, ins, box_x + (box_w - text_w(f12, ins)) / 2, box_y + 146, BLACK);
 
-  const char* ins2 = "• USB / Standby Mode: Press side button to wake";
-  text(f12, ins2, box_x + 45, box_y + 164, BLACK);
-
-  // Battery status line inside box
-  char stat[64];
-  int mv = periph_batt_mv();
-  if (mv > 0) {
-    snprintf(stat, sizeof(stat), "Battery Status: %d%% (%d mV) | Standby Ready", s_batt >= 0 ? s_batt : 0, mv);
-  } else {
-    snprintf(stat, sizeof(stat), "Power State: External Standby | Standby Ready");
+  if (s_batt >= 0) {
+    char stat[32];
+    snprintf(stat, sizeof(stat), "Battery %d%%", s_batt);
+    text(f9, stat, box_x + (box_w - text_w(f9, stat)) / 2, box_y + 200, GREY);
   }
-  text(f9, stat, box_x + (box_w - text_w(f9, stat)) / 2, box_y + 210, GREY);
 
-  // Bottom footer watermark
-  const char* foot = "Orecchino ASTM F3411 Remote ID Receiver | LilyGO T5 E-Paper S3 Pro";
+  // Bottom footer
+  const char* foot = "Orecchino Remote ID receiver | LilyGO T5 E-Paper S3 Pro";
   text(f9, foot, (W - text_w(f9, foot)) / 2, H - 24, GREY);
 
   // Full GC16 refresh to clear any ghosting and freeze high-contrast image

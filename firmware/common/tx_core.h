@@ -621,10 +621,10 @@ static void        tx_set_running(bool on) {
 }
 static bool        tx_emergency() { return s_emergency; }
 static void        tx_set_emergency(bool on) { s_emergency = on; }
-/// Carrier label for a path: "WiFi", "NAN", "BLE5", "BLE LR", "BLE4".
+/// Carrier label for a path: "Wi-Fi", "NAN", "BLE5", "BLE LR", "BLE4".
 static const char* tx_path_carrier(int i) {
   switch (PATHS[i].carrier) {
-    case C_BEACON: return "WiFi"; case C_NAN: return "NAN"; case C_BLE_EXT: return "BLE5";
+    case C_BEACON: return "Wi-Fi"; case C_NAN: return "NAN"; case C_BLE_EXT: return "BLE5";
     case C_BLE_CODED: return "BLE LR"; default: return "BLE4";
   }
 }

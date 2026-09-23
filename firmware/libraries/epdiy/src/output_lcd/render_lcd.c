@@ -70,6 +70,8 @@ void lcd_do_update(RenderContext_t* ctx) {
     for (uint8_t k = 0; k < ctx->cycle_frames; k++) {
         epd_lcd_frame_done_cb((frame_done_func_t)handle_lcd_frame_done, ctx);
         prepare_context_for_next_frame(ctx);
+        // Orecchino patch: drive this phase for its waveform time.
+        epd_lcd_set_ckv_high_time(ctx->frame_time);
 
         // start both feeder tasks
         xTaskNotifyGive(ctx->feed_tasks[!xPortGetCoreID()]);
@@ -90,6 +92,8 @@ void lcd_do_update(RenderContext_t* ctx) {
 
     epd_lcd_line_source_cb(NULL, NULL);
     epd_lcd_frame_done_cb(NULL, NULL);
+    // Orecchino patch: epd_push_pixels (clearing) keeps the board's timing.
+    epd_lcd_set_ckv_high_time(0);
 
     epd_set_mode(0);
 }

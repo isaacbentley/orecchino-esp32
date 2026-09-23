@@ -50,3 +50,9 @@ void epd_lcd_start_frame();
  * Set the LCD pixel clock frequency in MHz.
  */
 void epd_lcd_set_pixel_clock_MHz(int frequency);
+/**
+ * Orecchino patch: the CKV high time, in 1/10 us, for the frames that
+ * follow -- a waveform phase's time. Capped to what fits in one line;
+ * <= 0 restores the board's configured time.
+ */
+void epd_lcd_set_ckv_high_time(int dus);

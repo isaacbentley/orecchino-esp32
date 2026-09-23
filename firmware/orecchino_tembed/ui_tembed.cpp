@@ -235,9 +235,7 @@ static void draw_scope() {
     snprintf(b, sizeof(b), "%.5f", t->lon); small(x, y, C_MUTED, b); y += 11;
   } else { small(x, y, C_MUTED, "no position"); y += 11; }
   if (t->auth_state) {
-    const char* a = t->auth_state == 3 ? "ID signed: valid" : t->auth_state == 4 ? "ID SIG INVALID"
-                  : t->auth_state == 2 ? "ID signed: untrusted" : "ID sig: partial";
-    small(x, y, ui_auth_color(t->auth_state), a); y += 11;
+    small(x, y, ui_auth_color(t->auth_state), ui_auth_text(t->auth_state)); y += 11;
   }
   if (t->in_tfr) { snprintf(b, sizeof(b), "IN TFR %s", t->tfr_id); small(x, y, C_DANGER, b); y += 11; }
   snprintf(b, sizeof(b), "src %s%s%s  %us ago", (t->src_mask & 1) ? "W" : "",

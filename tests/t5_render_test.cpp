@@ -56,6 +56,7 @@ void periph_get_utc_time(uint16_t* y, uint8_t* m, uint8_t* d, uint8_t* h, uint8_
 void periph_bl_set_mode(BlMode) {} BlMode periph_bl_get_mode() { return BL_AUTO; }
 void periph_bl_set_duty(uint8_t) {} uint8_t periph_bl_get_duty() { return 128; }
 bool periph_bl_is_active() { return true; } bool periph_is_after_sundown() { return false; }
+bool periph_on_vbus() { return true; }
 double periph_sun_elevation() { return 31; }
 bool periph_poll_touch_event(TouchEvent*) { return false; }
 bool periph_home_key() { return false; } bool periph_pwr_btn_down() { return false; }
@@ -63,7 +64,7 @@ void periph_power_off() {}
 int txui_count() { return 10; }
 static const char* TXIDS[10] = {"ORECCHINO-TX-WIFI", "ORECCHINO-TX-NAN", "ORECCHINO-TX-BLE5", "ORECCHINO-TX-BLELR", "ORECCHINO-TX-BLE4", "ORECCHINO-TX-V0", "ORECCHINO-TX-SINGLE", "ORECCHINO-TX-DUAL", "ORECCHINO-TX-AUTH", "ORECCHINO-TX-AUTHBAD"};
 const char* txui_id(int i) { return TXIDS[i]; }
-const char* txui_carrier(int i) { return i == 1 ? "NAN" : i == 2 ? "BLE5" : i == 3 ? "BLE LR" : i == 4 ? "BLE4" : "WiFi"; }
+const char* txui_carrier(int i) { return i == 1 ? "NAN" : i == 2 ? "BLE5" : i == 3 ? "BLE LR" : i == 4 ? "BLE4" : "Wi-Fi"; }
 const char* txui_desc(int i) { return "TEST fmt=AUTH-BADSIG"; }
 bool txui_enabled(int i) { return i != 3; } void txui_set_enabled(int, bool) {}
 uint32_t txui_sent(int i) { return 1234 * (i + 1); } bool txui_running() { return true; } void txui_set_running(bool) {}
@@ -179,6 +180,20 @@ int main() {
                   s_selid.first_ms == g_tracks[s_order[s_sel]].first_ms;
   printf("%s a reused slot is not mistaken for the old selection\n", resolved ? "ok  " : "FAIL");
   if (!resolved) g_fails++;
+
+  // The map re-tone, on dark_all's palette: land is paper, streets are
+  // darker than water and buildings and dark enough to show (the panel
+  // renders grey 3-10 distinctly), labels darkest. A plain inversion had
+  // made roads as light as land.
+  {
+    unsigned land = map_tone(9), building = map_tone(6), street = map_tone(25),
+             water = map_tone(34), label = map_tone(66);
+    bool ok = land == 15 && building < land && water < land && street < water &&
+              street < building && street <= 6 && label < street;
+    printf("%s map tones: land %u, buildings %u, water %u, streets %u, labels %u\n",
+           ok ? "ok  " : "FAIL", land, building, water, street, label);
+    if (!ok) g_fails++;
+  }
 
   if (g_fails) printf("%d FAILED\n", g_fails); else printf("all T5 render checks passed\n");
   return g_fails ? 1 : 0;

@@ -274,7 +274,7 @@ static void draw_header(int count) {
     snprintf(b, sizeof(b), "%d CONTACT%s", count, count == 1 ? "" : "S");
   } else if (count > 0) {
     s_cv->setTextColor(s_bar_mut);
-    snprintf(b, sizeof(b), "%d TRACKED", count);
+    snprintf(b, sizeof(b), "%d IN HISTORY", count);
   } else {
     s_cv->setTextColor(s_bar_mut);
     snprintf(b, sizeof(b), "NO CONTACTS");

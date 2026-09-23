@@ -169,15 +169,18 @@ the alert bar.
 
 It also carries an offline map — the same tiles the SenseCAP uses, pushed
 by the Mac app's "Sync Map Tiles" button over USB. There is no second tile
-set: CARTO's dark style is inverted into sixteen greys on the device, which
-reads like a printed street map in daylight. The map frames you and every
+set: the device re-tones CARTO's dark style into a printed street map for
+daylight. Land becomes paper, streets and road edges dark lines, buildings a
+faint tint, water light grey and labels black, using the greys the panel
+shows distinctly. The map frames you and every
 live contact at the deepest zoom that fits, draws each aircraft with its
 heading and a halo so it reads over street ink, and shows a scale bar.
 
 The board self-locates. Its GPS feeds the operator position directly, so
 the range rings and the map frame around you in the field with nothing
-attached; the header shows the satellite count (`GPS 9`), or `APP POS` when
-the Mac app supplied the position instead, or `NO POS`.
+attached; the header shows the satellite count (`GPS 9`), `GPS --` while
+it searches, `APP POS` when the Mac app supplied the position instead, or
+`NO POS`.
 
 Battery percentage comes from the board's fuel gauge (a TI BQ27220), which
 has to be told the cell it is measuring. Unconfigured, it counts against
@@ -188,19 +191,19 @@ rewrites it only when they differ, which costs a few seconds once. The
 boot log's `gauge` line says what it found, and the settings screen shows
 the capacity the percentage is counted against.
 
-It has touch. The header has TABLE and MAP tabs. On the table, tap a row
-to select it and tap it again for its details card; tap an aircraft on
-the plot to select it, or an empty spot on the plot to open the map. With
-more than eight contacts, a PAGE button in the footer turns the pages. On
-the map, tap a marker to select it (a banner shows its vitals, with
+It has touch. The header has TABLE and MAP tabs. On the table, tap a row to
+select it, then DETAILS (or a second tap) for its details; tap an aircraft
+on the plot to select it, or an empty spot on the plot to open the map.
+With more than eight contacts, a PAGE button in the footer turns the pages.
+On the map, tap a marker to select it (a banner shows its vitals, with
 DETAILS and X buttons), tap anywhere else to re-centre there, drag to pan,
 and use the + / − boxes to zoom; the view stays where you put it until you
-tap the reticle or the `MANUAL PAN - TAP TO FOLLOW` button (or two minutes
-pass), then auto-follow resumes. The footer always says what a tap does on
-the current board. The selection follows the aircraft, not the row: a
-packet from another drone can reorder the table without changing what you
-have selected. E-paper is slow, so gestures are whole taps and
-drag-releases rather than live tracking.
+tap the reticle or the `MANUAL VIEW | TAP TO FIT ALL` button (or two
+minutes pass), then it frames you and every live contact again. The footer
+always says what a tap does on the current board. The selection follows the
+aircraft, not the row: a packet from another drone can reorder the table
+without changing what you have selected. E-paper is slow, so gestures are
+whole taps and drag-releases rather than live tracking.
 
 E-paper is slow and ghosts, so the board only redraws when its content
 actually changes: fast partial updates for routine table and map changes,

@@ -169,12 +169,12 @@ static inline const char* ui_height_ref(uint8_t ref) { return ref ? "AGL" : "abo
 /// Airspace line for a contact. "No match" is only claimed against data
 /// the host actually pushed; without any, say so instead of "clear".
 static inline void ui_airspace_text(char* b, size_t n, const Track* t, uint32_t now) {
-  if (t->in_tfr)            snprintf(b, n, "TFR MATCH: %s", t->tfr_id);
-  else if (!g_tfr_loaded)   snprintf(b, n, "TFR data not loaded (connect app)");
-  else if (!t->has_pos)     snprintf(b, n, "no position to check for TFRs");
-  else if (g_tfr_n == 0)    snprintf(b, n, "no TFRs pushed for this area (%lum ago)",
+  if (t->in_tfr)            snprintf(b, n, "inside TFR %s", t->tfr_id);
+  else if (!g_tfr_loaded)   snprintf(b, n, "no TFR data (connect the Mac app)");
+  else if (!t->has_pos)     snprintf(b, n, "no position to check TFRs");
+  else if (g_tfr_n == 0)    snprintf(b, n, "no TFRs in this area (updated %lu min ago)",
                                      (unsigned long)((now - g_tfr_ms) / 60000));
-  else                      snprintf(b, n, "no match in %u TFRs (pushed %lum ago)", g_tfr_n,
+  else                      snprintf(b, n, "outside %u TFRs (updated %lu min ago)", g_tfr_n,
                                      (unsigned long)((now - g_tfr_ms) / 60000));
 }
 
@@ -215,19 +215,21 @@ static inline void ui_headline(char* b, size_t n, const UiSummary* s) {
   else if (s->active > 0)
     snprintf(b, n, "%d CONTACT%s", s->tracked, s->tracked == 1 ? "" : "S");
   else if (s->tracked > 0)
-    snprintf(b, n, "%d TRACKED", s->tracked);
+    snprintf(b, n, "%d IN HISTORY", s->tracked);
   else
     snprintf(b, n, "NO CONTACTS");
 }
 
+/// ASTM F3411 operational status: 0 undeclared, 1 ground, 2 airborne,
+/// 3 emergency, 4 Remote ID system failure.
 static inline const char* ui_status_name(uint8_t st) {
   return st == 2 ? "airborne" : st == 1 ? "on ground"
-       : st == 3 ? "EMERGENCY" : "unknown";
+       : st == 3 ? "EMERGENCY" : st == 4 ? "RID failure" : "unknown";
 }
 static inline const char* ui_auth_text(uint8_t st) {
   return st == 3 ? "ID sig: valid"
        : st == 4 ? "ID SIG INVALID"
-       : st == 2 ? "ID sig: untrusted"
+       : st == 2 ? "ID sig: unknown key"
        : st == 1 ? "ID sig: partial" : "";
 }
 static inline uint16_t ui_auth_color(uint8_t st) {

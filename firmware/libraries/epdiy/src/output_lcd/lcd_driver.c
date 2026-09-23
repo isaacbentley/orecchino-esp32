@@ -141,6 +141,11 @@ typedef struct {
 
     /// The number of lines of the display
     int display_lines;
+
+    // Orecchino patch: the CKV high time the board configured, and the one
+    // the next frame should use (see epd_lcd_set_ckv_high_time).
+    int ckv_high_default;
+    int ckv_high_next;
 } s3_lcd_t;
 
 static s3_lcd_t lcd = { 0 };
@@ -180,8 +185,9 @@ static void IRAM_ATTR start_ckv_cycles(int cycles) {
 
 /**
  * Build the RMT signal according to the timing set in the lcd object.
+ * Orecchino patch: IRAM, as epd_lcd_start_frame (IRAM) now calls it.
  */
-static void ckv_rmt_build_signal() {
+static void IRAM_ATTR ckv_rmt_build_signal() {
     int low_time = (lcd.line_length_us * 10 - lcd.config.ckv_high_time);
     rmt_compat_write_single_item(
         RMT_CKV_CHAN, lcd.config.ckv_high_time, true, low_time, false, true
@@ -642,6 +648,8 @@ void epd_lcd_init(const LcdEpdConfig_t* config, int display_width, int display_h
     ESP_GOTO_ON_ERROR(ret, err, TAG, "configure GPIO failed");
 
     init_ckv_rmt();
+    lcd.ckv_high_default = lcd.config.ckv_high_time;
+    lcd.ckv_high_next = lcd.config.ckv_high_time;
 
     // setup driver state
     epd_lcd_set_pixel_clock_MHz(lcd.config.pixel_clock / 1000 / 1000);
@@ -700,8 +708,32 @@ void epd_lcd_set_pixel_clock_MHz(int frequency) {
     ckv_rmt_build_signal();
 }
 
+// Orecchino patch. Upstream drives every waveform phase with the board's
+// one CKV high time (6 us on the v7 board), so a waveform's per-phase times
+// never reach the panel on the S3. The ESP32 path uses them as each row's
+// CKV high time, and ED047TC1 builds its greys from 0.8-2 us lightening
+// pulses; at a fixed 6 us, level 1 got the drive meant for level 7 and
+// everything from level 4 up came out near white. The time is capped so
+// CKV still spends 1 us low in each line; <= 0 restores the board default.
+void epd_lcd_set_ckv_high_time(int dus) {
+    lcd.ckv_high_next = dus > 0 ? dus : lcd.ckv_high_default;
+}
+
 void IRAM_ATTR epd_lcd_start_frame() {
     int initial_lines = min(LINE_BATCH, lcd.display_lines);
+
+    // Orecchino patch: apply the frame's CKV high time before CKV starts.
+    // Safe to rewrite the RMT item here: this runs once the feeder tasks
+    // have queued 64 lines, milliseconds after the previous frame's last
+    // CKV cycle, and start_ckv_cycles() below resets and restarts it.
+    int ckv_high = lcd.ckv_high_next;
+    int ckv_high_max = lcd.line_length_us * 10 - 10;
+    if (ckv_high > ckv_high_max) ckv_high = ckv_high_max;
+    if (ckv_high < 5) ckv_high = 5;
+    if (ckv_high != lcd.config.ckv_high_time) {
+        lcd.config.ckv_high_time = ckv_high;
+        ckv_rmt_build_signal();
+    }
 
     // hsync: pulse with, back porch, active width, front porch
     int end_line
@@ -761,5 +793,7 @@ void IRAM_ATTR epd_lcd_start_frame() {
 void epd_lcd_init(const LcdEpdConfig_t* config, int display_width, int display_height) {
     assert(false);
 }
+
+void epd_lcd_set_ckv_high_time(int dus) {}
 
 #endif  // S3 Target

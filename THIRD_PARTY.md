@@ -19,11 +19,17 @@ Compiled into or referenced by this project. Audited 2026-08-17.
   3.1.2 (BSD-2-Clause OR CC0-1.0), vendored unmodified. Ed25519 signing for
   the test beacon's Authentication messages.
 - `firmware/libraries/epdiy/` — [epdiy](https://github.com/vroland/epdiy)
-  2.1.3 (LGPL-3.0-or-later), vendored unmodified: `src/`, its
-  `library.properties`, `LICENSE` and `README.md`. Drives the T5 E-Paper
-  S3 Pro's ED047TC1 panel as an epdiy v7 board. LGPL-3.0 is compatible
-  with this project's GPL-3.0-or-later. (LilyGO's own fork of epdiy 2.0.0
-  targets ESP-IDF 4.x and does not build on the current Arduino core.)
+  2.1.3 (LGPL-3.0-or-later): `src/`, its `library.properties`, `LICENSE`
+  and `README.md`. Drives the T5 E-Paper S3 Pro's ED047TC1 panel as an
+  epdiy v7 board. LGPL-3.0 is compatible with this project's
+  GPL-3.0-or-later. (LilyGO's own fork of epdiy 2.0.0 targets ESP-IDF 4.x
+  and does not build on the current Arduino core.) One local patch, marked
+  "Orecchino patch" in `src/output_lcd/lcd_driver.{c,h}` and
+  `render_lcd.c`: on the ESP32-S3 the LCD output drove every waveform
+  phase with one fixed CKV high time, ignoring the waveform's per-phase
+  times, so ED047TC1's short grey-building pulses ran several times too
+  long and grey 4 and up came out nearly white. The patch applies each
+  phase's time, capped to fit a line, as epdiy's ESP32 output already does.
 - `firmware/orecchino_tembed/`, `firmware/orecchino_t5epd/`,
   `firmware/orecchino_amoled/` — written for this project. Pin and
   power-sequence facts come from the vendors' MIT-licensed example code:

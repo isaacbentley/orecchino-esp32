@@ -867,8 +867,14 @@ void periph_power_off() {
     s_input_task_handle = nullptr;
   }
 
+  // Decide once how the board comes back, before the ~1 s redraw: the
+  // screen's instruction and the action below must not disagree if USB is
+  // unplugged mid-draw. On battery it cuts its own power (ship mode) and
+  // only PWR restarts it; on USB it deep-sleeps and BOOT wakes it.
+  bool ship = s_have_charger && !periph_on_vbus();
+
   // 1. Draw persistent power-off screen on E-paper display and power down TPS65185
-  ui_show_shutdown_screen();
+  ui_show_shutdown_screen(!ship);
 
   // 2. Turn off backlight PT4103 boost converter. Drive the pin directly:
   //    periph_bl_set_duty() persists to NVS and would zero the saved brightness.
@@ -881,7 +887,7 @@ void periph_power_off() {
   }
 
   // 4. If running on battery (not connected to USB), command BQ25896 to disconnect battery (Ship mode)
-  if (s_have_charger && !periph_on_vbus()) {
+  if (ship) {
     Serial.println("[ORECCHINO] Disconnecting battery FET (Ship mode shutdown)...");
     delay(50);
     uint8_t reg9 = 0;
