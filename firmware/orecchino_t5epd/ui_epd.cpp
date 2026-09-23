@@ -1766,16 +1766,17 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   static bool was_syncing = false;
   if (syncing != was_syncing) { was_syncing = syncing; if (!syncing) { s_sig_prev = 0; } }
 
-  // Hardware Power/Function button (PCA9535 S3 button IO1_2):
-  static bool pwr_was = false; static uint32_t pwr_down = 0, pwr_poll = 0;
-  bool pwr_k = pwr_was;
-  if (now - pwr_poll >= 50) { pwr_poll = now; pwr_k = periph_pwr_btn_down(); }  // one I2C read per 50 ms, not per pass
-  if (pwr_k && !pwr_was) { pwr_down = now; }
-  if (pwr_k && (now - pwr_down >= 800)) {
+  // The IO48 key (PCA9535 IO1_2): hold to power off, LilyGO's convention for
+  // this board. The PWR key cannot do it: it is not wired to the MCU.
+  static bool io48_was = false; static uint32_t io48_down = 0, io48_poll = 0;
+  bool io48 = io48_was;
+  if (now - io48_poll >= 50) { io48_poll = now; io48 = periph_io48_key_down(); }  // one I2C read per 50 ms, not per pass
+  if (io48 && !io48_was) { io48_down = now; }
+  if (io48 && (now - io48_down >= 800)) {
     periph_power_off();
     return;
   }
-  pwr_was = pwr_k;
+  io48_was = io48;
 
   // BOOT button: tap = next contact / toggle TX, hold 2.0 s = power off (RX) or return to RX (TX)
   static bool was = false; static uint32_t down = 0; static uint8_t hold_level = 0;

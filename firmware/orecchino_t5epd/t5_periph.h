@@ -77,9 +77,11 @@ bool    periph_set_utc_time_host(time_t epoch);
 /// chip, it does not answer, or it flags its time as lost.
 bool    periph_rtc_iso(char* out, size_t n);
 
-// Power management & hardware button (BQ25896 charger, PCA9535 S3 button, power off)
+// Power management and the IO48 key. The key silk-screened IO48 is LilyGO's
+// function button S3 on PCA9535 IO1_2 (GPIO48 itself drives the panel's CKV).
+// PWR is not wired to the MCU at all: it only switches the board on.
 bool    periph_is_charging();
 bool    periph_on_vbus();
-bool    periph_pwr_btn_down();
+bool    periph_io48_key_down();
 void    periph_power_off();
 

@@ -209,10 +209,11 @@ actually changes: fast partial updates for routine table and map changes,
 a clean full refresh every ten updates, on any alert change, when you
 switch views, and at least every five minutes. The BOOT button steps
 through contacts on the table, then over to the map, then back; hold it
-for two seconds to power the board off (the side power button does the
-same after a short hold; in test beacon mode the hold returns to receiver
-mode instead). The SYSTEM button in the footer opens a settings screen:
-backlight control first, then the mode switch and power-off (each behind a
+for two seconds to power the board off (the key labelled IO48 does the
+same after a short hold; in test beacon mode the BOOT hold returns to
+receiver mode instead). The PWR key only switches the board on: it is not
+wired to the processor, so the firmware cannot read it. The SYSTEM button
+in the footer opens a settings screen: backlight control first, then the mode switch and power-off (each behind a
 confirmation), hardware readouts, and the engineering controls last (panel
 voltage (VCOM) trim and a greyscale test strip). The details card
 qualifies its airspace line by what TFR data the app has actually pushed —

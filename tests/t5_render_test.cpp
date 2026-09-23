@@ -59,7 +59,7 @@ bool periph_bl_is_active() { return true; } bool periph_is_after_sundown() { ret
 bool periph_on_vbus() { return true; }
 double periph_sun_elevation() { return 31; }
 bool periph_poll_touch_event(TouchEvent*) { return false; }
-bool periph_home_key() { return false; } bool periph_pwr_btn_down() { return false; }
+bool periph_home_key() { return false; } bool periph_io48_key_down() { return false; }
 void periph_power_off() {}
 int txui_count() { return 10; }
 static const char* TXIDS[10] = {"ORECCHINO-TX-WIFI", "ORECCHINO-TX-NAN", "ORECCHINO-TX-BLE5", "ORECCHINO-TX-BLELR", "ORECCHINO-TX-BLE4", "ORECCHINO-TX-V0", "ORECCHINO-TX-SINGLE", "ORECCHINO-TX-DUAL", "ORECCHINO-TX-AUTH", "ORECCHINO-TX-AUTHBAD"};

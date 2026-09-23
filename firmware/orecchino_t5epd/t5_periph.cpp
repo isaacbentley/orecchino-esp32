@@ -799,12 +799,12 @@ void periph_tick(uint32_t now) {
   }
 }
 
-bool periph_pwr_btn_down() {
+bool periph_io48_key_down() {
   if (!s_pca) return false;
   uint8_t reg = 0x01; // PCA9535 Input port 1
   uint8_t val = 0xFF;
   if (wrrd(s_pca, &reg, 1, &val, 1)) {
-    // PCA_PIN_PC12 is bit 2 (0x04). Active LOW when button pressed.
+    // IO1_2 is bit 2 (0x04), active low: the key labelled IO48.
     return (val & 0x04) == 0;
   }
   return false;
