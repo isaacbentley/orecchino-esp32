@@ -13,7 +13,7 @@ MKLFS=$(ls ~/Library/Arduino15/packages/esp32/tools/mklittlefs/*/mklittlefs | ta
 ESPTOOL=$(ls ~/Library/Arduino15/packages/esp32/tools/esptool_py/*/esptool | tail -1)
 
 IMG=$(mktemp -t orecchino_fs)
+trap 'rm -f "$IMG"' EXIT   # also when mklittlefs or esptool fails
 "$MKLFS" -c "$DATA" -b 4096 -p 256 -s $((SIZE)) "$IMG"
 "$ESPTOOL" --chip esp32s3 -p "$PORT" write-flash "$OFFSET" "$IMG"
-rm -f "$IMG"
 echo "flashed $(du -h "$DATA" | tail -1 | cut -f1) of data to $OFFSET"

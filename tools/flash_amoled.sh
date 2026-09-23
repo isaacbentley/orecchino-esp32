@@ -5,21 +5,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+source tools/flash_common.sh
+
 PORT="${1:-}"
 if [ -z "$PORT" ]; then
-  PORT="$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1 || true)"
-  if [ -z "$PORT" ]; then
-    echo "Error: No USB serial device found (/dev/cu.usbmodem*)."
-    echo "Usage: tools/flash_amoled.sh /dev/cu.usbmodemXXXX"
-    exit 1
-  fi
-  echo "Auto-detected port: $PORT"
+  pick_port "tools/flash_amoled.sh /dev/cu.usbmodemXXXX" /dev/cu.usbmodem* || exit 1
 fi
 
 FQBN="esp32:esp32:esp32c6:FlashSize=16M,PartitionScheme=custom,CDCOnBoot=cdc"
 
-pkill -9 -x Orecchino 2>/dev/null || true
-sleep 1
+quit_app
 arduino-cli compile --jobs 2 --libraries firmware/libraries -b "$FQBN" firmware/orecchino_amoled
 arduino-cli upload -b "$FQBN" -p "$PORT" firmware/orecchino_amoled
 

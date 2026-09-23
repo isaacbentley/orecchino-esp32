@@ -18,13 +18,15 @@ set_clock() {
   # A dial-in tty.* node waits in open() for a carrier signal this board
   # never raises; its call-out cu.* twin is the same device without the wait.
   case "$port" in /dev/tty.*) port="/dev/cu.${port#/dev/tty.}" ;; esac
-  raw="$(/usr/bin/mktemp -t orecchino_rtc)" || return 1
 
   # One cleanup for every way out. A background job ignores Ctrl-C and
   # Ctrl-\ in a script, so the reader is killed here rather than trusted to
   # die; left running it would split the port's input with the Mac app.
   # Each signal is re-raised after cleanup so the script, and anything
-  # running it in a loop, still stops the way it was told to.
+  # running it in a loop, still stops the way it was told to. The traps go
+  # in before the capture file is made, so only a signal landing inside the
+  # mktemp call itself could strand one.
+  raw=""
   stop_reader() {
     if [ -n "$reader" ]; then
       kill "$reader" 2>/dev/null || true
@@ -32,8 +34,15 @@ set_clock() {
       reader=""
     fi
   }
-  finish() { stop_reader; rm -f "$raw" || true; trap - INT TERM HUP QUIT; }
+  finish() {
+    stop_reader
+    if [ -n "$raw" ]; then rm -f "$raw" || true; fi
+    trap - INT TERM HUP QUIT
+  }
   for sig in INT TERM HUP QUIT; do trap "finish; kill -$sig \$\$" "$sig"; done
+  # In $TMPDIR (macOS's `mktemp -t` ignores it), so a caller -- the tests --
+  # can give each run a directory of its own.
+  raw="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/orecchino_rtc.XXXXXXXX")" || { finish; return 1; }
 
   # Plain opens are enough: on this native USB port the baud rate means
   # nothing, so there is nothing for stty to set. A reset can take the port
@@ -104,6 +113,7 @@ set_clock() {
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 cd "$(dirname "$0")/.."
+source tools/flash_common.sh
 
 CLOCK_ONLY=0
 if [ "${1:-}" = "--clock-only" ]; then
@@ -113,19 +123,12 @@ fi
 
 PORT="${1:-}"
 if [ -z "$PORT" ]; then
-  PORT="$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1 || true)"
-  if [ -z "$PORT" ]; then
-    echo "Error: No USB serial device found (/dev/cu.usbmodem*)."
-    echo "Usage: tools/flash_t5epd.sh [--clock-only] /dev/cu.usbmodemXXXX"
-    exit 1
-  fi
-  echo "Auto-detected port: $PORT"
+  pick_port "tools/flash_t5epd.sh [--clock-only] /dev/cu.usbmodemXXXX" /dev/cu.usbmodem* || exit 1
 fi
 
 FQBN="esp32:esp32:esp32s3:FlashMode=dio,FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240,CDCOnBoot=cdc,LoopCore=1,EventsCore=1"
 
-pkill -9 -x Orecchino 2>/dev/null || true
-sleep 1
+quit_app
 
 if [ "$CLOCK_ONLY" = 0 ]; then
   arduino-cli compile --jobs 2 --libraries firmware/libraries -b "$FQBN" firmware/orecchino_t5epd
