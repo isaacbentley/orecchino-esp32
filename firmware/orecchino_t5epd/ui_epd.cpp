@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <PNGdec.h>
+#include <new>
 #include <Adafruit_GFX.h>  // for its Fonts/ (GFXfont layout is shared)
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
@@ -814,7 +815,24 @@ static inline uint8_t map_tone(int luma) {
 #define TILE_ZMAX 15
 #define MAP_HUD_H 46             // selected-contact banner: tall enough for a finger
 static int s_pan_bx = 20, s_pan_bw = 0;   // the MANUAL PAN button, for the hit-test
-static PNG  s_png;
+// The decoder carries ~45 KB of state. It lives in PSRAM: the Wi-Fi driver
+// and the BT controller need every kilobyte of internal RAM, and with this
+// in internal .bss the Wi-Fi driver failed to start ("Expected to init 4 rx
+// buffer, actual is 3"), silently stopping Remote ID reception over Wi-Fi.
+// Without PSRAM there is no decoder and the map draws without tiles, rather
+// than taking the internal RAM back.
+static PNG* png() {
+  static PNG* p = nullptr;
+  if (!p) {
+#if defined(ESP_PLATFORM)
+    void* m = heap_caps_malloc(sizeof(PNG), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (m) p = new (m) PNG();
+#else
+    p = new PNG();
+#endif
+  }
+  return p;
+}
 static File s_pngFile;
 static int  s_blit_x, s_blit_y;             // screen origin of the tile being decoded
 
@@ -878,7 +896,7 @@ static int pngDrawCb(PNGDRAW* d) {
   if (d->iWidth > (int)(sizeof(line) / sizeof(line[0]))) return 0;
   int y = s_blit_y + d->y;
   if (y < MAP_Y0 || y >= MAP_Y0 + MAP_H) return 1;
-  s_png.getLineAsRGB565(d, line, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+  png()->getLineAsRGB565(d, line, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
 
   // Direct 4-bit framebuffer span write — EPD_ROT_LANDSCAPE is the identity
   // transform, so user (x,y) maps straight to framebuffer (x,y).  The stride
@@ -920,12 +938,13 @@ static void draw_map() {
       if (tx >= 0 && ty >= 0 && tx <= tmax && ty <= tmax) {
         char path[48];
         snprintf(path, sizeof(path), "/tiles/%d/%ld/%ld.png", s_cam_z, tx, ty);
-        if (s_png.open(path, pngOpenCb, pngCloseCb, pngReadCb, pngSeekCb, pngDrawCb) == PNG_SUCCESS) {
-          if (s_png.getWidth() <= 256) {
-            s_png.decode(nullptr, 0);
+        PNG* dec = png();
+        if (dec && dec->open(path, pngOpenCb, pngCloseCb, pngReadCb, pngSeekCb, pngDrawCb) == PNG_SUCCESS) {
+          if (dec->getWidth() <= 256) {
+            dec->decode(nullptr, 0);
             tiles_drawn++;
           }
-          s_png.close();
+          dec->close();
         }
       }
     }

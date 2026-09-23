@@ -112,6 +112,7 @@ Track*                   g_trk_live        = g_tracks;
 static volatile uint32_t s_live_gen        = 0;  // bumped on every table change
 static volatile uint8_t  s_cur_chan        = 6;
 static bool s_ble_ok  = false;
+static bool s_wifi_ok = false;
 static bool s_ble_ext = false;
 
 
@@ -249,8 +250,10 @@ static void hop_cb(void*) {
 }
 #endif
 
-static void wifi_start_sniffer() {
-  WiFi.mode(WIFI_STA);
+/// Returns false when the Wi-Fi driver did not start (it needs ~50 KB of
+/// internal RAM); the boot line says so rather than hearing nothing silently.
+static bool wifi_start_sniffer() {
+  if (!WiFi.mode(WIFI_STA)) return false;  // the driver's buffers didn't fit
   WiFi.disconnect();
   esp_wifi_set_ps(WIFI_PS_NONE);  // modem sleep gates promiscuous RX
   delay(100);
@@ -258,9 +261,10 @@ static void wifi_start_sniffer() {
   filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
   esp_wifi_set_promiscuous_filter(&filt);
   esp_wifi_set_promiscuous_rx_cb(&wifi_cb);
-  esp_wifi_set_promiscuous(true);
+  bool ok = esp_wifi_set_promiscuous(true) == ESP_OK;
   esp_wifi_set_channel(HOP[0].chan, WIFI_SECOND_CHAN_NONE);
   s_cur_chan = HOP[0].chan;
+  return ok;
 }
 
 // -------------------------------------------------------------- BLE scanning
@@ -998,7 +1002,7 @@ static void rx_begin(const char* extra_json) {
                           CONFIG_ARDUINO_RUNNING_CORE);
 #endif
   s_ble_ok = ble_start_scanner();  // bring up BT before promiscuous WiFi
-  wifi_start_sniffer();
+  s_wifi_ok = wifi_start_sniffer();
   s_cur_chan = HOP[0].chan;
 #if RX_ASYNC
   esp_timer_create_args_t ta = {};
@@ -1008,8 +1012,9 @@ static void rx_begin(const char* extra_json) {
   esp_timer_start_once(s_hop_timer, (uint64_t)HOP[0].dwell_ms * 1000);
 #endif
   Serial.printf("{\"type\":\"boot\",\"fw\":\"%s\",\"ver\":\"%s\",\"board\":\"%s\","
-                "\"ble\":%s,\"ble_ext\":%s%s}\n",
-                FW_NAME, FW_VERSION, FW_BOARD, s_ble_ok ? "true" : "false",
+                "\"wifi\":%s,\"ble\":%s,\"ble_ext\":%s%s}\n",
+                FW_NAME, FW_VERSION, FW_BOARD, s_wifi_ok ? "true" : "false",
+                s_ble_ok ? "true" : "false",
                 s_ble_ext ? "true" : "false", extra_json ? extra_json : "");
 }
 
