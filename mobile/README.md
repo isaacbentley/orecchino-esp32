@@ -152,8 +152,31 @@ display name "Orecchino". The version is `version:` in `pubspec.yaml`
 `CFBundleShortVersionString`/`CFBundleVersion` and
 `versionName`/`versionCode`.
 
-`flutter build ios --no-codesign --simulator` needs a full Xcode install;
-`flutter build apk --debug` needs the Android SDK.
+Toolchain, the minimum that builds both (checked with Flutter 3.47.5):
+
+- **Android**: JDK 17 and the Android command-line tools, no Android Studio.
+  `brew install openjdk@17` and `brew install --cask android-commandlinetools`,
+  then `sdkmanager --sdk_root=$HOME/Library/Android/sdk --licenses` and
+  `sdkmanager --sdk_root=$HOME/Library/Android/sdk "platform-tools"
+  "platforms;android-36" "build-tools;36.0.0"`, and point Flutter at both:
+  `flutter config --android-sdk $HOME/Library/Android/sdk --jdk-dir
+  "$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"`. The first
+  Gradle build fetches the rest itself (platforms 34/35, CMake, the NDK):
+  budget about 9 GB for the SDK plus `~/.gradle`.
+- **iOS**: full Xcode (the Command Line Tools are not enough) and CocoaPods
+  (`brew install cocoapods`; `flutter_compass` and `flutter_tts` have no
+  Swift Package Manager support yet, the other plugins come through SPM).
+  No simulator runtime is needed to compile.
+
+```bash
+flutter build apk --release          # build/app/outputs/flutter-apk/
+flutter build ios --release --no-codesign
+```
+
+The iOS project targets iOS 16.0 (`ios/Podfile`, `Runner.xcodeproj`).
+`pod install` warns that the Profile configuration has no Pods base
+configuration; that is the Flutter template and only affects `--profile`
+builds.
 
 ### Signing an Android release
 
@@ -187,8 +210,9 @@ Time Sensitive Notifications capability to the App ID (see Permissions).
   Extension target in `ios/` (ActivityKit, `NSSupportsLiveActivities` in
   `Info.plist`, an `ActivityAttributes` struct shared by the app and the
   extension, and a method channel from `AlertSink.ongoing` to start, update
-  and end the activity). Not added here: it cannot be built or tested without
-  Xcode. Android's equivalent, the ongoing notification, is done.
+  and end the activity). Not added yet: it builds with the toolchain above,
+  but testing it needs an iPhone or an iOS simulator runtime. Android's
+  equivalent, the ongoing notification, is done.
 - iOS state restoration for background BLE (`bluetooth-central` is declared;
   the app does not yet restore its central manager after being terminated).
 - History: the timeline scrubber, map replay and CSV export of plan §5.3.
