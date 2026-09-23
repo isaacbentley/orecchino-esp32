@@ -1,0 +1,361 @@
+{
+ "name": "drone_labels",
+ "description": "The drone id in the words is a readable tail: internal uas:/mac: prefixes dropped, a MAC-only drone reads MAC + its last three bytes (12 hex digits, or pairs joined by ':' or '-'), a long id its last 5 grown past leading punctuation (never '-9A01'), a short id whole.",
+ "worked_example": [
+  "DRONE-B-9A01: last 5 = '-9A01' starts with '-', grow to 'B-9A01'.",
+  "3C71BF4CC5A2 (a MAC as the T5 keys it): MAC 4C:C5:A2. 3c71bf4cc5a3: MAC 4C:C5:A3 (upper-cased).",
+  "02:00:5E:7E:57:01 (as the Mac keys it): MAC 7E:57:01. mac:02-00-5e-7e-57-02: prefix dropped, MAC 7E:57:02.",
+  "uas:1581F20000D9A04: prefix dropped, D9A04. DJI-1: 5 characters, whole.",
+  "A:B:C:D:E:F:0 (13 characters, not a MAC): last 5 'E:F:0' starts with a letter, kept. 1581F20000_-_D9A05: last 5 'D9A05'."
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": 20
+ },
+ "drones": [
+  {
+   "id": "DRONE-B-9A01",
+   "lat": 37.810873,
+   "lon": -122.4194,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "3C71BF4CC5A2",
+   "lat": 37.810873,
+   "lon": -122.362498,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "3c71bf4cc5a3",
+   "lat": 37.810873,
+   "lon": -122.305595,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "02:00:5E:7E:57:01",
+   "lat": 37.810873,
+   "lon": -122.248693,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "mac:02-00-5e-7e-57-02",
+   "lat": 37.810873,
+   "lon": -122.19179,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "uas:1581F20000D9A04",
+   "lat": 37.810873,
+   "lon": -122.134888,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "DJI-1",
+   "lat": 37.810873,
+   "lon": -122.077985,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "A:B:C:D:E:F:0",
+   "lat": 37.810873,
+   "lon": -122.021083,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "1581F20000_-_D9A05",
+   "lat": 37.810873,
+   "lon": -121.96418,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a00000",
+     "cs": "N0",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00001",
+     "cs": "N1",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.362498,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00002",
+     "cs": "N2",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.305595,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00003",
+     "cs": "N3",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.248693,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00004",
+     "cs": "N4",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.19179,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00005",
+     "cs": "N5",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.134888,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00006",
+     "cs": "N6",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.077985,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00007",
+     "cs": "N7",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -122.021083,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "a00008",
+     "cs": "N8",
+     "ty": "C172",
+     "lat": 37.81537,
+     "lon": -121.96418,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 9,
+    "summary": "no ADS-B traffic reported within 3 km, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "02:00:5E:7E:57:01",
+      "hex": "a00003",
+      "text": "TRAFFIC NEAR DRONE MAC 7E:57:01",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000_-_D9A05",
+      "hex": "a00008",
+      "text": "TRAFFIC NEAR DRONE D9A05",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "3C71BF4CC5A2",
+      "hex": "a00001",
+      "text": "TRAFFIC NEAR DRONE MAC 4C:C5:A2",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "3c71bf4cc5a3",
+      "hex": "a00002",
+      "text": "TRAFFIC NEAR DRONE MAC 4C:C5:A3",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "A:B:C:D:E:F:0",
+      "hex": "a00007",
+      "text": "TRAFFIC NEAR DRONE E:F:0",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "DJI-1",
+      "hex": "a00006",
+      "text": "TRAFFIC NEAR DRONE DJI-1",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "DRONE-B-9A01",
+      "hex": "a00000",
+      "text": "TRAFFIC NEAR DRONE B-9A01",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "mac:02-00-5e-7e-57-02",
+      "hex": "a00004",
+      "text": "TRAFFIC NEAR DRONE MAC 7E:57:02",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "uas:1581F20000D9A04",
+      "hex": "a00005",
+      "text": "TRAFFIC NEAR DRONE D9A04",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 500.04358512065176,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -1,0 +1,143 @@
+{
+ "name": "near_drone_height_unknown",
+ "description": "Missing drone alt_geo (null or the -1000 marker) or missing aircraft alt_geom: the NEAR warning is raised with HEIGHT UNKNOWN; alt_baro is never compared with a drone.",
+ "worked_example": [
+  "D9A03 has no alt_geo (null): UAL123 500 m away (300 E, 400 N) -> vert unknown, not passed -> TRAFFIC NEAR DRONE D9A03, HEIGHT UNKNOWN.",
+  "N911HC reports only altb_ft 1000 (304.8 m pressure altitude); DJI-1's alt_geo 120 is never compared with it -> vert unknown -> TRAFFIC NEAR DRONE DJI-1, HEIGHT UNKNOWN (id <= 8 chars is used whole).",
+  "Drone D9B77 sends the ODID 'unknown' marker -1000 -> unknown -> TRAFFIC NEAR DRONE D9B77, HEIGHT UNKNOWN; the callsign-less aircraft is keyed by hex e5f6a7."
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": null
+ },
+ "drones": [
+  {
+   "id": "1581F20000D9A03",
+   "lat": 37.806376,
+   "lon": -122.4194,
+   "alt_geo_m": null,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "DJI-1",
+   "lat": 37.806376,
+   "lon": -122.39664,
+   "alt_geo_m": 120,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  },
+  {
+   "id": "D9B77",
+   "lat": 37.806376,
+   "lon": -122.44216,
+   "alt_geo_m": -1000,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.809973,
+     "lon": -122.415985,
+     "altg_m": 300,
+     "gs_kt": 100,
+     "trk": 37,
+     "age_s": 2
+    },
+    {
+     "hex": "d4e5f6",
+     "cs": "N911HC",
+     "ty": "EC35",
+     "lat": 37.811772,
+     "lon": -122.39664,
+     "altb_ft": 1000,
+     "gs_kt": 60,
+     "trk": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "e5f6a7",
+     "cs": "",
+     "ty": "C152",
+     "lat": 37.799181,
+     "lon": -122.44216,
+     "altg_m": 200,
+     "gs_kt": 80,
+     "trk": 180,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 3,
+    "summary": "no ADS-B traffic reported within 3 km, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03, HEIGHT UNKNOWN",
+      "held": false,
+      "height_unknown": true,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 499.98225417942984,
+      "vert_m": null,
+      "bearing_deg": 36.873268955724356,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "DJI-1",
+      "hex": "d4e5f6",
+      "text": "TRAFFIC NEAR DRONE DJI-1, HEIGHT UNKNOWN",
+      "held": false,
+      "height_unknown": true,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 600.0078241737625,
+      "vert_m": null,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "D9B77",
+      "hex": "e5f6a7",
+      "text": "TRAFFIC NEAR DRONE D9B77, HEIGHT UNKNOWN",
+      "held": false,
+      "height_unknown": true,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 800.0474972079281,
+      "vert_m": null,
+      "bearing_deg": 180.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  }
+ ]
+}

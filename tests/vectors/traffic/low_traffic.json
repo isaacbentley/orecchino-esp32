@@ -1,0 +1,85 @@
+{
+ "name": "low_traffic",
+ "description": "CAUTION LOW: fresh aircraft within 3 km of the observer and below its elevation + 460 m; no drones needed.",
+ "worked_example": [
+  "Observer elev 30 m -> threshold 30 + 460 = 490 m.",
+  "N911HC 1485 m E, 1485 m N: 2100.1 m at bearing 45.0 deg (NE), alt_geom 400 < 490 -> LOW TRAFFIC NE 2.1 KM, vert +370.0 m.",
+  "N123 2.5 km W at 600 m: not below 490 -> nothing. N456 3.1 km S at 100 m: beyond 3 km -> nothing.",
+  "near_count 2 (N911HC and N123 within 3 km, both airborne): '2 airborne aircraft within 3 km, data 3 s old'."
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": 30
+ },
+ "drones": [],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 3,
+   "aircraft": [
+    {
+     "hex": "0a1b2c",
+     "cs": "N911HC",
+     "ty": "EC35",
+     "lat": 37.788255,
+     "lon": -122.402503,
+     "altg_m": 400,
+     "altb_ft": 1250,
+     "gs_kt": 110,
+     "trk": 200,
+     "age_s": 3
+    },
+    {
+     "hex": "1a2b3c",
+     "cs": "N123",
+     "ty": "C172",
+     "lat": 37.7749,
+     "lon": -122.447844,
+     "altg_m": 600,
+     "gs_kt": 90,
+     "trk": 90,
+     "age_s": 3
+    },
+    {
+     "hex": "2a3b4c",
+     "cs": "N456",
+     "ty": "C172",
+     "lat": 37.747021,
+     "lon": -122.4194,
+     "altg_m": 100,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 3
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "caution",
+    "near_count": 2,
+    "ground_count": 0,
+    "aircraft_count": 3,
+    "summary": "2 airborne aircraft within 3 km, data 3 s old",
+    "alerts": [
+     {
+      "level": "caution",
+      "kind": "low",
+      "drone": "",
+      "hex": "0a1b2c",
+      "text": "LOW TRAFFIC NE 2.1 KM",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 2100.085655657526,
+      "vert_m": 370.0,
+      "bearing_deg": 44.999095707677945,
+      "cpa_s": null,
+      "age_s": 3.0
+     }
+    ]
+   }
+  }
+ ]
+}

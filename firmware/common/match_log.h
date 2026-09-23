@@ -4,19 +4,24 @@
 //
 // Records are fixed-size and live in a ring of LOG_MAX; the oldest drops
 // out first. Saving to flash is debounced (log_due, from the loop): a busy
-// sky ends many contacts in a burst and NVS should see one write, not one per
-// contact -- at most one a minute, so a power cut can lose the last minute.
+// sky ends many contacts in a burst and NVS should see one write, not one
+// per contact. Each save rewrites the whole 3 KB blob, about one flash
+// sector erased, so saves are rare -- at most one every LOG_SAVE_MS (10
+// min: a busy site then needs ~decades, not ~a year, to wear the NVS
+// partition out) -- plus one at the explicit points that end a session:
+// power-off and mode switch (rx_log_flush). A power cut or crash can lose
+// the records of contacts that ended in the last 10 minutes; contacts
+// still live are re-read from the track table by log_get, not from here.
 // Header-only, included once by rx_core.h.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <Arduino.h>
 #include <Preferences.h>
-#include <limits.h>
-
+#include "ext_ram.h"
 #define LOG_MAX      48
-#define LOG_SAVE_MS  60000   // at most one 3 KB NVS write a minute
-#define LOG_VERSION  1
+#define LOG_SAVE_MS  600000  // at most one 3 KB NVS write every 10 minutes
+#define LOG_VERSION  2
 
 struct LogRec {
   char     uas[24];      // UAS ID, truncated; empty when only a MAC was heard
@@ -34,9 +39,30 @@ struct LogRec {
   uint8_t  flags;        // bit0 was in a TFR, bit1 reported an emergency
   uint8_t  ua_type;      // ODID UA type, 0 unknown
   uint16_t msgs;         // decoded messages attributed to the contact
+  uint32_t seq;          // sequence number (0-indexed)
 };
 
-static LogRec   s_log[LOG_MAX];
+// Legacy v1 record structure for automatic NVS migration
+struct LogRecV1 {
+  char     uas[24];
+  uint8_t  mac[6];
+  uint8_t  src_mask;
+  uint8_t  fmt;
+  uint32_t first_utc;
+  uint32_t last_utc;
+  uint32_t dur_s;
+  int32_t  lat_e5;
+  int32_t  lon_e5;
+  int16_t  max_height;
+  int8_t   peak_rssi;
+  uint8_t  auth_state;
+  uint8_t  flags;
+  uint8_t  ua_type;
+  uint16_t msgs;
+};
+
+static LogRec*  s_log = ext_new<LogRec>(LOG_MAX);   // PSRAM when fitted
+#define LOG_BYTES (sizeof(LogRec) * LOG_MAX)
 static uint8_t  s_log_head = 0;    // next slot to write
 static uint8_t  s_log_n    = 0;    // records held
 static uint32_t s_log_total = 0;   // records ever written (numbering for the host)
@@ -56,13 +82,33 @@ static inline uint32_t log_utc(uint32_t ms) {
 static inline void log_load() {
   Preferences p;
   if (!p.begin("orlog", true)) return;
-  if (p.getUChar("ver", 0) == LOG_VERSION &&
-      p.getBytesLength("recs") == sizeof(s_log)) {
-    p.getBytes("recs", s_log, sizeof(s_log));
+  uint8_t ver = p.getUChar("ver", 0);
+  if (ver == LOG_VERSION && p.getBytesLength("recs") == LOG_BYTES) {
+    p.getBytes("recs", s_log, LOG_BYTES);
     s_log_head  = p.getUChar("head", 0) % LOG_MAX;
     s_log_n     = p.getUChar("n", 0);
     s_log_total = p.getULong("total", 0);
     if (s_log_n > LOG_MAX) s_log_n = LOG_MAX;
+  } else if (ver == 1 && p.getBytesLength("recs") == sizeof(LogRecV1) * LOG_MAX) {
+    // Migration: read v1 records and promote to v2. A record's sequence
+    // number is its place in the history, not its ring slot: the k-th held
+    // record, oldest first, is number total - n + k.
+    LogRecV1* v1_recs = ext_new<LogRecV1>(LOG_MAX);
+    if (!v1_recs) { p.end(); return; }
+    p.getBytes("recs", v1_recs, sizeof(LogRecV1) * LOG_MAX);
+    s_log_head  = p.getUChar("head", 0) % LOG_MAX;
+    s_log_n     = p.getUChar("n", 0);
+    s_log_total = p.getULong("total", 0);
+    if (s_log_n > LOG_MAX) s_log_n = LOG_MAX;
+    if (s_log_total < s_log_n) s_log_total = s_log_n;
+    for (int i = 0; i < LOG_MAX; i++) {
+      memset(&s_log[i], 0, sizeof(LogRec));
+      memcpy(&s_log[i], &v1_recs[i], sizeof(LogRecV1));
+    }
+    free(v1_recs);
+    int start = (s_log_head + LOG_MAX - s_log_n) % LOG_MAX;
+    for (int k = 0; k < s_log_n; k++)
+      s_log[(start + k) % LOG_MAX].seq = s_log_total - s_log_n + (uint32_t)k;
   }
   p.end();
 }
@@ -72,7 +118,7 @@ static inline void log_load() {
 struct LogImage { LogRec recs[LOG_MAX]; uint8_t head, n; uint32_t total; };
 
 static inline void log_snapshot(LogImage* img) {
-  memcpy(img->recs, s_log, sizeof(s_log));
+  memcpy(img->recs, s_log, LOG_BYTES);
   img->head = s_log_head;
   img->n = s_log_n;
   img->total = s_log_total;
@@ -91,7 +137,7 @@ static inline void log_write(const LogImage* img) {
 }
 
 static inline void log_clear() {
-  memset(s_log, 0, sizeof(s_log));
+  memset(s_log, 0, LOG_BYTES);
   s_log_head = 0;
   s_log_n = 0;
   s_log_total = 0;
@@ -101,9 +147,9 @@ static inline void log_clear() {
 
 /// Summarise a contact into a record (also used for live contacts when the
 /// host reads the log, so both come out in the same shape).
-static inline void log_fill(LogRec* r, const Track* t) {
+static inline void log_fill(LogRec* r, const Track* t, uint32_t seq = 0) {
   memset(r, 0, sizeof(*r));
-  strncpy(r->uas, t->uas, sizeof(r->uas) - 1);
+  memcpy(r->uas, t->uas, strnlen(t->uas, sizeof(r->uas) - 1));   // cut to fit, zero-terminated
   memcpy(r->mac, t->mac, 6);
   r->src_mask   = t->src_mask;
   r->fmt        = t->fmt;
@@ -119,11 +165,12 @@ static inline void log_fill(LogRec* r, const Track* t) {
   r->flags      = (t->tfr_ever ? 1 : 0) | (t->emerg_ever ? 2 : 0);
   r->ua_type    = t->ua_type;
   r->msgs       = t->msgs;
+  r->seq        = seq;
 }
 
 /// Record a contact that has ended. Called with the track table locked.
 static inline void log_add(const Track* t, uint32_t now_ms) {
-  log_fill(&s_log[s_log_head], t);
+  log_fill(&s_log[s_log_head], t, s_log_total);
   s_log_head = (s_log_head + 1) % LOG_MAX;
   if (s_log_n < LOG_MAX) s_log_n++;
   s_log_total++;
@@ -131,9 +178,11 @@ static inline void log_add(const Track* t, uint32_t now_ms) {
   s_log_dirty = true;
 }
 
-/// True when pending records have settled long enough to write.
+/// True when pending records have settled long enough to write. Signed:
+/// the decode task stamps s_log_dirty_ms with a millis() newer than the
+/// loop's `now`, and an unsigned difference would wrap to "long overdue".
 static inline bool log_due(uint32_t now_ms) {
-  return s_log_dirty && (s_log_dirty_ms == 0 || now_ms - s_log_dirty_ms >= LOG_SAVE_MS);
+  return s_log_dirty && (s_log_dirty_ms == 0 || (int32_t)(now_ms - s_log_dirty_ms) >= (int32_t)LOG_SAVE_MS);
 }
 
 /// The i-th held record, oldest first.

@@ -10,6 +10,7 @@
 
 extern bool     g_home_set;
 extern double   g_home_lat, g_home_lon;
+extern char     g_home_src[16]; // "gps", "app", "saved" (NVS at boot), ...
 extern uint32_t g_seen_count;
 extern uint8_t  g_tfr_n;        // TFR polygons the host has pushed
 extern bool     g_tfr_loaded;   // ...if it ever has
@@ -19,6 +20,7 @@ extern uint32_t g_tfr_ms;       // when it last did (millis)
 // anything older is history and renders freshness-grey until it expires.
 #define UI_ACTIVE_MS 60000UL
 
+#undef RGB565   // Arduino_GFX has one too, without the uint16_t cast
 #define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 static const uint16_t C_BG     = RGB565(0x07, 0x09, 0x0E);
 static const uint16_t C_TEXT   = RGB565(0xE2, 0xE8, 0xF0);
@@ -65,8 +67,9 @@ static inline void ui_fmt_range(char* out, size_t n, double m) {
   else snprintf(out, n, "%dm", (int)m);
 }
 
+/// Signed: the table copy can carry a last_ms newer than the loop's `now`.
 static inline bool ui_stale(const Track* t, uint32_t now) {
-  return now - t->last_ms > UI_ACTIVE_MS;
+  return (int32_t)(now - t->last_ms) > (int32_t)UI_ACTIVE_MS;
 }
 /// Loud state: emergency, TFR incursion, or a forged identity — and
 /// current. History never shouts.
@@ -197,7 +200,8 @@ static inline void ui_summarize(UiSummary* s, uint32_t now) {
     const Track* t = &g_tracks[i];
     if (!t->used) continue;
     s->tracked++;
-    uint32_t age = (now - t->last_ms) / 1000;
+    int32_t ms = (int32_t)(now - t->last_ms);
+    uint32_t age = ms > 0 ? (uint32_t)ms / 1000 : 0;
     if (age < s->newest_age_s) s->newest_age_s = age;
     if (ui_stale(t, now)) continue;
     s->active++;
@@ -230,8 +234,11 @@ static inline const char* ui_auth_text(uint8_t st) {
   return st == 3 ? "ID sig: valid"
        : st == 4 ? "ID SIG INVALID"
        : st == 2 ? "ID sig: unknown key"
+       : st == 5 ? "ID sig: TEST KEY"
        : st == 1 ? "ID sig: partial" : "";
 }
+/// A test-key signature is neutral grey, never the green of a trusted key:
+/// that key's seed is published, so anyone can make one.
 static inline uint16_t ui_auth_color(uint8_t st) {
   return st == 3 ? C_OK : st == 4 ? C_DANGER : st == 2 ? C_AMBER : C_MUTED;
 }

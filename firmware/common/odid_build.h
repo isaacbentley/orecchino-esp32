@@ -155,16 +155,22 @@ static inline void odid_build_location(uint8_t* m, const OdidTxState* s) {
   m[1] = (uint8_t)(((s->status & 0x0F) << 4) | (ew << 1) | mult);
   m[2] = (uint8_t)(ew ? (dir - 180.0f) : dir);
   m[3] = raw_speed;
-  // 126 is the spec's invalid marker (valid range is +/-62 raw).
-  m[4] = isnan(s->vspeed_ms) ? 126
-                             : (uint8_t)(int8_t)(s->vspeed_ms / 0.5f);
+  // 0.5 m/s steps, +/-62 m/s at most (raw +/-124); 126 (63 m/s) is the
+  // spec's unknown marker. Clamp before the int8 cast: 70 m/s would wrap.
+  float vs = s->vspeed_ms;
+  if (!isnan(vs)) vs = vs > 62.0f ? 62.0f : (vs < -62.0f ? -62.0f : vs);
+  m[4] = isnan(vs) ? 126 : (uint8_t)(int8_t)lroundf(vs / 0.5f);
   odid_put_i32(m + 5, (int32_t)(s->lat * 1e7));
   odid_put_i32(m + 9, (int32_t)(s->lon * 1e7));
   odid_put_u16(m + 13, 0);                          // baro alt unknown
   odid_put_u16(m + 15, odid_enc_alt(s->alt_geo_m));
   odid_put_u16(m + 17, odid_enc_alt(s->height_m));
+  // Accuracy enums as ASTM F3411 defines them (opendroneid-core-c names):
+  // horizontal 9 = HOR_ACC_30_METER (<30 m); vertical 3 = VER_ACC_25_METER
+  // (<25 m); speed 1 = SPEED_ACC_10_METERS_PER_SECOND (<10 m/s). Baro
+  // altitude is sent as unknown above, so its accuracy is unknown (0) too.
   m[19] = (3 << 4) | 9;   // vertical <25 m, horizontal <30 m
-  m[20] = (4 << 4) | 1;   // baro <10 m, speed <10 m/s
+  m[20] = (0 << 4) | 1;   // baro unknown, speed <10 m/s
   odid_put_u16(m + 21, (uint16_t)(s->ts_s * 10.0f));
   m[23] = 10;             // timestamp accuracy 1.0 s
 }

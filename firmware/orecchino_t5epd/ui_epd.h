@@ -13,6 +13,13 @@
 // board redraws only when its content signature changes: fast DU updates for
 // routine changes, a clean GC16 every ten updates, on alert changes, and
 // at least every ten minutes.
+//
+// ADS-B traffic (firmware/common/traffic.h, docs/plans/mobile-app-and-t5-wifi.md
+// §8.3): aircraft are outlined diamonds with a 60 s time ghost on the plot,
+// map and side view; while a warning lasts the plot panel is a traffic card;
+// a new warning flashes the panel (GC16) and pulses the front light. SYSTEM
+// holds the Wi-Fi section (§4.3): networks, an on-screen keyboard refreshed
+// in fast DU partials, join results in words.
 #pragma once
 #include <Arduino.h>
 

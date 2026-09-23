@@ -1,0 +1,99 @@
+{
+ "name": "antimeridian",
+ "description": "Longitudes wrap at +-180: 52N 179.995E to 52N 179.995W is 685 m, not 24,600 km.",
+ "worked_example": [
+  "D9A03 at 52N 179.995E, UAL123 at 52N 179.995W: dlon = -359.99 wraps to +0.01 deg.",
+  "dx = 0.01 * pi/180 * cos(52 deg) * 6371000 = 684.58 m, dy = 0 -> horiz 684.58 m, bearing 90.0 -> TRAFFIC NEAR DRONE D9A03 (vert +100).",
+  "Observer at 179.99E: 0.015 deg = 1026.9 m E, 250 m < 10 + 460 -> LOW TRAFFIC E 1.0 KM. FAR2 at 179W is 1.0 deg (68.7 km) away -> nothing.",
+  "Without the wrap: 359.99 deg of longitude = 24,640 km."
+ ],
+ "observer": {
+  "lat": 52.0,
+  "lon": 179.99,
+  "elev_m": 10
+ },
+ "drones": [
+  {
+   "id": "1581F20000D9A03",
+   "lat": 52.0,
+   "lon": 179.995,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 3,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 52.0,
+     "lon": -179.995,
+     "altg_m": 250,
+     "gs_kt": 100,
+     "trk": 90,
+     "age_s": 3
+    },
+    {
+     "hex": "b2c3d4",
+     "cs": "FAR2",
+     "ty": "B738",
+     "lat": 52.0,
+     "lon": -179.0,
+     "altg_m": 250,
+     "gs_kt": 100,
+     "trk": 90,
+     "age_s": 3
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "near_count": 1,
+    "ground_count": 0,
+    "aircraft_count": 2,
+    "summary": "1 airborne aircraft within 3 km, data 3 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 684.5843258665512,
+      "vert_m": 100.0,
+      "bearing_deg": 90.0,
+      "cpa_s": null,
+      "age_s": 3.0
+     },
+     {
+      "level": "caution",
+      "kind": "low",
+      "drone": "",
+      "hex": "a1b2c3",
+      "text": "LOW TRAFFIC E 1.0 KM",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 1026.8764887998268,
+      "vert_m": 240.0,
+      "bearing_deg": 90.0,
+      "cpa_s": null,
+      "age_s": 3.0
+     }
+    ]
+   }
+  }
+ ]
+}

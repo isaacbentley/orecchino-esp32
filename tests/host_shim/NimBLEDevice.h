@@ -35,5 +35,5 @@ class NimBLEScan { public: NimBLEScanCallbacks* cb = nullptr; bool running = fal
   void setScanCallbacks(NimBLEScanCallbacks* c, bool) { cb = c; } void setActiveScan(bool) {} void setDuplicateFilter(int) {} void setMaxResults(int) {} void setInterval(int) {} void setWindow(int) {}
   bool start(int, bool, bool) { running = true; return true; } bool stop() { running = false; return true; } };
 class NimBLEDevice { public: static NimBLEExtAdvertising adv; static NimBLEScan scan;
-  static void init(const char*) {} static void setPower(int) {}
+  static bool init(const char*) { return true; } static void setPower(int) {}
   static NimBLEExtAdvertising* getAdvertising() { return &adv; } static NimBLEScan* getScan() { return &scan; } };

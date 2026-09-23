@@ -460,6 +460,6 @@ private func decode(_ s: String) throws -> RidMessage {
         let e = try #require(DeviceLogEntry(try decode(Self.live)))
         let csv = DeviceLog.csv([e])
         let row = csv.split(separator: "\n")[1]
-        #expect(row == #"live,"",02:00:5E:7E:57:01,"BLE",,,3,,,,-70,partial,no,yes,4"#)
+        #expect(row == #"live,"","02:00:5E:7E:57:01","BLE",,,3,,,,-70,"partial",no,yes,4"#)
     }
 }

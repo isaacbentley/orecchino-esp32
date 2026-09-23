@@ -1,0 +1,467 @@
+{
+ "name": "host_lines",
+ "description": "The traffic / traffic_done host lines of plan section 8.1 (format in firmware/common/traffic.h): parsing, units, the atomic set swap and filtering. Each case starts from an empty receiver; every line is handled at now_ms.",
+ "worked_example": [
+  "UAL123: gs_kt 180 * 1852 / 3600 = 92.6 m/s; altb_ft 2650 * 0.3048 = 807.72 m; vr_fpm -640 * 0.3048 / 60 = -3.2512 m/s; sq \"7700\" -> 7700; age_s 3 at now 100000 ms -> seen_ms 97000.",
+  "Set 1 of case 1 arrives as 5 objects (n = 5); 2 survive; the nearer (N12345, 1 km) comes first."
+ ],
+ "now_ms": 100000,
+ "cases": [
+  {
+   "description": "Two traffic lines and traffic_done: units converted (kt, ft, fpm), hex lower-cased and '~' dropped, callsign trimmed, squawk as string or number; an aircraft without age_s, one 70 s old and one with a bad hex are dropped; a log_get line in between is not ours; nearest first.",
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "lines": [
+    "{\"cmd\":\"traffic\",\"t\":1727000000,\"age_s\":1,\"ac\":[{\"hex\":\"A1B2C3\",\"lat\":37.810873,\"lon\":-122.385259,\"cs\":\" UAL123  \",\"ty\":\"B738\",\"altg_m\":820,\"altb_ft\":2650,\"gs_kt\":180,\"trk\":270,\"vr_fpm\":-640,\"sq\":\"7700\",\"em\":1,\"age_s\":3},{\"hex\":\"~b2c3d4\",\"lat\":37.7749,\"lon\":-122.430778,\"cs\":\"N12345\",\"ty\":\"C172\",\"altg_m\":null,\"sq\":7600,\"em\":false,\"age_s\":0.5}]}",
+    "{\"cmd\":\"log_get\",\"since\":0}",
+    "{\"cmd\":\"traffic\",\"t\":1727000000,\"ac\":[{\"hex\":\"c3d4e5\",\"lat\":37.775799,\"lon\":-122.4194},{\"hex\":\"d4e5f6\",\"lat\":37.776699,\"lon\":-122.4194,\"age_s\":70},{\"hex\":\"zz\",\"lat\":37.777598,\"lon\":-122.4194,\"age_s\":1}]}",
+    "{\"cmd\":\"traffic_done\",\"n\":5,\"age_s\":2}"
+   ],
+   "expect": {
+    "handled": [
+     true,
+     false,
+     true,
+     true
+    ],
+    "have_data": true,
+    "partial": false,
+    "count": 2,
+    "data_age_s": 2.0,
+    "aircraft": [
+     {
+      "hex": "b2c3d4",
+      "callsign": "N12345",
+      "type": "C172",
+      "lat": 37.7749,
+      "lon": -122.430778,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 7600,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 0.5
+     },
+     {
+      "hex": "a1b2c3",
+      "callsign": "UAL123",
+      "type": "B738",
+      "lat": 37.810873,
+      "lon": -122.385259,
+      "alt_geom_m": 820.0,
+      "alt_baro_m": 807.72,
+      "gs_mps": 92.60000000000001,
+      "track_deg": 270.0,
+      "vs_mps": -3.2512,
+      "squawk": 7700,
+      "emergency": true,
+      "on_ground": false,
+      "age_s": 3.0
+     }
+    ]
+   }
+  },
+  {
+   "description": "A set whose traffic_done was lost: the next traffic line with a different t starts a new set.",
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "lines": [
+    "{\"cmd\":\"traffic\",\"t\":100,\"ac\":[{\"hex\":\"aaaaa1\",\"lat\":37.779397,\"lon\":-122.4194,\"age_s\":1}]}",
+    "{\"cmd\":\"traffic\",\"t\":110,\"ac\":[{\"hex\":\"bbbbb1\",\"lat\":37.782994,\"lon\":-122.4194,\"age_s\":1},{\"hex\":\"bbbbb2\",\"lat\":37.780296,\"lon\":-122.4194,\"gs_kt\":-5,\"age_s\":1}]}",
+    "{\"cmd\":\"traffic_done\",\"n\":2}"
+   ],
+   "expect": {
+    "handled": [
+     true,
+     true,
+     true
+    ],
+    "have_data": true,
+    "partial": false,
+    "count": 2,
+    "data_age_s": 0.0,
+    "aircraft": [
+     {
+      "hex": "bbbbb2",
+      "callsign": "",
+      "type": "",
+      "lat": 37.780296,
+      "lon": -122.4194,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     },
+     {
+      "hex": "bbbbb1",
+      "callsign": "",
+      "type": "",
+      "lat": 37.782994,
+      "lon": -122.4194,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "description": "traffic_done alone installs an empty, fresh set: the sender has data and no aircraft.",
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "lines": [
+    "{\"cmd\":\"traffic_done\",\"n\":0}"
+   ],
+   "expect": {
+    "handled": [
+     true
+    ],
+    "have_data": true,
+    "partial": false,
+    "count": 0,
+    "data_age_s": 0.0,
+    "aircraft": []
+   }
+  },
+  {
+   "description": "n on traffic_done does not match what arrived: the set is used and marked partial.",
+   "observer": {
+    "lat": null,
+    "lon": null,
+    "elev_m": null
+   },
+   "lines": [
+    "{\"cmd\":\"traffic\",\"t\":5,\"ac\":[{\"hex\":\"aaaaa1\",\"lat\":37.779397,\"lon\":-122.4194,\"age_s\":1},{\"hex\":\"aaaaa2\",\"lat\":37.775799,\"lon\":-122.4194,\"age_s\":2}]}",
+    "{\"cmd\":\"traffic_done\",\"n\":4}"
+   ],
+   "expect": {
+    "handled": [
+     true,
+     true
+    ],
+    "have_data": true,
+    "partial": true,
+    "count": 2,
+    "data_age_s": 0.0,
+    "aircraft": [
+     {
+      "hex": "aaaaa1",
+      "callsign": "",
+      "type": "",
+      "lat": 37.779397,
+      "lon": -122.4194,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     },
+     {
+      "hex": "aaaaa2",
+      "callsign": "",
+      "type": "",
+      "lat": 37.775799,
+      "lon": -122.4194,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "description": "Observer filter: aircraft more than 30 km from the observer are dropped and the rest are ordered nearest first (ties by arrival).",
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "lines": [
+    "{\"cmd\":\"traffic\",\"t\":9,\"ac\":[{\"hex\":\"f00001\",\"lat\":37.7749,\"lon\":-122.351134,\"age_s\":1},{\"hex\":\"f00002\",\"lat\":37.7749,\"lon\":-122.476289,\"age_s\":1},{\"hex\":\"f00003\",\"lat\":37.7749,\"lon\":-122.373889,\"age_s\":1},{\"hex\":\"f00004\",\"lat\":37.7749,\"lon\":-122.453533,\"age_s\":1},{\"hex\":\"f00005\",\"lat\":37.7749,\"lon\":-122.396645,\"age_s\":1},{\"hex\":\"f00006\",\"lat\":37.7749,\"lon\":-122.430778,\"age_s\":1}]}",
+    "{\"cmd\":\"traffic\",\"t\":9,\"ac\":[{\"hex\":\"f00007\",\"lat\":37.7749,\"lon\":-121.964291,\"age_s\":1}]}",
+    "{\"cmd\":\"traffic_done\",\"n\":7}"
+   ],
+   "expect": {
+    "handled": [
+     true,
+     true,
+     true
+    ],
+    "have_data": true,
+    "partial": false,
+    "count": 6,
+    "data_age_s": 0.0,
+    "aircraft": [
+     {
+      "hex": "f00006",
+      "callsign": "",
+      "type": "",
+      "lat": 37.7749,
+      "lon": -122.430778,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     },
+     {
+      "hex": "f00005",
+      "callsign": "",
+      "type": "",
+      "lat": 37.7749,
+      "lon": -122.396645,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     },
+     {
+      "hex": "f00004",
+      "callsign": "",
+      "type": "",
+      "lat": 37.7749,
+      "lon": -122.453533,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     },
+     {
+      "hex": "f00003",
+      "callsign": "",
+      "type": "",
+      "lat": 37.7749,
+      "lon": -122.373889,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     },
+     {
+      "hex": "f00002",
+      "callsign": "",
+      "type": "",
+      "lat": 37.7749,
+      "lon": -122.476289,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     },
+     {
+      "hex": "f00001",
+      "callsign": "",
+      "type": "",
+      "lat": 37.7749,
+      "lon": -122.351134,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "description": "A feed age that is not a number (null) makes the whole set stale (31 s).",
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "lines": [
+    "{\"cmd\":\"traffic\",\"t\":9,\"age_s\":null,\"ac\":[{\"hex\":\"aaaaa1\",\"lat\":37.779397,\"lon\":-122.4194,\"age_s\":1}]}",
+    "{\"cmd\":\"traffic_done\",\"n\":1}"
+   ],
+   "expect": {
+    "handled": [
+     true,
+     true
+    ],
+    "have_data": true,
+    "partial": false,
+    "count": 1,
+    "data_age_s": 31.0,
+    "aircraft": [
+     {
+      "hex": "aaaaa1",
+      "callsign": "",
+      "type": "",
+      "lat": 37.779397,
+      "lon": -122.4194,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 1.0
+     }
+    ]
+   }
+  },
+  {
+   "description": "On the ground: 'gnd':1, or 'altb_ft':'ground' (no pressure altitude then); 'gnd':0 wins over 'altb_ft':'ground'.",
+   "observer": {
+    "lat": null,
+    "lon": null,
+    "elev_m": null
+   },
+   "lines": [
+    "{\"cmd\":\"traffic\",\"t\":7,\"ac\":[{\"hex\":\"a0ad1d\",\"lat\":37.621377,\"lon\":-122.390442,\"cs\":\"UAL1668\",\"gnd\":1,\"gs_kt\":0,\"sq\":\"7222\",\"age_s\":24.071},{\"hex\":\"a5fcef\",\"lat\":37.622726,\"lon\":-122.388171,\"altb_ft\":\"ground\",\"age_s\":0.5},{\"hex\":\"a11f5a\",\"lat\":37.622276,\"lon\":-122.384765,\"altb_ft\":\"ground\",\"gnd\":0,\"age_s\":0.2}]}",
+    "{\"cmd\":\"traffic_done\",\"n\":3}"
+   ],
+   "expect": {
+    "handled": [
+     true,
+     true
+    ],
+    "have_data": true,
+    "partial": false,
+    "count": 3,
+    "data_age_s": 0.0,
+    "aircraft": [
+     {
+      "hex": "a0ad1d",
+      "callsign": "UAL1668",
+      "type": "",
+      "lat": 37.621377,
+      "lon": -122.390442,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": 0.0,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 7222,
+      "emergency": false,
+      "on_ground": true,
+      "age_s": 24.071
+     },
+     {
+      "hex": "a5fcef",
+      "callsign": "",
+      "type": "",
+      "lat": 37.622726,
+      "lon": -122.388171,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": true,
+      "age_s": 0.5
+     },
+     {
+      "hex": "a11f5a",
+      "callsign": "",
+      "type": "",
+      "lat": 37.622276,
+      "lon": -122.384765,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 0.2
+     }
+    ]
+   }
+  },
+  {
+   "description": "Lines that are not traffic commands return false; a broken line that names the command is still consumed (true) and changes nothing.",
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "lines": [
+    "hello",
+    "{\"cmd\":\"log_get\"}",
+    "{\"cmd\":\"traffic\",\"ac\":[{\"hex\":",
+    "{\"type\":\"traffic_status\"}"
+   ],
+   "expect": {
+    "handled": [
+     false,
+     false,
+     true,
+     false
+    ],
+    "have_data": false,
+    "partial": false,
+    "count": 0,
+    "data_age_s": null,
+    "aircraft": []
+   }
+  }
+ ]
+}

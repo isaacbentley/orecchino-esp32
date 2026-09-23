@@ -2,6 +2,9 @@
 #include "board_t5.h"
 #include "t5_periph.h"
 #include "../common/ui_common.h"
+#include "../common/traffic.h"
+#include "../common/net_sync.h"
+#include "../common/ext_ram.h"
 #include <epdiy.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -46,7 +49,6 @@ static double s_cam_wx = 0, s_cam_wy = 0;
 static bool s_cam_valid = false;
 static bool s_cam_manual = false; // touched: auto-follow suspended
 static uint32_t s_cam_manual_ms = 0;
-static int  s_sync_files = -1;
 static uint32_t s_last_full = 0;
 static int s_partials = 0;
 static uint32_t s_sig_prev = 0;
@@ -58,15 +60,56 @@ static uint8_t s_target_mode = UI_MODE_RX;
 static int s_table_page = 0;       // 0 for rows 0..7, 1 for rows 8..15
 static bool s_inspector = false;    // Contact detail modal
 static bool s_diag = false;         // System diagnostics & hardware calibration screen
+static bool s_wifi_modal = false;   // Wi-Fi networks screen (full screen, opened from SYSTEM)
+static bool s_kb_modal = false;     // on-screen keyboard (full screen, over the networks screen)
+static char s_kb_ssid[NET_MAX_SSID_LEN + 1] = {0};
+static char s_kb_buf[NET_MAX_PASS_LEN + 1] = {0};
+static uint8_t  s_kb_layer = 0;     // 0 letters, 1 symbols
+static bool     s_kb_shift = false; // one-shot capital
+static bool     s_kb_caps = false;  // caps lock: SHIFT tapped twice
+static uint32_t s_kb_shift_ms = 0;
+static bool     s_kb_show = false;  // the password as typed (masked by default)
+static bool     s_kb_ssid_stage = false;  // typing a hidden network's name first
+static int      s_kb_du = 0;        // fast (DU) updates since the field was cleaned
+// Touches released while the panel was busy are dropped, never queued:
+// a finger that tapped twice during a refresh must not type two letters.
+static uint32_t s_touch_ignore_ms = 0;
+// Wi-Fi screens: the list, a saved network's actions, joining, the result.
+enum WifiView : uint8_t { WV_LIST = 0, WV_ACTION, WV_JOINING, WV_RESULT };
+static uint8_t  s_wv = WV_LIST;
+static int      s_wifi_page = 0;
+static char     s_wifi_ssid[NET_MAX_SSID_LEN + 1] = {0};  // the network being acted on
+static bool     s_wifi_was_scanning = false;
+static uint32_t s_wifi_join_ms = 0;
+static bool     s_wifi_join_ok = false;
+static bool     s_wifi_join_seen = false;   // the join request reached CONNECTING
+static char     s_wifi_join_err[64] = {0};
+static char     s_diag_note[64] = {0};  // SYSTEM's last Wi-Fi action, until the next one
+// ADS-B traffic (traffic.h): the aircraft chosen by tapping its diamond ("" none).
+static char     s_ac_hex[7] = "";
+// Phone pairing (rx_hook_pairing, NimBLE's task): the loop draws it.
+static volatile bool     s_pair_show = false;
+static volatile uint32_t s_pair_key = 0;
+static void draw_board(bool force_full);
 #define DEFAULT_VCOM 1560
 // Service screen rows (drawing and touch routing use the same numbers):
 // everyday controls first, engineering last.
-#define DG_BL_BTN_Y   110    // 1. backlight mode / brightness buttons
-#define DG_BL_BTN_H   34
-#define DG_MODE_BTN_Y 188    // 2. mode switch / power off
-#define DG_MODE_BTN_H 38
-#define DG_VCOM_BTN_Y 352    // 4. VCOM trim buttons
-#define DG_VCOM_BTN_H 36
+#define DG_BL_BTN_Y   100    // 1. backlight mode / brightness buttons
+#define DG_BL_BTN_H   32
+#define DG_MODE_BTN_Y 172    // 2. mode switch / power off
+#define DG_MODE_BTN_H 34
+#define DG_WIFI_BTN_Y 246    // 3. Wi-Fi: NETWORKS, MODE, SYNC NOW, UPDATE MAP
+#define DG_WIFI_BTN_H 36
+#define DG_WF_X0 24
+#define DG_WF_W0 170
+#define DG_WF_X1 204
+#define DG_WF_W1 170
+#define DG_WF_X2 384
+#define DG_WF_W2 160
+#define DG_WF_X3 554
+#define DG_WF_W3 180
+#define DG_VCOM_BTN_Y 396    // 5. VCOM trim buttons
+#define DG_VCOM_BTN_H 34
 static uint16_t s_vcom = DEFAULT_VCOM;
 
 // PMIC rail hold: avoid repeated TPS65185 power-up/down (~90 ms each).
@@ -190,6 +233,33 @@ static int text_wrap2(const GFXfont* f, const char* s, int x, int y, int line_h,
   return 2;
 }
 
+/// Draw `s` wrapped at spaces to `max_w`, at most `max_lines` lines (the
+/// last one fitted with ".."); returns the lines used.
+static int text_para(const GFXfont* f, const char* s, int x, int y, int line_h, int max_w, uint8_t color, int max_lines) {
+  int lines = 0;
+  while (*s && lines < max_lines) {
+    char l[96]; int best = -1, i = 0;
+    for (; s[i] && i < (int)sizeof(l) - 1; i++) {
+      l[i] = s[i];
+      if (s[i] == ' ') { l[i] = 0; if (text_w(f, l) <= max_w) best = i; else break; l[i] = ' '; }
+    }
+    l[i] = 0;
+    bool rest_fits = !s[i] && text_w(f, l) <= max_w;
+    if (rest_fits) { text(f, l, x, y + lines * line_h, color); return lines + 1; }
+    if (best < 0 || lines == max_lines - 1) {   // the last line: whatever fits of the rest
+      snprintf(l, sizeof(l), "%s", s);
+      fit_text(l, sizeof(l), f, max_w);
+      text(f, l, x, y + lines * line_h, color);
+      return lines + 1;
+    }
+    l[best] = 0;
+    text(f, l, x, y + lines * line_h, color);
+    s += best + 1;
+    lines++;
+  }
+  return lines;
+}
+
 // ---- wording shared by every screen, so each says these things one way
 /// The transports a contact was heard on: "Wi-Fi, NAN, BLE".
 static void carriers_text(char* b, size_t n, uint8_t mask) {
@@ -216,10 +286,188 @@ static const char* cardinal(float deg) {
   static const char* C[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
   return C[(int)((deg + 22.5f) / 45.0f) % 8];
 }
-/// The ID signature state in words (the table's AUTH column is the short form).
-static const char* sig_state(uint8_t st) {
-  return st == 3 ? "valid" : st == 4 ? "INVALID" : st == 2 ? "unknown key"
-       : st == 1 ? "partial" : "none";
+/// The ID signature state in words, as every board says it (ui_common.h):
+/// a test-key signature reads "TEST KEY", never "valid". The table's AUTH
+/// column is the short form.
+static const char* sig_words(uint8_t st) { return st ? ui_auth_text(st) : "ID sig: none"; }
+/// Whole seconds since a stamp. Signed: the decode task stamps last_ms with
+/// a millis() newer than the loop's s_now, and unsigned that would wrap.
+static uint32_t since_s(uint32_t ms) {
+  int32_t d = (int32_t)(s_now - ms);
+  return d > 0 ? (uint32_t)d / 1000 : 0;
+}
+
+// ---- ADS-B traffic (traffic.h). Separations in km and m, like the rest of
+// the board; an aircraft's own altitude and speed in ft and kt, as ADS-B and
+// pilots give them. Never NM, never a prediction, never "clear".
+/// Nearest integer; 0 for NaN/inf, whose cast to an integer is undefined.
+static long iround(double v) { return isfinite(v) ? (long)floor(v + 0.5) : 0; }
+/// "2,650 ft"
+static void ft_text(char* b, size_t n, double m) {
+  long ft = iround(m / TRAFFIC_FT_TO_M), a = labs(ft);
+  if (a >= 1000) snprintf(b, n, "%s%ld,%03ld ft", ft < 0 ? "-" : "", a / 1000, a % 1000);
+  else snprintf(b, n, "%ld ft", ft);
+}
+/// Marker label altitude, "2.6k ft" or "850 ft": pressure altitude (what a
+/// pilot reads), else geometric; "" when neither was reported.
+static void ac_alt_short(const TrafficAircraft* a, char* b, size_t n) {
+  if (a->on_ground) { snprintf(b, n, "GND"); return; }
+  double m = isfinite(a->alt_baro_m) ? a->alt_baro_m : a->alt_geom_m;
+  if (!isfinite(m)) { b[0] = 0; return; }
+  long ft = iround(m / TRAFFIC_FT_TO_M);
+  if (ft >= 1000) snprintf(b, n, "%ld.%ldk ft", ft / 1000, (ft % 1000) / 100);
+  else snprintf(b, n, "%ld ft", ft);
+}
+/// Position older than the rules' freshness window: drawn grey.
+static bool ac_old(const TrafficAircraft* a) { return traffic_age_s(a->seen_ms, s_now) >= TRAFFIC_FRESH_S; }
+static int ac_index(const char* hex) {
+  if (!hex || !hex[0]) return -1;
+  for (int i = 0; i < g_traffic_count; i++) if (!strcmp(g_traffic_ac[i].hex, hex)) return i;
+  return -1;
+}
+/// The squawk or flag in words, NULL for an ordinary aircraft.
+static const char* ac_emergency_words(const TrafficAircraft* a) {
+  if (a->squawk == 7500) return "HIJACK";
+  if (a->squawk == 7600) return "RADIO FAILURE";
+  if (a->squawk == 7700 || a->emergency) return "EMERGENCY";
+  return nullptr;
+}
+/// The id traffic.h knows a contact by: its UAS ID, else its MAC.
+static void drone_key(const Track* t, char* out, size_t n) {
+  if (t->uas[0]) snprintf(out, n, "%s", t->uas);
+  else snprintf(out, n, "%02X%02X%02X%02X%02X%02X", t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5]);
+}
+/// The table slot of the drone an alert names, -1 when it has gone.
+static int drone_slot(const char* id) {
+  char k[TRAFFIC_ID_LEN];
+  for (int i = 0; i < TRK_MAX; i++) {
+    if (!g_tracks[i].used) continue;
+    drone_key(&g_tracks[i], k, sizeof(k));
+    if (!strcmp(k, id)) return i;
+  }
+  return -1;
+}
+static bool is_pair(const TrafficAlert* a) { return a && a->kind <= TRAFFIC_KIND_CONVERGING && a->drone_id[0]; }
+/// The most urgent pair alert naming this drone, or NULL (alerts are sorted).
+static const TrafficAlert* alert_for_drone(const Track* t) {
+  char k[TRAFFIC_ID_LEN]; drone_key(t, k, sizeof(k));
+  for (int i = 0; i < g_traffic_result.n; i++)
+    if (is_pair(&g_traffic_result.alerts[i]) && !strcmp(g_traffic_result.alerts[i].drone_id, k))
+      return &g_traffic_result.alerts[i];
+  return nullptr;
+}
+/// A drone's loud reasons in words, the traffic pair first:
+/// "TRAFFIC NEAR + TFR MATCH". Empty when quiet or stale.
+static void drone_alert_words(char* b, size_t n, const Track* t) {
+  char al[48]; ui_alert_text(al, sizeof(al), t, s_now);
+  const TrafficAlert* ta = alert_for_drone(t);
+  const char* tw = !ta ? "" : ta->on_ground ? "AIRCRAFT ON GROUND NEAR"
+                 : ta->kind == TRAFFIC_KIND_NEAR ? "TRAFFIC NEAR" : "TRAFFIC CONVERGING";
+  snprintf(b, n, "%s%s%s", tw, tw[0] && al[0] ? " + " : "", al);
+}
+/// What the plot panel shows as a traffic card: the aircraft tapped on the
+/// plot, else, while a warning lasts, the most urgent warning's aircraft.
+/// `ac` is NULL for a warning kept by the hysteresis after its aircraft left
+/// the feed (the card then shows the alert's last numbers).
+static bool traffic_card_pick(const TrafficAircraft** ac, const TrafficAlert** al) {
+  *ac = nullptr; *al = nullptr;
+  if (s_ac_hex[0]) {
+    int i = ac_index(s_ac_hex);
+    if (i >= 0) { *ac = &g_traffic_ac[i]; *al = traffic_alert_for_hex(&g_traffic_result, s_ac_hex); return true; }
+    s_ac_hex[0] = 0;   // it left the feed
+  }
+  const TrafficResult* r = &g_traffic_result;
+  if (r->n && r->alerts[0].level == TRAFFIC_WARNING) {
+    *al = &r->alerts[0];
+    int i = ac_index(r->alerts[0].hex);
+    *ac = i >= 0 ? &g_traffic_ac[i] : nullptr;
+    return true;
+  }
+  return false;
+}
+/// Aircraft-relative words for a card or a HUD: "1.1 km NE of D9A03" and
+/// "90 m above it" (a pair), "2.1 km NE of you" / "300 m above you" (LOW),
+/// else from the board. `rel2` may come back empty.
+static void traffic_relative(const TrafficAircraft* ac, const TrafficAlert* al,
+                             char* rel1, size_t n1, char* rel2, size_t n2) {
+  rel1[0] = rel2[0] = 0;
+  char km[16];
+  if (al && is_pair(al) && isfinite(al->horiz_m)) {
+    char id[TRAFFIC_ID_LEN]; traffic_drone_label(al->drone_id, id, sizeof(id));
+    traffic_km_text(al->horiz_m, km, sizeof(km));
+    traffic_textf(rel1, n1, "%s km %s of %s", km, traffic_compass8(al->bearing_deg), id);
+    long v = iround(al->vert_m);
+    if (al->on_ground) snprintf(rel2, n2, "on the ground");
+    else if (al->height_unknown || !isfinite(al->vert_m)) snprintf(rel2, n2, "height unknown");
+    else if (v > 0) snprintf(rel2, n2, "%ld m above it", v);
+    else if (v < 0) snprintf(rel2, n2, "%ld m below it", -v);
+    else snprintf(rel2, n2, "at its height");
+    return;
+  }
+  if (al && isfinite(al->horiz_m)) {
+    traffic_km_text(al->horiz_m, km, sizeof(km));
+    snprintf(rel1, n1, "%s km %s of you", km, traffic_compass8(al->bearing_deg));
+    if (al->kind == TRAFFIC_KIND_LOW) {
+      long v = iround(al->vert_m);
+      if (al->height_unknown || !isfinite(al->vert_m)) snprintf(rel2, n2, "height unknown");
+      else snprintf(rel2, n2, "%s%ld m %s you", al->approx ? "about " : "", labs(v), v >= 0 ? "above" : "below");
+    }
+    return;
+  }
+  if (ac && g_home_set) {
+    double dx, dy;
+    traffic_offset_m(g_home_lat, g_home_lon, ac->lat, ac->lon, &dx, &dy);
+    traffic_km_text(sqrt(dx * dx + dy * dy), km, sizeof(km));
+    snprintf(rel1, n1, "%s km %s of you", km, traffic_compass8(traffic_bearing_of(dx, dy)));
+  }
+}
+
+// Drones as the traffic rules see them, rebuilt from the table each pass
+// (1.5 KB: in PSRAM, the internal heap is the radios').
+static TrafficDrone* s_tdrones = nullptr;
+static uint32_t     s_warn_keys[TRAFFIC_MAX_ALERTS];
+static int          s_nwarn_keys = 0;
+static uint32_t     s_traffic_ms = 0;
+/// Evaluate the ADS-B set against this board's drones (traffic_tick) with
+/// the board as the observer. True when a warning appeared that was not
+/// there last time: the caller flashes the panel and pulses the light.
+static bool ui_traffic_update(uint32_t now) {
+  if (!s_tdrones) s_tdrones = ext_new<TrafficDrone>(TRK_MAX);
+  if (!s_tdrones) return false;
+  int nd = 0;
+  for (int i = 0; i < TRK_MAX; i++) {
+    const Track* t = &g_tracks[i];
+    if (!t->used || !t->has_pos) continue;
+    TrafficDrone* d = &s_tdrones[nd++];
+    drone_key(t, d->id, sizeof(d->id));
+    d->lat = t->lat; d->lon = t->lon;
+    d->alt_geo_m = isfinite(t->alt_geo) ? t->alt_geo : NAN;
+    d->speed_mps = isfinite(t->speed) ? t->speed : NAN;
+    d->heading_deg = isfinite(t->heading) ? t->heading : NAN;
+    d->live = (int32_t)(now - t->last_ms) <= (int32_t)UI_ACTIVE_MS;
+  }
+  g_traffic_observer.lat = g_home_set ? g_home_lat : NAN;
+  g_traffic_observer.lon = g_home_set ? g_home_lon : NAN;
+  float e = periph_gps_elev_m();
+  g_traffic_observer.elev_m = isfinite(e) ? (double)e : NAN;
+  traffic_tick(s_tdrones, nd, now);
+  s_traffic_ms = now;
+
+  uint32_t keys[TRAFFIC_MAX_ALERTS]; int nk = 0; bool fresh = false;
+  for (int i = 0; i < g_traffic_result.n; i++) {
+    const TrafficAlert* a = &g_traffic_result.alerts[i];
+    if (a->level != TRAFFIC_WARNING) continue;
+    uint32_t h = 2166136261u;
+    for (const char* p = a->drone_id; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+    for (const char* p = a->hex; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+    bool known = false;
+    for (int j = 0; j < s_nwarn_keys; j++) if (s_warn_keys[j] == h) known = true;
+    if (!known) fresh = true;
+    keys[nk++] = h;
+  }
+  memcpy(s_warn_keys, keys, sizeof(uint32_t) * nk);
+  s_nwarn_keys = nk;
+  return fresh;
 }
 
 /// Table form of the k-th listed ID: the whole thing when it fits `max_w`,
@@ -234,12 +482,17 @@ static void short_id(char* out, size_t n, int k, const GFXfont* f, int max_w) {
     if (text_w(f, out) <= max_w) return;
   }
 }
-/// Marker label: the distinguishing tail alone (at least five characters).
+/// Marker label: the whole ID when it is short, else the distinguishing
+/// tail (at least five characters), grown past any leading punctuation so
+/// "DRONE-B-9A01" reads "B-9A01", never a cut-looking "-9A01".
 static const char* label_id(int k) {
   const Track* t = &g_tracks[s_order[k]];
   if (!t->uas[0]) return "?";
+  int len = (int)strlen(t->uas);
+  if (len <= 8) return t->uas;
   int tail = ui_unique_tail(s_order, s_n, k, 5);
-  return t->uas + strlen(t->uas) - tail;
+  while (tail < len && !isalnum((unsigned char)t->uas[len - tail])) tail++;
+  return t->uas + len - tail;
 }
 
 // ---- marker labels: the selected aircraft and alerts always get first
@@ -262,9 +515,10 @@ static bool lb_free(const LabelBox& r, int x0, int y0, int x1, int y1) {
 }
 /// A spot for a w x h label beside the marker at (px,py): right, left,
 /// above, below. False when every spot is taken.
-static bool lb_place(int px, int py, int w, int h, int x0, int y0, int x1, int y1, int* ox, int* oy) {
-  const int cand[4][2] = { {px + 10, py - h / 2}, {px - 10 - w, py - h / 2},
-                           {px - w / 2, py - 12 - h}, {px - w / 2, py + 12} };
+static bool lb_place(int px, int py, int w, int h, int x0, int y0, int x1, int y1, int* ox, int* oy,
+                     int off = 10) {
+  const int cand[4][2] = { {px + off, py - h / 2}, {px - off - w, py - h / 2},
+                           {px - w / 2, py - off - 2 - h}, {px - w / 2, py + off + 2} };
   for (int i = 0; i < 4; i++) {
     LabelBox r = { cand[i][0], cand[i][1], w, h };
     if (!lb_free(r, x0, y0, x1, y1)) continue;
@@ -313,25 +567,65 @@ static uint32_t signature() {
   mix(s_n); mix(s_sel); mix(s_table_page); mix(g_seen_count / 100); mix(s_batt / 5); mix(s_ble_ok); mix(g_home_set);
   mix(s_map); mix(s_side); mix(s_map_touched); mix((uint32_t)(int32_t)(g_home_lat * 1e3)); mix((uint32_t)(int32_t)(g_home_lon * 1e3));
   mix(periph_gps_detected()); mix(periph_gps_fix()); mix(periph_gps_sats()); mix(s_cam_manual); mix(s_cam_z); mix((uint32_t)s_cam_wx); mix((uint32_t)s_cam_wy);
+  mix(s_wifi_modal); mix(s_kb_modal); mix(s_pair_show); mix(s_wv);
+  // Traffic: the alerts' words and coarse numbers, the feed's state and age
+  // (10 s steps: the card shows it), and every aircraft to ~100 m.
+  const TrafficResult* r = &g_traffic_result;
+  mix(r->have_data); mix(r->stale); mix(r->near_count); mix(r->aircraft_count); mix(r->n);
+  mix(isfinite(r->data_age_s) ? (uint32_t)(r->data_age_s / 10) : 0xFFFF);
+  for (int i = 0; i < r->n; i++) {
+    const TrafficAlert* a = &r->alerts[i];
+    for (const char* p = a->text; *p; p++) mix((uint8_t)*p);
+    mix(a->held); mix((uint32_t)iround(a->horiz_m / 100)); mix((uint32_t)iround(a->vert_m / 10));
+  }
+  for (int i = 0; i < g_traffic_count; i++) {
+    const TrafficAircraft* a = &g_traffic_ac[i];
+    mix((uint32_t)(int32_t)(a->lat * 1e3)); mix((uint32_t)(int32_t)(a->lon * 1e3)); mix(ac_old(a));
+  }
+  for (const char* p = s_ac_hex; *p; p++) mix((uint8_t)*p);
   return h;
 }
 
 static void draw_header(const UiSummary& sm, const char* title) {
-  bool loud = sm.alert == UI_EMERGENCY;
+  // Traffic leads (§8.3): a warning makes the band black like a drone
+  // emergency, and a warning or caution supplies the headline's words.
+  const TrafficResult* tr = &g_traffic_result;
+  bool traffic_head = !title && tr->n && tr->alerts[0].level >= TRAFFIC_CAUTION;
+  bool loud = sm.alert == UI_EMERGENCY || (tr->n && tr->alerts[0].level == TRAFFIC_WARNING);
   rect(0, 0, W, 70, loud ? BLACK : WHITE);
   if (!loud) rect(0, 68, W, 2, BLACK);
   uint8_t fg = loud ? WHITE : BLACK;
-  char b[48];
-  if (title) snprintf(b, sizeof(b), "%s", title); else ui_headline(b, sizeof(b), &sm);
-  if (!title && sm.tracked == 0) b[0] = 0;  // an empty sky needs no headline
+  char b[72];
+  if (title) snprintf(b, sizeof(b), "%s", title);
+  else if (traffic_head) snprintf(b, sizeof(b), "%s", tr->alerts[0].text);
+  else ui_headline(b, sizeof(b), &sm);
+  if (!title && !traffic_head && sm.tracked == 0) b[0] = 0;  // an empty sky needs no headline
 
   // The title must stay clear of the view switcher at x=330: step down
-  // 18 -> 12 -> 9 pt before trimming, so "EMERGENCY N CONTACTS" stays whole.
+  // 18 -> 12 pt, then 12 pt on two lines, then 9 pt, before trimming, so
+  // "EMERGENCY N CONTACTS" and "TRAFFIC NEAR DRONE D9A03" stay whole.
+  // Two lines break at the space that balances them best.
+  int cut = -1, cut_w = 1 << 30;
+  if (b[0] && text_w(&FreeSansBold12pt7b, b) > 290) {
+    for (int i = 1; b[i]; i++) {
+      if (b[i] != ' ' || b[i - 1] == ' ') continue;
+      int j = i; while (b[j] == ' ') j++;
+      b[i] = 0;
+      int w1 = text_w(&FreeSansBold12pt7b, b), w2 = text_w(&FreeSansBold12pt7b, b + j);
+      b[i] = ' ';
+      if (w1 <= 290 && w2 <= 290 && max(w1, w2) < cut_w) { cut = i; cut_w = max(w1, w2); }
+    }
+  }
   if (b[0]) {
     if (text_w(&FreeSansBold18pt7b, b) <= 290) {
       text(&FreeSansBold18pt7b, b, TABLE_X, 48, fg);
     } else if (text_w(&FreeSansBold12pt7b, b) <= 290) {
       text(&FreeSansBold12pt7b, b, TABLE_X, 44, fg);
+    } else if (cut > 0) {
+      b[cut] = 0;
+      const char* l2 = b + cut + 1; while (*l2 == ' ') l2++;
+      text(&FreeSansBold12pt7b, b, TABLE_X, 31, fg);
+      text(&FreeSansBold12pt7b, l2, TABLE_X, 58, fg);
     } else {
       if (text_w(&FreeSansBold9pt7b, b) > 290) {
         size_t n = strlen(b);
@@ -381,20 +675,30 @@ static void draw_header(const UiSummary& sm, const char* title) {
     rect(bx + bw, by + 4, 3, 6, fg);
     int fill_w = (s_batt * (bw - 4)) / 100;
     if (fill_w > 0) rect(bx + 2, by + 2, fill_w, bh - 4, fg);
-    xr = bx - 14;
+    xr = bx - 12;
   }
 
-  // GPS status, then the UTC clock (minutes only: nothing redraws on the
-  // second). Each item is drawn only if it fits left of the view switcher
-  // (which ends at x=570) instead of printing over the tabs.
-  const int cluster_min_x = 584;
+  // GPS status, the ADS-B feed, then the UTC clock (minutes only: nothing
+  // redraws on the second). Each item is drawn only if it fits left of the
+  // view switcher (which ends at x=570) instead of printing over the tabs.
+  const int cluster_min_x = 580;   // the view switcher's box ends at 574
   if (periph_gps_fix()) snprintf(b, sizeof(b), "GPS %d", periph_gps_sats());
   else if (periph_gps_detected()) snprintf(b, sizeof(b), "GPS --");
-  else snprintf(b, sizeof(b), g_home_set ? "APP POS" : "NO POS");
+  else snprintf(b, sizeof(b), !g_home_set ? "NO POS" : !strcmp(g_home_src, "saved") ? "SAVED POS" : "APP POS");
   int gw = text_w(&FreeSansBold9pt7b, b);
   if (xr - gw >= cluster_min_x) {
     text_r(&FreeSansBold9pt7b, b, xr, 42, fg);
-    xr -= gw + 14;
+    xr -= gw + 12;
+  }
+  // The feed itself: aircraft held, STALE, or nothing without a source.
+  if (tr->have_data) {
+    if (tr->stale) snprintf(b, sizeof(b), "ADS-B STALE");
+    else snprintf(b, sizeof(b), "ADS-B %u", (unsigned)tr->aircraft_count);
+    int aw = text_w(&FreeSansBold9pt7b, b);
+    if (xr - aw >= cluster_min_x) {
+      text_r(&FreeSansBold9pt7b, b, xr, 42, fg);
+      xr -= aw + 12;
+    }
   }
   if (periph_has_utc_time()) {
     uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
@@ -405,35 +709,52 @@ static void draw_header(const UiSummary& sm, const char* title) {
   }
 }
 
+static int s_page_bx = 330, s_page_bw = 0;   // the PAGE button, for the hit test
 static void draw_footer(const UiSummary& sm, const char* hint) {
   rect(0, 496, W, 44, WHITE);
   rect(0, 496, W, 2, BLACK);
   const GFXfont* f9 = &FreeSansBold9pt7b;
-  char b[64];
+  char b[96];
   if (sm.newest_age_s == UINT32_MAX) snprintf(b, sizeof(b), "SCANNING");
   else if (sm.newest_age_s < 10) snprintf(b, sizeof(b), "RECEIVING");
   else if (sm.newest_age_s < 60) snprintf(b, sizeof(b), "QUIET <1 MIN");
   else snprintf(b, sizeof(b), "QUIET %lu MIN", (unsigned long)(sm.newest_age_s / 60));
 
-  char count_buf[32];
+  // "QUIET" is about Remote ID only; traffic has its own words (§8.2):
+  // aircraft within 3 km, or that the feed is stale -- never a zero that
+  // could read as "no traffic".
+  char count_buf[40];
   snprintf(count_buf, sizeof(count_buf), " | %d LIVE", sm.active);
   strncat(b, count_buf, sizeof(b) - strlen(b) - 1);
-  if (g_seen_count) {
+  const TrafficResult* tr = &g_traffic_result;
+  count_buf[0] = 0;
+  if (tr->have_data && tr->stale) snprintf(count_buf, sizeof(count_buf), " | TRAFFIC DATA STALE");
+  else if (tr->have_data && tr->near_count) snprintf(count_buf, sizeof(count_buf), " | TRAFFIC %u", (unsigned)tr->near_count);
+  strncat(b, count_buf, sizeof(b) - strlen(b) - 1);
+  // STAY mode holds the radio on the access point's channel (plan §4.2):
+  // Remote ID over Wi-Fi is heard there only, and the board says so.
+  if (net_get_mode() == NET_MODE_STAY && net_get_channel()) {
+    snprintf(count_buf, sizeof(count_buf), " | WI-FI CH %u ONLY", (unsigned)net_get_channel());
+    strncat(b, count_buf, sizeof(b) - strlen(b) - 1);
+  }
+  if (g_seen_count && text_w(f9, b) < 300) {
     snprintf(count_buf, sizeof(count_buf), " | %lu SEEN", (unsigned long)g_seen_count);
     strncat(b, count_buf, sizeof(b) - strlen(b) - 1);
   }
   text(f9, b, TABLE_X, 524, BLACK);
   int left_edge = TABLE_X + text_w(f9, b) + 16;   // where a hint may start
 
-  // Pagination button on Table
+  // Pagination button on Table, after the status (the hit test reads s_page_bx)
+  s_page_bw = 0;
   if (!s_map && !s_side && s_n > ROWS) {
     int total_pages = (s_n + ROWS - 1) / ROWS;
-    char page_str[24];
+    char page_str[32];
     snprintf(page_str, sizeof(page_str), "PAGE %d/%d", s_table_page + 1, total_pages);
     int pw = text_w(f9, page_str) + 24;
-    int px = 330, py = 502, ph = 32;
+    int px = max(330, left_edge), py = 502, ph = 32;
     box(px, py, pw, ph, BLACK);
     text(f9, page_str, px + 12, py + 22, BLACK);
+    s_page_bx = px; s_page_bw = pw;
     left_edge = px + pw + 16;
   }
 
@@ -458,7 +779,13 @@ static void draw_footer(const UiSummary& sm, const char* hint) {
   if (!hint) hint = "tap row: select | tap plot: map";
   char h[96]; snprintf(h, sizeof(h), "%s", hint);
   int max_w = right_edge - left_edge;
-  if (max_w > 80) { fit_text(h, sizeof(h), f9, max_w); text_r(f9, h, right_edge, 524, GREY); }
+  // Whole instructions only: drop trailing " | ..." parts rather than cut one.
+  while (text_w(f9, h) > max_w) {
+    char* bar = strrchr(h, '|');
+    if (!bar || bar - h < 3) { h[0] = 0; break; }
+    bar[-1] = 0;
+  }
+  if (h[0]) text_r(f9, h, right_edge, 524, GREY);
 }
 
 // Column layout, measured against the actual font so no heading or value
@@ -501,7 +828,9 @@ static void draw_table() {
     if (k >= s_n) break;
     const Track* t = &g_tracks[s_order[k]];
     int y = y0 + 24 + i * ROW_H;
-    bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now), sel = (k == s_sel);
+    const TrafficAlert* ta = alert_for_drone(t);
+    bool stale = ui_stale(t, s_now), sel = (k == s_sel);
+    bool danger = ui_danger(t, s_now) || (ta && ta->level == TRAFFIC_WARNING);
     uint8_t ink = sel ? WHITE : (stale ? GREY : BLACK);
 
     if (sel) rect(TABLE_X, y, TABLE_W, ROW_H - 2, BLACK);   // inverted row
@@ -514,9 +843,9 @@ static void draw_table() {
     char b[64];
     short_id(b, sizeof(b), k, f12, id_w);
     text(f12, b, TABLE_X + 8, y + 20, ink);
-    char age[16]; age_text(age, sizeof(age), (s_now - t->last_ms) / 1000);
-    char al[48]; ui_alert_text(al, sizeof(al), t, s_now);
-    snprintf(b, sizeof(b), "%s | %s", al[0] ? al : stale ? "history" : ui_status_name(t->status), age);
+    char age[16]; age_text(age, sizeof(age), since_s(t->last_ms));
+    char al[72]; drone_alert_words(al, sizeof(al), t);
+    traffic_textf(b, sizeof(b), "%s | %s", al[0] ? al : stale ? "history" : ui_status_name(t->status), age);
     fit_text(b, sizeof(b), f9, TABLE_W - 16);   // the numbers all sit on line one
     text(f9, b, TABLE_X + 8, y + 36, sel ? WHITE : (al[0] ? BLACK : GREY));
 
@@ -535,8 +864,9 @@ static void draw_table() {
       text(f9, "--", s_cols[3].x, y + 20, dash);
     }
     if (t->auth_state) {
+      // unknown key; the published test key (not an identity); pages still coming
       const char* a = t->auth_state == 3 ? "OK" : t->auth_state == 4 ? "BAD"
-                    : t->auth_state == 2 ? "KEY?" : "...";    // unknown key; pages still coming
+                    : t->auth_state == 2 ? "KEY?" : t->auth_state == 5 ? "TEST" : "...";
       if (!sel && t->auth_state == 4) {
         rect(s_cols[4].x - 4, y + 4, text_w(f9, a) + 8, 18, BLACK);
         text(f9, a, s_cols[4].x, y + 17, WHITE);
@@ -581,7 +911,7 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
   snprintf(b, sizeof(b), "%s", t->uas[0] ? t->uas : "NO ID");
   fit_text(b, sizeof(b), f12, cw - 24);
   text(f12, b, cx + 12, y, BLACK);
-  ui_alert_text(b, sizeof(b), t, s_now);
+  drone_alert_words(b, sizeof(b), t);
   if (b[0]) { y += 20; fit_text(b, sizeof(b), f9, cw - 24); text(f9, b, cx + 12, y, BLACK); }
 
   // Subtitle: Manufacturer & Transport
@@ -669,10 +999,10 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
 
   // Grid Row 5: Authentication & Seen History
   y += 26;
-  snprintf(b, sizeof(b), "ID sig: %s", sig_state(t->auth_state));
+  snprintf(b, sizeof(b), "%s", sig_words(t->auth_state));
   text(f9, b, cx + 12, y, t->auth_state == 4 ? BLACK : GREY);
 
-  char age[16]; age_text(age, sizeof(age), (s_now - t->last_ms) / 1000);
+  char age[16]; age_text(age, sizeof(age), since_s(t->last_ms));
   snprintf(b, sizeof(b), "Heard %s", age);
   text_r(f9, b, cx + cw - 12, y, BLACK);
 
@@ -688,13 +1018,95 @@ static void draw_target_card(const Track* t, int sel_idx, int total_n) {
   text(f9, "TAP FOR DETAILS", cx + (cw - tw_tap) / 2, cy + ch - 8, BLACK);
 }
 
+// ---- aircraft marks (ADS-B). Outlined diamonds, never filled, drawn under
+// the drones' filled dots and squares, so the two can never be confused in
+// grey or in a hurry. A warning or caution doubles the outline; a time ghost
+// (a dot every 15 s along the next minute of the reported track) shows where
+// each is heading without anything having to move on e-paper.
+struct Clip { int x0, y0, x1, y1; };
+static bool in_clip(const Clip& c, int x, int y, int m) {
+  return x - m >= c.x0 && x + m < c.x1 && y - m >= c.y0 && y + m < c.y1;
+}
+#define AC_R 8   // diamond half-diagonal; the doubled outline reaches AC_R + 5
+static void diamond(int x, int y, int r, uint8_t ink) {
+  for (int d = -r; d <= r; d++) {
+    int w = r - abs(d);
+    if (w >= 2) rect(x - w + 2, y + d, 2 * w - 3, 1, WHITE);   // knock out what lies beneath
+    epd_draw_pixel(x - w, y + d, ink, s_fb);
+    epd_draw_pixel(x + w, y + d, ink, s_fb);
+    if (w >= 1) { epd_draw_pixel(x - w + 1, y + d, ink, s_fb); epd_draw_pixel(x + w - 1, y + d, ink, s_fb); }
+  }
+}
+/// The mark at (x,y) with its ghost dots (gx/gy, ng of them) and, when
+/// `track` is known, a heading tick. The caller has clipped every point.
+/// An aircraft reported on the ground is a small plain diamond: no ghost,
+/// no tick, never doubled -- it is not airborne traffic.
+static void aircraft_mark(int x, int y, const int* gx, const int* gy, int ng, double track,
+                          uint8_t lvl, bool old, bool ground = false) {
+  uint8_t ink = old ? GREY : BLACK;
+  if (ground) { diamond(x, y, AC_R - 3, ink); return; }
+  for (int i = 0; i < ng; i++) epd_fill_circle(gx[i], gy[i], 2, ink, s_fb);
+  if (isfinite(track)) {
+    double tr = track * M_PI / 180;
+    int r0 = lvl >= TRAFFIC_CAUTION ? AC_R + 5 : AC_R;
+    epd_draw_line(x + iround(sin(tr) * r0), y - iround(cos(tr) * r0),
+                  x + iround(sin(tr) * (r0 + 10)), y - iround(cos(tr) * (r0 + 10)), ink, s_fb);
+  }
+  if (lvl >= TRAFFIC_CAUTION) { diamond(x, y, AC_R + 5, ink); }
+  diamond(x, y, AC_R, ink);
+}
+/// An aircraft's label beside its mark, where one fits: "UAL123 2.6k ft".
+/// Inverted for a warning; grey when the position is older than 30 s.
+static void aircraft_label(const TrafficAircraft* a, uint8_t lvl, int x, int y, const Clip& c) {
+  char name[12], alt[16], b[32];
+  traffic_ac_name(a, name, sizeof(name));
+  ac_alt_short(a, alt, sizeof(alt));
+  const char* em = ac_emergency_words(a);
+  snprintf(b, sizeof(b), "%s%s%s%s%s", name, alt[0] ? " " : "", alt, em ? " " : "", em ? em : "");
+  int w = text_w(&FreeSansBold9pt7b, b) + 6, lx, ly;
+  if (!lb_place(x, y, w, 16, c.x0, c.y0, c.x1, c.y1, &lx, &ly, AC_R + 6)) return;
+  bool loud = lvl == TRAFFIC_WARNING;
+  rect(lx, ly, w, 16, loud ? BLACK : WHITE);
+  text(&FreeSansBold9pt7b, b, lx + 3, ly + 12, loud ? WHITE : (ac_old(a) ? GREY : BLACK));
+}
+/// Aircraft that set a view's range: those in a pair alert (and LOW ones,
+/// when `low`), and the one chosen.
+static bool ac_in_scale(const TrafficAircraft* a, bool low = true) {
+  if (s_ac_hex[0] && !strcmp(a->hex, s_ac_hex)) return true;
+  const TrafficAlert* al = traffic_alert_for_hex(&g_traffic_result, a->hex);
+  return al && (is_pair(al) || (low && al->kind == TRAFFIC_KIND_LOW));
+}
+/// True when a w x h box would sit on a label or control already placed.
+static bool lb_hits(int x, int y, int w, int h) {
+  for (int i = 0; i < s_nlb; i++) {
+    const LabelBox& o = s_lb[i];
+    if (x < o.x + o.w && o.x < x + w && y < o.y + o.h && o.y < y + h) return true;
+  }
+  return false;
+}
+
+// Where the last plot put each mark, for the hit test (no second copy of
+// the scale arithmetic that could disagree with what was drawn).
+static int  s_plot_px[TRK_MAX], s_plot_py[TRK_MAX];
+static bool s_plot_on[TRK_MAX];
+static int  s_pac_n = 0, s_pac_x[TRAFFIC_MAX_AIRCRAFT], s_pac_y[TRAFFIC_MAX_AIRCRAFT];
+static char s_pac_hex[TRAFFIC_MAX_AIRCRAFT][7];
+
 static void draw_plot() {
   rect(RECT_PLOT.x, RECT_PLOT.y, RECT_PLOT.width, RECT_PLOT.height, WHITE);
+  memset(s_plot_on, 0, sizeof(s_plot_on));
+  s_pac_n = 0;
   if (g_home_set) {
     double far = 0;
     for (int k = 0; k < s_n; k++) {
       const Track* t = &g_tracks[s_order[k]];
       if (t->has_pos) { double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon); if (d > far) far = d; }
+    }
+    for (int i = 0; i < g_traffic_count; i++) {
+      const TrafficAircraft* a = &g_traffic_ac[i];
+      if (!ac_in_scale(a)) continue;
+      double d = traffic_distance_m(g_home_lat, g_home_lon, a->lat, a->lon);
+      if (isfinite(d) && d > far) far = d;
     }
     double scale = nice_scale(far > 0 ? far * 1.1 : 500);
     for (int i = 1; i <= 3; i++) epd_draw_circle(PLOT_CX, PLOT_CY, PLOT_R * i / 3, i == 3 ? BLACK : GREY, s_fb);
@@ -715,10 +1127,46 @@ static void draw_plot() {
     }
     epd_fill_circle(PLOT_CX, PLOT_CY, 4, BLACK, s_fb);
 
-    // Markers in reverse priority so the selected aircraft ends on top;
-    // then labels in priority order, each only where one fits.
+    // Compass and ring text are furniture: no mark or label may cover them.
+    lb_reset();
+    lb_block(PLOT_CX - 10, PLOT_CY - PLOT_R - 22, 20, 18); lb_block(PLOT_CX - 10, PLOT_CY + PLOT_R + 2, 20, 18);
+    lb_block(PLOT_CX - PLOT_R - 22, PLOT_CY - 10, 22, 18); lb_block(PLOT_CX + PLOT_R + 4, PLOT_CY - 10, 20, 18);
+    for (int i = 1; i <= 3; i++) lb_block(PLOT_CX + 4, PLOT_CY + (PLOT_R * i / 3) - 16, 64, 18);
+    // Aircraft first, so every drone mark sits on top of them.
+    const Clip clip = { RECT_PLOT.x + 2, RECT_PLOT.y + 2, W - 8, RECT_PLOT.y + RECT_PLOT.height - 2 };
+    auto P = [&](double dx, double dy, int* x, int* y) {
+      *x = PLOT_CX + (int)iround(dx / scale * PLOT_R);
+      *y = PLOT_CY - (int)iround(dy / scale * PLOT_R);
+    };
+    uint8_t ac_lvl[TRAFFIC_MAX_AIRCRAFT]; int ac_i[TRAFFIC_MAX_AIRCRAFT];
+    for (int i = 0; i < g_traffic_count && s_pac_n < TRAFFIC_MAX_AIRCRAFT; i++) {
+      const TrafficAircraft* a = &g_traffic_ac[i];
+      double dx, dy;
+      traffic_offset_m(g_home_lat, g_home_lon, a->lat, a->lon, &dx, &dy);
+      if (!isfinite(dx) || !isfinite(dy) || hypot(dx, dy) > scale * 1.08) continue;   // off the rings
+      int x, y; P(dx, dy, &x, &y);
+      if (!in_clip(clip, x, y, AC_R + 6)) continue;
+      int gx[4], gy[4], ng = 0;
+      if (!a->on_ground && isfinite(a->gs_mps) && isfinite(a->track_deg)) {
+        double vx = a->gs_mps * sin(a->track_deg * TRAFFIC_DEG), vy = a->gs_mps * cos(a->track_deg * TRAFFIC_DEG);
+        for (int s = 1; s <= 4; s++) {
+          int qx, qy; P(dx + vx * 15 * s, dy + vy * 15 * s, &qx, &qy);
+          if (in_clip(clip, qx, qy, 3) && !lb_hits(qx - 3, qy - 3, 7, 7)) { gx[ng] = qx; gy[ng] = qy; ng++; }
+        }
+      }
+      const TrafficAlert* al = traffic_alert_for_hex(&g_traffic_result, a->hex);
+      uint8_t lvl = al ? al->level : (uint8_t)TRAFFIC_NONE;
+      aircraft_mark(x, y, gx, gy, ng, a->track_deg, lvl, ac_old(a), a->on_ground);
+      s_pac_x[s_pac_n] = x; s_pac_y[s_pac_n] = y;
+      snprintf(s_pac_hex[s_pac_n], sizeof(s_pac_hex[0]), "%s", a->hex);
+      ac_lvl[s_pac_n] = lvl; ac_i[s_pac_n] = i;
+      s_pac_n++;
+    }
+
+    // Drone markers in reverse priority so the selected aircraft ends on
+    // top; then labels in priority order, each only where one fits.
     int rows[TRK_MAX]; int nr = priority_rows(rows);
-    int px[TRK_MAX], py[TRK_MAX]; bool on[TRK_MAX];
+    int* px = s_plot_px; int* py = s_plot_py; bool* on = s_plot_on;
     for (int k = 0; k < s_n; k++) {
       const Track* t = &g_tracks[s_order[k]];
       on[k] = t->has_pos;
@@ -732,7 +1180,7 @@ static void draw_plot() {
       int k = rows[i];
       if (!on[k]) continue;
       const Track* t = &g_tracks[s_order[k]];
-      bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now);
+      bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now) || alert_for_drone(t);
       if (danger) epd_draw_circle(px[k], py[k], 12, BLACK, s_fb);
       epd_fill_circle(px[k], py[k], k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
       if (!isnan(t->heading)) {
@@ -740,20 +1188,19 @@ static void draw_plot() {
         epd_draw_line(px[k], py[k], px[k] + (int)(sin(hr) * 18), py[k] - (int)(cos(hr) * 18), BLACK, s_fb);
       }
     }
-    // Labels: compass and ring text are furniture; the selected aircraft
-    // and alerts get theirs first (they may cover a lesser marker), then
-    // markers become obstacles for everyone else.
-    lb_reset();
-    lb_block(PLOT_CX - 10, PLOT_CY - PLOT_R - 22, 20, 18); lb_block(PLOT_CX - 10, PLOT_CY + PLOT_R + 2, 20, 18);
-    lb_block(PLOT_CX - PLOT_R - 22, PLOT_CY - 10, 22, 18); lb_block(PLOT_CX + PLOT_R + 4, PLOT_CY - 10, 20, 18);
-    for (int i = 1; i <= 3; i++) lb_block(PLOT_CX + 4, PLOT_CY + (PLOT_R * i / 3) - 16, 64, 18);
+    // Labels: the selected aircraft and alerts get theirs first (they may
+    // cover a lesser marker), then markers become obstacles for everyone
+    // else; aircraft labels last, warnings first.
     for (int pass = 0; pass < 2; pass++) {
-      if (pass == 1) for (int k = 0; k < s_n; k++) if (on[k]) lb_block(px[k] - 12, py[k] - 12, 24, 24);
+      if (pass == 1) {
+        for (int k = 0; k < s_n; k++) if (on[k]) lb_block(px[k] - 12, py[k] - 12, 24, 24);
+        for (int j = 0; j < s_pac_n; j++) lb_block(s_pac_x[j] - AC_R - 1, s_pac_y[j] - AC_R - 1, 2 * AC_R + 3, 2 * AC_R + 3);
+      }
       for (int i = 0; i < nr; i++) {
         int k = rows[i];
         if (!on[k]) continue;
         const Track* t = &g_tracks[s_order[k]];
-        bool first = (k == s_sel) || ui_danger(t, s_now);
+        bool first = (k == s_sel) || ui_danger(t, s_now) || alert_for_drone(t);
         if (first != (pass == 0)) continue;
         bool stale = ui_stale(t, s_now);
         char b[24];
@@ -767,6 +1214,9 @@ static void draw_plot() {
         text(&FreeSansBold9pt7b, b, lx + 3, ly + 12, stale ? GREY : BLACK);
       }
     }
+    for (int lv = TRAFFIC_WARNING; lv >= TRAFFIC_NONE; lv--)
+      for (int j = 0; j < s_pac_n; j++)
+        if (ac_lvl[j] == lv) aircraft_label(&g_traffic_ac[ac_i[j]], ac_lvl[j], s_pac_x[j], s_pac_y[j], clip);
   } else {
     // No operator fix: Display rich Selected Target Detail Card
     if (s_n > 0 && s_sel >= 0 && s_sel < s_n) {
@@ -785,7 +1235,6 @@ static void draw_plot() {
     }
   }
 }
-
 
 // ---- offline map: tiles from the shared store, inverted into greys
 
@@ -858,12 +1307,15 @@ bool ui_map_center(double* lat, double* lon) {
 // at which they all fit with a margin. One point alone gets a 2 km window.
 static void map_camera() {
   if (s_cam_manual) return;
-  double lats[TRK_MAX + 1], lons[TRK_MAX + 1]; int n = 0;
+  double lats[TRK_MAX + 1 + 4], lons[TRK_MAX + 1 + 4]; int n = 0;
   if (g_home_set) { lats[n] = g_home_lat; lons[n] = g_home_lon; n++; }
   for (int k = 0; k < s_n; k++) {
     const Track* t = &g_tracks[s_order[k]];
     if (t->has_pos && !ui_stale(t, s_now)) { lats[n] = t->lat; lons[n] = t->lon; n++; }
   }
+  // ...and the aircraft in a traffic alert with them (pairs, LOW), and the chosen one.
+  for (int i = 0; i < g_traffic_count && n < TRK_MAX + 1 + 4; i++)
+    if (ac_in_scale(&g_traffic_ac[i])) { lats[n] = g_traffic_ac[i].lat; lons[n] = g_traffic_ac[i].lon; n++; }
   if (!n) {
     if (s_cam_valid) return;
     lats[0] = 37.7749; lons[0] = -122.4194; n = 1;   // nothing known yet
@@ -1029,12 +1481,43 @@ static void draw_map() {
   lb_block(20, MAP_Y0 + MAP_H - 32, 160, 26);            // scale bar
   lb_block(W - 60, MAP_Y0, 60, 240);                     // compass, zoom, follow
   if (home_x >= 0) lb_block(home_x - 12, home_y - 14, 74, 28);   // the HOME marker and its label
-  if (s_n > 0 && s_sel >= 0 && s_sel < s_n) lb_block(20, MAP_Y0 + MAP_H - MAP_HUD_H - 40, W - 40, MAP_HUD_H);
+  bool ac_hud = ac_index(s_ac_hex) >= 0;
+  if (ac_hud || (s_n > 0 && s_sel >= 0 && s_sel < s_n)) lb_block(20, MAP_Y0 + MAP_H - MAP_HUD_H - 40, W - 40, MAP_HUD_H);
+
+  // Aircraft (ADS-B) under the drones: diamonds with their time ghosts.
+  const Clip mclip = { 8, MAP_Y0 + 4, W - 62, MAP_Y0 + MAP_H - 4 };
+  uint8_t mac_lvl[TRAFFIC_MAX_AIRCRAFT]; int mac_i[TRAFFIC_MAX_AIRCRAFT];
+  s_pac_n = 0;
+  for (int i = 0; i < g_traffic_count && s_pac_n < TRAFFIC_MAX_AIRCRAFT; i++) {
+    const TrafficAircraft* a = &g_traffic_ac[i];
+    double wx, wy; world_px(a->lat, a->lon, s_cam_z, &wx, &wy);
+    if (!isfinite(wx) || !isfinite(wy)) continue;
+    int x = (int)iround(wx - left), y = MAP_Y0 + (int)iround(wy - top);
+    if (!in_clip(mclip, x, y, AC_R + 6)) continue;
+    int gx[4], gy[4], ng = 0;
+    if (!a->on_ground && isfinite(a->gs_mps) && isfinite(a->track_deg)) {
+      double mpp = 156543.03 * cos(a->lat * M_PI / 180) / (double)(1L << s_cam_z);
+      double vx = a->gs_mps * sin(a->track_deg * TRAFFIC_DEG), vy = a->gs_mps * cos(a->track_deg * TRAFFIC_DEG);
+      for (int st = 1; st <= 4; st++) {
+        int qx = x + (int)iround(vx * 15 * st / mpp), qy = y - (int)iround(vy * 15 * st / mpp);
+        if (in_clip(mclip, qx, qy, 3) && !lb_hits(qx - 3, qy - 3, 7, 7)) { gx[ng] = qx; gy[ng] = qy; ng++; }
+      }
+    }
+    const TrafficAlert* al = traffic_alert_for_hex(&g_traffic_result, a->hex);
+    uint8_t lvl = al ? al->level : (uint8_t)TRAFFIC_NONE;
+    aircraft_mark(x, y, gx, gy, ng, a->track_deg, lvl, ac_old(a), a->on_ground);
+    if (ac_hud && !strcmp(a->hex, s_ac_hex)) epd_draw_circle(x, y, AC_R + 9, BLACK, s_fb);
+    s_pac_x[s_pac_n] = x; s_pac_y[s_pac_n] = y;
+    snprintf(s_pac_hex[s_pac_n], sizeof(s_pac_hex[0]), "%s", a->hex);
+    mac_lvl[s_pac_n] = lvl; mac_i[s_pac_n] = i;
+    s_pac_n++;
+  }
+
   for (int i = nr - 1; i >= 0; i--) {
     int k = rows[i];
     if (!on[k]) continue;
     const Track* t = &g_tracks[s_order[k]];
-    bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now);
+    bool stale = ui_stale(t, s_now), danger = ui_danger(t, s_now) || alert_for_drone(t);
     epd_fill_circle(px[k], py[k], danger ? 15 : 11, WHITE, s_fb);
     if (danger) epd_draw_circle(px[k], py[k], 13, BLACK, s_fb);
     epd_fill_circle(px[k], py[k], k == s_sel ? 8 : 6, stale ? GREY : BLACK, s_fb);
@@ -1046,12 +1529,15 @@ static void draw_map() {
   // The selected aircraft and alerts label first (they may cover a lesser
   // marker); then markers become obstacles for everyone else.
   for (int pass = 0; pass < 2; pass++) {
-    if (pass == 1) for (int k = 0; k < s_n; k++) if (on[k]) lb_block(px[k] - 16, py[k] - 16, 32, 32);
+    if (pass == 1) {
+      for (int k = 0; k < s_n; k++) if (on[k]) lb_block(px[k] - 16, py[k] - 16, 32, 32);
+      for (int j = 0; j < s_pac_n; j++) lb_block(s_pac_x[j] - AC_R - 1, s_pac_y[j] - AC_R - 1, 2 * AC_R + 3, 2 * AC_R + 3);
+    }
     for (int i = 0; i < nr; i++) {
       int k = rows[i];
       if (!on[k]) continue;
       const Track* t = &g_tracks[s_order[k]];
-      bool first = (k == s_sel) || ui_danger(t, s_now);
+      bool first = (k == s_sel) || ui_danger(t, s_now) || alert_for_drone(t);
       if (first != (pass == 0)) continue;
       bool stale = ui_stale(t, s_now);
       if (!isnan(t->height)) snprintf(b, sizeof(b), "%s %dm", label_id(k), (int)t->height);
@@ -1063,6 +1549,9 @@ static void draw_map() {
       text(&FreeSansBold9pt7b, b, lx + 4, ly + 14, stale ? GREY : BLACK);
     }
   }
+  for (int lv = TRAFFIC_WARNING; lv >= TRAFFIC_NONE; lv--)
+    for (int j = 0; j < s_pac_n; j++)
+      if (mac_lvl[j] == lv) aircraft_label(&g_traffic_ac[mac_i[j]], mac_lvl[j], s_pac_x[j], s_pac_y[j], mclip);
 
   // scale bar: 100 px in metres at this zoom and latitude
   double clat, clon; px_world(s_cam_wx, s_cam_wy, s_cam_z, &clat, &clon);
@@ -1114,26 +1603,40 @@ static void draw_map() {
     s_pan_bw = 0;
   }
 
-  // Tactical HUD banner when an aircraft is selected
-  if (s_n > 0 && s_sel >= 0 && s_sel < s_n) {
-    const Track* sel_t = &g_tracks[s_order[s_sel]];
+  // Tactical HUD banner when a drone or an aircraft is selected
+  if (ac_hud || (s_n > 0 && s_sel >= 0 && s_sel < s_n)) {
     const int hud_h = MAP_HUD_H;
     const int hud_y = MAP_Y0 + MAP_H - hud_h - 40;
     rect(20, hud_y, W - 40, hud_h, WHITE);
     box(20, hud_y, W - 40, hud_h, BLACK);
     box(21, hud_y + 1, W - 42, hud_h - 2, BLACK);
 
-    char hb[16] = "--", sb[16] = "--", rb[16] = "--";
-    if (!isnan(sel_t->height)) snprintf(hb, sizeof(hb), "%d m", (int)sel_t->height);
-    if (!isnan(sel_t->speed)) snprintf(sb, sizeof(sb), "%.0f m/s", sel_t->speed);
-    if (g_home_set && sel_t->has_pos) {
-      dist_text(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, sel_t->lat, sel_t->lon));
+    char hud_str[160];
+    if (ac_hud) {
+      // The aircraft: who, its altitude and speed, where relative to the drone.
+      const TrafficAircraft* a = &g_traffic_ac[ac_index(s_ac_hex)];
+      const TrafficAlert* al = traffic_alert_for_hex(&g_traffic_result, a->hex);
+      char name[12], alt[20] = "--", rel1[48], rel2[40], age[24];
+      traffic_ac_name(a, name, sizeof(name));
+      if (isfinite(a->alt_baro_m)) ft_text(alt, sizeof(alt), a->alt_baro_m);
+      traffic_relative(a, al, rel1, sizeof(rel1), rel2, sizeof(rel2));
+      traffic_age_words(traffic_age_s(a->seen_ms, s_now), age, sizeof(age));
+      snprintf(hud_str, sizeof(hud_str), "%s%s%s | %s | %s%s%s | %s", name, a->type[0] ? " " : "", a->type,
+               alt, rel1[0] ? rel1 : "--", rel2[0] ? ", " : "", rel2, age);
+    } else {
+      const Track* sel_t = &g_tracks[s_order[s_sel]];
+      char hb[16] = "--", sb[16] = "--", rb[16] = "--";
+      if (!isnan(sel_t->height)) snprintf(hb, sizeof(hb), "%d m", (int)sel_t->height);
+      if (!isnan(sel_t->speed)) snprintf(sb, sizeof(sb), "%.0f m/s", sel_t->speed);
+      if (g_home_set && sel_t->has_pos) {
+        dist_text(rb, sizeof(rb), ui_dist_m(g_home_lat, g_home_lon, sel_t->lat, sel_t->lon));
+      }
+      char al[72];
+      drone_alert_words(al, sizeof(al), sel_t);
+      snprintf(hud_str, sizeof(hud_str), "%s | %s | HGT %s | SPD %s | RNG %s",
+               sel_t->uas[0] ? sel_t->uas : "NO ID",
+               al[0] ? al : ui_status_name(sel_t->status), hb, sb, rb);
     }
-    char hud_str[128], al[48];
-    ui_alert_text(al, sizeof(al), sel_t, s_now);
-    snprintf(hud_str, sizeof(hud_str), "%s | %s | HGT %s | SPD %s | RNG %s",
-             sel_t->uas[0] ? sel_t->uas : "NO ID",
-             al[0] ? al : ui_status_name(sel_t->status), hb, sb, rb);
     // [ DETAILS ] and [ X ] buttons, finger-sized; the text stops short of them
     int d_w = 100, d_h = 36;
     int d_x = W - 170, d_y = hud_y + 5;
@@ -1153,19 +1656,39 @@ static void draw_map() {
   draw_footer(sm, !s_map_touched ? "tap marker: select | tap map: recentre | drag: pan" : "BOOT: table | hold BOOT: power off");
 }
 
+// A refresh epdiy could not feed in time ("line buffer underrun") leaves
+// the glass incomplete while its back buffer says it is done, so later
+// difference updates would never repair it: the next pass repaints the
+// whole panel from white (epd_repaint_all).
+static bool s_epd_redo = false;
+static void refresh_checked(EpdRect area, enum EpdDrawMode mode) {
+  epd_ensure_on();  // PMIC rail hold: skip poweron if already energized
+  enum EpdDrawError e = epd_hl_update_area(&s_hl, mode, TEMP_C, area);
+  if (e & EPD_DRAW_EMPTY_LINE_QUEUE) s_epd_redo = true;
+  // Taps released while the panel was busy are dropped, never queued.
+  s_touch_ignore_ms = millis();
+}
+static void epd_repaint_all() {
+  epd_ensure_on();
+  epd_clear();                                  // every pixel to white, whatever it held
+  memset(s_hl.back_fb, 0xFF, (size_t)W * H / 2); // and the back buffer says so
+  refresh_checked(epd_full_screen(), MODE_GC16);
+  s_partials = 0;
+  s_last_full = s_now;
+}
+
 static void refresh_area(EpdRect area, bool force_full, bool fast_mode = false) {
   // E-Paper Best Practice: Full DC-balanced GC16 refresh on view changes,
   // alert state transitions, or periodically every 10 partial cycles / 3 minutes
   // to eliminate residual charge and ghosting.
   bool full = force_full || (s_partials >= 10 || (s_now - s_last_full > 180000UL));
-  epd_ensure_on();  // PMIC rail hold: skip poweron if already energized
   if (full) {
-    epd_hl_update_screen(&s_hl, MODE_GC16, TEMP_C);
+    refresh_checked(epd_full_screen(), MODE_GC16);
     s_partials = 0;
     s_last_full = s_now;
   } else {
     enum EpdDrawMode mode = fast_mode ? MODE_DU : MODE_GL16;
-    epd_hl_update_area(&s_hl, mode, TEMP_C, area);
+    refresh_checked(area, mode);
     s_partials++;
   }
   // No epd_poweroff() here — rails stay hot during interaction;
@@ -1220,7 +1743,7 @@ static void draw_inspector_modal() {
   text(f9, "IDENTITY & SIGNAL", col1, y, BLACK);
   rect(col1, y + 4, 300, 1, BLACK);
   y += 24;
-  char al[64]; ui_alert_text(al, sizeof(al), t, s_now);
+  char al[72]; drone_alert_words(al, sizeof(al), t);
   if (al[0]) { snprintf(b, sizeof(b), "Alert: %s", al); ins_line(col1, &y, b); }
   snprintf(b, sizeof(b), "UAS ID: %s", t->uas[0] ? t->uas : "not reported");
   ins_line(col1, &y, b);
@@ -1243,12 +1766,12 @@ static void draw_inspector_modal() {
   ins_line(col1, &y, b);
   snprintf(b, sizeof(b), "Signal: %d dBm (peak %d)", t->rssi, t->peak_rssi);
   ins_line(col1, &y, b);
-  char age[16]; age_text(age, sizeof(age), (s_now - t->last_ms) / 1000);
-  uint32_t dur_s = (s_now - t->first_ms) / 1000;
+  char age[16]; age_text(age, sizeof(age), since_s(t->last_ms));
+  uint32_t dur_s = since_s(t->first_ms);
   snprintf(b, sizeof(b), "Heard %s | %u msgs in %lu:%02lu", age, t->msgs,
            (unsigned long)(dur_s / 60), (unsigned long)(dur_s % 60));
   ins_line(col1, &y, b);
-  snprintf(b, sizeof(b), "ID signature: %s", sig_state(t->auth_state));
+  snprintf(b, sizeof(b), "%s", sig_words(t->auth_state));
   ins_line(col1, &y, b, (t->auth_state == 4) ? BLACK : GREY);
 
   // Section 2: FLIGHT (Right column)
@@ -1284,6 +1807,37 @@ static void draw_inspector_modal() {
   ins_line(col2, &y2, b);
   snprintf(b, sizeof(b), "Status: %s", t->status == 3 ? "EMERGENCY REPORTED" : ui_status_name(t->status));
   ins_line(col2, &y2, b);
+  // Nearest traffic (§8.3): the pair this drone is in, else the nearest
+  // aircraft reported near it -- never a claim that there is none.
+  if (g_traffic_result.have_data && t->has_pos) {
+    const TrafficAlert* ta = alert_for_drone(t);
+    char km[16], nm[12];
+    if (ta) {
+      snprintf(nm, sizeof(nm), "%s", ta->callsign[0] ? ta->callsign : ta->hex);
+      for (char* q = nm; *q; q++) *q = (char)toupper((unsigned char)*q);
+      traffic_km_text(ta->horiz_m, km, sizeof(km));
+      if (isfinite(ta->vert_m) && !ta->height_unknown)
+        snprintf(b, sizeof(b), "Traffic: %s %s km %s, %ld m %s", nm, km, traffic_compass8(ta->bearing_deg),
+                 labs(iround(ta->vert_m)), ta->vert_m >= 0 ? "above" : "below");
+      else
+        snprintf(b, sizeof(b), "Traffic: %s %s km %s, height unknown", nm, km, traffic_compass8(ta->bearing_deg));
+    } else {
+      int best = -1; double bd = 0, bdx = 0, bdy = 0;
+      for (int i = 0; i < g_traffic_count; i++) {
+        double dx, dy; traffic_offset_m(t->lat, t->lon, g_traffic_ac[i].lat, g_traffic_ac[i].lon, &dx, &dy);
+        double d = hypot(dx, dy);
+        if (isfinite(d) && (best < 0 || d < bd)) { best = i; bd = d; bdx = dx; bdy = dy; }
+      }
+      if (g_traffic_result.stale) snprintf(b, sizeof(b), "Traffic: TRAFFIC DATA STALE");
+      else if (best < 0 || bd > TRAFFIC_LOW_R_M) snprintf(b, sizeof(b), "Traffic: no ADS-B traffic reported within 3 km");
+      else {
+        traffic_ac_name(&g_traffic_ac[best], nm, sizeof(nm));
+        traffic_km_text(bd, km, sizeof(km));
+        snprintf(b, sizeof(b), "Nearest traffic: %s %s km %s", nm, km, traffic_compass8(traffic_bearing_of(bdx, bdy)));
+      }
+    }
+    ins_line(col2, &y2, b, ta ? BLACK : GREY);
+  }
   // "No match" is only claimed against data the host actually pushed.
   ui_airspace_text(al, sizeof(al), t, s_now);
   snprintf(b, sizeof(b), "Airspace: %s", al);
@@ -1348,6 +1902,509 @@ static void draw_switch_modal() {
   box(bx_can, by, bw, bh, BLACK);
   box(bx_can + 1, by + 1, bw - 2, bh - 2, BLACK);
   text(&FreeSansBold12pt7b, "CANCEL", bx_can + (bw - text_w(&FreeSansBold12pt7b, "CANCEL")) / 2, by + 35, BLACK);
+}
+
+// The traffic card (§8.3, docs/mockups/orecchino-traffic-alerts.html): the
+// plot panel while a warning lasts, or when an aircraft's diamond is tapped.
+// It speaks relative to the drone, keeps the data age in its top corner and
+// the two honest sentences at the bottom, where the decision is made.
+#define TC_X 574
+#define TC_Y 76
+#define TC_W 378
+#define TC_H 416
+static void tri(int x, int y, int w, bool up) {   // filled, apex up or down; (x,y) top-left
+  for (int r = 0; r <= w / 2; r++) {
+    int yy = up ? y + r : y + w / 2 - r;
+    rect(x + w / 2 - r, yy, 2 * r + 1, 1, BLACK);
+  }
+}
+static void draw_traffic_card(const TrafficAircraft* ac, const TrafficAlert* al) {
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  const GFXfont* f18 = &FreeSansBold18pt7b;
+  const GFXfont* f24 = &FreeSansBold24pt7b;
+  const int x = TC_X + 16, maxw = TC_W - 32;
+  char b[80];
+  rect(TC_X, TC_Y, TC_W, TC_H, WHITE);
+  for (int i = 0; i < 3; i++) box(TC_X + i, TC_Y + i, TC_W - 2 * i, TC_H - 2 * i, BLACK);
+
+  // Band: the rule's words when they fit beside the data age, else TRAFFIC.
+  rect(TC_X, TC_Y, TC_W, 34, BLACK);
+  double age = ac ? traffic_age_s(ac->seen_ms, s_now) : (al ? al->age_s : NAN);
+  char agew[32];
+  if (isfinite(age)) traffic_age_words(age, agew, sizeof(agew)); else snprintf(agew, sizeof(agew), "ADS-B age unknown");
+  text_r(f9, agew, TC_X + TC_W - 12, TC_Y + 23, WHITE);
+  const char* title = g_traffic_result.stale ? "DATA STALE" : "TRAFFIC";
+  if (!g_traffic_result.stale && al && al->level == TRAFFIC_WARNING &&
+      text_w(f9, al->text) <= TC_W - 24 - text_w(f9, agew) - 16) title = al->text;
+  text(f9, title, TC_X + 12, TC_Y + 23, WHITE);
+
+  // Callsign in the largest type that fits, then type and address.
+  char name[12];
+  if (ac) traffic_ac_name(ac, name, sizeof(name));
+  else if (al && al->callsign[0]) snprintf(name, sizeof(name), "%s", al->callsign);
+  else { snprintf(name, sizeof(name), "%s", al ? al->hex : "?"); for (char* p = name; *p; p++) *p = (char)toupper((unsigned char)*p); }
+  const GFXfont* nf = text_w(f24, name) <= maxw ? f24 : text_w(f18, name) <= maxw ? f18 : f12;
+  text(nf, name, x, TC_Y + 84, BLACK);
+  b[0] = 0;
+  if (ac) {
+    char hex[8]; snprintf(hex, sizeof(hex), "%s", ac->hex);
+    for (char* p = hex; *p; p++) *p = (char)toupper((unsigned char)*p);
+    snprintf(b, sizeof(b), "%s%s%s", ac->type[0] ? ac->type : "", ac->type[0] ? " | " : "", hex);
+  }
+  const char* em = ac ? ac_emergency_words(ac) : nullptr;
+  char chip[32] = "";
+  if (em) {
+    if (ac->squawk == 7500 || ac->squawk == 7600 || ac->squawk == 7700) snprintf(chip, sizeof(chip), "%04u %s", (unsigned)ac->squawk, em);
+    else snprintf(chip, sizeof(chip), "%s", em);
+  }
+  int chip_w = chip[0] ? text_w(f9, chip) + 12 : 0;
+  if (chip[0]) {
+    rect(TC_X + TC_W - 16 - chip_w, TC_Y + 96, chip_w, 20, BLACK);
+    text(f9, chip, TC_X + TC_W - 16 - chip_w + 6, TC_Y + 111, WHITE);
+  }
+  fit_text(b, sizeof(b), f9, maxw - (chip_w ? chip_w + 10 : 0));
+  text(f9, b, x, TC_Y + 110, GREY);
+
+  // Where it is, relative to the drone (or to you, for LOW traffic).
+  char rel1[48], rel2[40];
+  traffic_relative(ac, al, rel1, sizeof(rel1), rel2, sizeof(rel2));
+  const GFXfont* rf = (text_w(f18, rel1) <= maxw && text_w(f18, rel2) <= maxw) ? f18 : f12;
+  fit_text(rel1, sizeof(rel1), rf, maxw);
+  if (rel1[0]) text(rf, rel1, x, TC_Y + 150, BLACK);
+  if (rel2[0]) text(rf, rel2, x, TC_Y + 182, BLACK);
+  rect(x, TC_Y + 198, maxw, 1, LIGHT);
+
+  // Its own altitude and speed, as reported.
+  text(f9, "ALTITUDE", x, TC_Y + 222, GREY);
+  text(f9, "SPEED", x + 180, TC_Y + 222, GREY);
+  if (ac && ac->on_ground) snprintf(b, sizeof(b), "on ground");
+  else if (ac && isfinite(ac->alt_baro_m)) ft_text(b, sizeof(b), ac->alt_baro_m);
+  else if (ac && isfinite(ac->alt_geom_m)) { char f[20]; ft_text(f, sizeof(f), ac->alt_geom_m); snprintf(b, sizeof(b), "%s GNSS", f); }
+  else snprintf(b, sizeof(b), "--");
+  fit_text(b, sizeof(b), f18, 170);
+  text(text_w(f18, b) <= 170 ? f18 : f12, b, x, TC_Y + 252, BLACK);
+  if (ac && isfinite(ac->gs_mps)) snprintf(b, sizeof(b), "%ld kt", iround(ac->gs_mps / TRAFFIC_KT_TO_MPS));
+  else snprintf(b, sizeof(b), "--");
+  text(f18, b, x + 180, TC_Y + 252, BLACK);
+  if (ac && !ac->on_ground && isfinite(ac->vs_mps)) {
+    long fpm = iround(ac->vs_mps / TRAFFIC_FT_TO_M * 60);
+    if (labs(fpm) < 100) snprintf(b, sizeof(b), "level");
+    else snprintf(b, sizeof(b), "%s %ld fpm", fpm > 0 ? "climbing" : "descending", labs(fpm));
+    int tx = x;
+    if (labs(fpm) >= 100) { tri(x, TC_Y + 272, 14, fpm > 0); tx = x + 22; }
+    text(f12, b, tx, TC_Y + 286, BLACK);
+  }
+
+  // The two honest sentences.
+  text(f9, "Positions as reported, not a prediction.", x, TC_Y + 330, GREY);
+  text(f9, "Not every aircraft broadcasts ADS-B.", x, TC_Y + 352, GREY);
+
+  // What a tap does.
+  rect(TC_X + 3, TC_Y + TC_H - 37, TC_W - 6, 34, LIGHT);
+  const char* tap = is_pair(al) ? "TAP FOR THE DRONE'S DETAILS" : "TAP TO CLOSE";
+  text(f9, tap, TC_X + (TC_W - text_w(f9, tap)) / 2, TC_Y + TC_H - 14, BLACK);
+}
+
+// ---- Wi-Fi setup (plan §4.3), on net_sync.h's API. Opened from SYSTEM:
+// the networks screen (a scan, a list with signal bars, a lock for secured
+// networks, SAVED chips, pages, "Other network..."), a saved network's
+// CONNECT / FORGET, the keyboard, then a joining screen that stays until
+// the join succeeds or fails, and the result in words.
+#define WF_HEAD_H 76
+#define WF_ROW_Y0 118
+#define WF_ROW_H  64
+#define WF_ROWS   5
+#define WF_PAGE_Y 446
+#define WF_BTN_W  120
+#define WF_BTN_H  60
+static const EpdRect RECT_KB_FIELD = { 16, 72, 944, 72 };     // 8-px aligned: the field and SHOW
+static const EpdRect RECT_KB_ALL   = { 16, 72, 944, 468 };    // field, keys, hint
+
+/// Networks in list order plus "Other network..." as the last entry.
+static int wifi_entries() { uint8_t n = 0; net_get_scanned(&n); return n + 1; }
+static int wifi_pages() { return (wifi_entries() + WF_ROWS - 1) / WF_ROWS; }
+static void signal_bars(int x, int y, int rssi) {   // (x,y): bottom-left; 4 bars, 33 px wide
+  int lvl = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
+  for (int i = 0; i < 4; i++) {
+    int h = 7 + i * 5;
+    if (i < lvl) rect(x + i * 9, y - h, 6, h, BLACK); else box(x + i * 9, y - h, 6, h, GREY);
+  }
+}
+static void lock_glyph(int x, int y) {   // (x,y): bottom-left, 14 x 20
+  rect(x, y - 11, 14, 11, BLACK);
+  box(x + 3, y - 19, 8, 9, BLACK);
+  box(x + 4, y - 18, 6, 8, BLACK);
+}
+static void header_button(int x, const char* lbl) {   // white button in a black header
+  rect(x, 8, WF_BTN_W, WF_BTN_H, WHITE);
+  text(&FreeSansBold12pt7b, lbl, x + (WF_BTN_W - text_w(&FreeSansBold12pt7b, lbl)) / 2, 8 + 38, BLACK);
+}
+static void big_button(int x, int y, int w, int h, const char* lbl, bool solid) {
+  if (solid) rect(x, y, w, h, BLACK);
+  else { box(x, y, w, h, BLACK); box(x + 1, y + 1, w - 2, h - 2, BLACK); }
+  text(&FreeSansBold12pt7b, lbl, x + (w - text_w(&FreeSansBold12pt7b, lbl)) / 2, y + h / 2 + 8, solid ? WHITE : BLACK);
+}
+
+static void draw_wifi_list() {
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  const GFXfont* f18 = &FreeSansBold18pt7b;
+  rect(0, 0, W, WF_HEAD_H, BLACK);
+  text(f18, "WI-FI NETWORKS", 24, 50, WHITE);
+  header_button(W - 24 - 2 * WF_BTN_W - 12, "SCAN");
+  header_button(W - 24 - WF_BTN_W, "CLOSE");
+  char b[80];
+  bool scanning = net_is_scanning();
+  if (scanning) snprintf(b, sizeof(b), "scanning, Remote ID Wi-Fi paused (about 2 s)");
+  else net_status_line(b, sizeof(b));
+  fit_text(b, sizeof(b), f9, W - 48);
+  text(f9, b, 24, 104, scanning ? BLACK : GREY);
+
+  uint8_t count = 0;
+  const ScannedNetwork* nets = net_get_scanned(&count);
+  int entries = count + 1, pages = wifi_pages();
+  if (s_wifi_page >= pages) s_wifi_page = pages - 1;
+  if (s_wifi_page < 0) s_wifi_page = 0;
+  for (int r = 0; r < WF_ROWS; r++) {
+    int e = s_wifi_page * WF_ROWS + r;
+    if (e >= entries) break;
+    int ry = WF_ROW_Y0 + r * WF_ROW_H;
+    box(24, ry, W - 48, WF_ROW_H - 6, BLACK);
+    if (e == count) {   // hidden networks
+      text(f12, "Other network...", 40, ry + 38, BLACK);
+      text_r(f9, "type its name", W - 40, ry + 36, GREY);
+      continue;
+    }
+    const ScannedNetwork* n = &nets[e];
+    int xr = W - 40;
+    signal_bars(xr - 33, ry + 44, n->rssi);
+    xr -= 33 + 16;
+    if (n->auth_mode) { lock_glyph(xr - 14, ry + 42); xr -= 14 + 16; }
+    else { text_r(f9, "open", xr, ry + 38, GREY); xr -= text_w(f9, "open") + 16; }
+    bool on = net_get_state() == NET_STATE_CONNECTED && !strcmp(net_get_ssid(), n->ssid);
+    const char* chip = on ? "CONNECTED" : n->saved ? "SAVED" : nullptr;
+    if (chip) {
+      int cw = text_w(f9, chip) + 14;
+      rect(xr - cw, ry + 18, cw, 22, BLACK);
+      text(f9, chip, xr - cw + 7, ry + 35, WHITE);
+      xr -= cw + 16;
+    }
+    snprintf(b, sizeof(b), "%s", n->ssid);
+    fit_text(b, sizeof(b), f12, xr - 40);
+    text(f12, b, 40, ry + 38, BLACK);
+  }
+  if (!count && !scanning) text(f9, "No networks heard. Tap SCAN to look again.", 24, WF_ROW_Y0 + WF_ROW_H + 30, GREY);
+  if (pages > 1) {
+    big_button(24, WF_PAGE_Y, 150, 56, "< PREV", false);
+    big_button(W - 24 - 150, WF_PAGE_Y, 150, 56, "NEXT >", false);
+    snprintf(b, sizeof(b), "page %d of %d", s_wifi_page + 1, pages);
+    text(f12, b, (W - text_w(f12, b)) / 2, WF_PAGE_Y + 36, BLACK);
+  }
+  text(f9, "Tap a network to connect. Passwords are kept on this board in plain NVS.", 24, 528, GREY);
+}
+
+static void draw_wifi_action() {   // CONNECT / FORGET for a saved network, over the list
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  const int mw = 600, mh = 250, mx = (W - mw) / 2, my = (H - mh) / 2;
+  rect(mx, my, mw, mh, WHITE);
+  for (int i = 0; i < 3; i++) box(mx + i, my + i, mw - 2 * i, mh - 2 * i, BLACK);
+  char b[48]; snprintf(b, sizeof(b), "%s", s_wifi_ssid);
+  fit_text(b, sizeof(b), &FreeSansBold18pt7b, mw - 48);
+  text(&FreeSansBold18pt7b, b, mx + 24, my + 54, BLACK);
+  text(&FreeSansBold9pt7b, "A saved network. Connect now, or forget it and its password.", mx + 24, my + 88, GREY);
+  const int by = my + mh - 24 - 64, bw = 170;
+  big_button(mx + 24, by, bw, 64, "CONNECT", true);
+  big_button(mx + 24 + bw + 15, by, bw, 64, "FORGET", false);
+  big_button(mx + mw - 24 - bw, by, bw, 64, "CANCEL", false);
+  (void)f12;
+}
+
+static void draw_wifi_join() {   // joining, then the result
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  const GFXfont* f18 = &FreeSansBold18pt7b;
+  rect(0, 0, W, WF_HEAD_H, BLACK);
+  text(f18, "WI-FI", 24, 50, WHITE);
+  char b[96];
+  snprintf(b, sizeof(b), "%s", s_wifi_ssid);
+  fit_text(b, sizeof(b), f18, W - 96);
+  if (s_wv == WV_JOINING) {
+    text(f12, "CONNECTING TO", 48, 190, GREY);
+    text(f18, b, 48, 236, BLACK);
+    text(f9, "Remote ID reception over Wi-Fi pauses while the board joins (up to 15 s).", 48, 290, GREY);
+    text(f9, "Bluetooth reception carries on.", 48, 314, GREY);
+    return;
+  }
+  text(f18, s_wifi_join_ok ? "CONNECTED" : "COULD NOT CONNECT", 48, 170, BLACK);
+  text(f12, b, 48, 214, BLACK);
+  if (s_wifi_join_ok) {
+    snprintf(b, sizeof(b), "Saved. %s", net_get_mode() == NET_MODE_STAY ? "The board stays connected."
+             : "The board joins it for each sync, then goes back to listening.");
+    fit_text(b, sizeof(b), f9, W - 96);
+    text(f9, b, 48, 256, GREY);
+  } else {
+    snprintf(b, sizeof(b), "Reason: %s", s_wifi_join_err[0] ? s_wifi_join_err : "unknown");
+    fit_text(b, sizeof(b), f12, W - 96);
+    text(f12, b, 48, 262, BLACK);
+    text(f9, "Nothing was saved.", 48, 292, GREY);
+  }
+  if (!s_wifi_join_ok) big_button(48, 400, 220, 64, "TRY AGAIN", false);
+  big_button(W - 48 - 220, 400, 220, 64, "OK", true);
+}
+
+static void draw_wifi_screen() {
+  epd_hl_set_all_white(&s_hl);
+  if (s_wv == WV_JOINING || s_wv == WV_RESULT) { draw_wifi_join(); return; }
+  draw_wifi_list();
+  if (s_wv == WV_ACTION) draw_wifi_action();
+}
+
+// ---- the on-screen keyboard (plan §4.3). Full screen: keys 84 x 60 px (a
+// fingertip on this panel), five rows; digits always on top; letters shown
+// in the case they will type; SHIFT once for one capital, twice for caps
+// lock; #+= for symbols. A key press refreshes only what changed in fast
+// 1-bit DU (the pressed key inverts, then the field updates) and the field
+// is cleaned with GL16 after 20 of those -- never a full-screen flash.
+#define KB_X0    24
+#define KB_KW    84
+#define KB_KH    60
+#define KB_GAP   8
+#define KB_Y0    150
+#define KB_PITCH 68
+#define KB_FX    24
+#define KB_FY    76
+#define KB_FW    762
+#define KB_FH    60
+#define KB_SHOW_X (KB_FX + KB_FW + 12)
+#define KB_SHOW_W (W - 24 - KB_SHOW_X)
+static const char* const KB_ROWS[2][4] = {
+  { "1234567890", "qwertyuiop", "asdfghjkl-", "\x01zxcvbnm._" },   // \x01: SHIFT
+  { "1234567890", "!@#$%^&*()", "-_=+:;'\"?/", "[]{}<>\\|~," },
+};
+enum : uint8_t { KB_K_CHAR = 0, KB_K_SHIFT, KB_K_LAYER, KB_K_SPACE, KB_K_BKSP, KB_K_CANCEL, KB_K_OK };
+struct KbKey { int x, y, w, h; uint8_t kind; char ch; };
+#define KB_MAXKEYS 48
+static int kb_keys(KbKey* out) {
+  int n = 0;
+  for (int r = 0; r < 4; r++) {
+    const char* row = KB_ROWS[s_kb_layer][r];
+    for (int i = 0; row[i]; i++)
+      out[n++] = { KB_X0 + i * (KB_KW + KB_GAP), KB_Y0 + r * KB_PITCH, KB_KW, KB_KH,
+                   row[i] == '\x01' ? KB_K_SHIFT : KB_K_CHAR, row[i] };
+  }
+  static const int bw[5] = { 130, 300, 130, 150, 170 };   // with 4 gaps: 912, the rows' width
+  static const uint8_t bk[5] = { KB_K_LAYER, KB_K_SPACE, KB_K_BKSP, KB_K_CANCEL, KB_K_OK };
+  int x = KB_X0;
+  for (int i = 0; i < 5; i++) { out[n++] = { x, KB_Y0 + 4 * KB_PITCH, bw[i], KB_KH, bk[i], 0 }; x += bw[i] + KB_GAP; }
+  return n;
+}
+static char kb_char(char c) {   // what the key types (and shows) now
+  bool upper = s_kb_layer == 0 && (s_kb_shift || s_kb_caps);
+  return upper && c >= 'a' && c <= 'z' ? (char)(c - 32) : c;
+}
+static void kb_draw_key(const KbKey& k, bool pressed) {
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f18 = &FreeSansBold18pt7b;
+  char lbl[12]; const GFXfont* f = f9;
+  bool solid = false;
+  switch (k.kind) {
+    case KB_K_CHAR:   lbl[0] = kb_char(k.ch); lbl[1] = 0; f = f18; break;
+    case KB_K_SHIFT:  snprintf(lbl, sizeof(lbl), s_kb_caps ? "CAPS" : "SHIFT"); solid = s_kb_shift || s_kb_caps; break;
+    case KB_K_LAYER:  snprintf(lbl, sizeof(lbl), s_kb_layer ? "abc" : "#+="); f = &FreeSansBold12pt7b; break;
+    case KB_K_SPACE:  snprintf(lbl, sizeof(lbl), "SPACE"); break;
+    case KB_K_BKSP:   snprintf(lbl, sizeof(lbl), "DELETE"); break;
+    case KB_K_CANCEL: snprintf(lbl, sizeof(lbl), "CANCEL"); break;
+    default:          snprintf(lbl, sizeof(lbl), s_kb_ssid_stage ? "NEXT" : "CONNECT"); solid = true; break;
+  }
+  bool ink = solid != pressed;   // a press inverts the key
+  rect(k.x, k.y, k.w, k.h, ink ? BLACK : WHITE);
+  if (!ink) { box(k.x, k.y, k.w, k.h, BLACK); box(k.x + 1, k.y + 1, k.w - 2, k.h - 2, BLACK); }
+  int tw = text_w(f, lbl);
+  int ty = f == f18 ? k.y + 42 : k.y + 37;
+  text(f, lbl, k.x + (k.w - tw) / 2, ty, ink ? WHITE : BLACK);
+  if (k.kind == KB_K_SHIFT && s_kb_caps) rect(k.x + 20, k.y + k.h - 10, k.w - 40, 3, ink ? WHITE : BLACK);
+}
+static void kb_draw_field() {
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f18 = &FreeSansBold18pt7b;
+  rect(RECT_KB_FIELD.x, RECT_KB_FIELD.y, RECT_KB_FIELD.width, RECT_KB_FIELD.height, WHITE);
+  box(KB_FX, KB_FY, KB_FW, KB_FH, BLACK);
+  box(KB_FX + 1, KB_FY + 1, KB_FW - 2, KB_FH - 2, BLACK);
+  // What was typed (dots unless SHOW), its tail when long, and a caret.
+  char shown[NET_MAX_PASS_LEN + 4];
+  size_t n = strlen(s_kb_buf);
+  bool mask = !s_kb_ssid_stage && !s_kb_show;
+  for (size_t i = 0; i < n; i++) shown[i] = mask ? '*' : s_kb_buf[i];
+  shown[n] = '_'; shown[n + 1] = 0;
+  // The count at the field's right end: what 8-to-63 is measured against.
+  char cnt[12]; snprintf(cnt, sizeof(cnt), "%u", (unsigned)n);
+  text_r(f9, cnt, KB_FX + KB_FW - 12, KB_FY + 38, GREY);
+  const char* p = shown;
+  while (text_w(f18, p) > KB_FW - 40 - text_w(f9, cnt) && p[1]) p++;
+  text(f18, p, KB_FX + 12, KB_FY + 42, BLACK);
+  if (!s_kb_ssid_stage) {
+    KbKey k = { KB_SHOW_X, KB_FY, KB_SHOW_W, KB_FH, 0, 0 };
+    rect(k.x, k.y, k.w, k.h, WHITE);
+    box(k.x, k.y, k.w, k.h, BLACK); box(k.x + 1, k.y + 1, k.w - 2, k.h - 2, BLACK);
+    const char* l = s_kb_show ? "HIDE" : "SHOW";
+    text(&FreeSansBold12pt7b, l, k.x + (k.w - text_w(&FreeSansBold12pt7b, l)) / 2, k.y + 38, BLACK);
+  }
+}
+static void draw_keyboard() {
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  const GFXfont* f18 = &FreeSansBold18pt7b;
+  epd_hl_set_all_white(&s_hl);
+  rect(0, 0, W, 64, BLACK);
+  const char* lead = s_kb_ssid_stage ? "NETWORK NAME" : "PASSWORD FOR";
+  text(f12, lead, 24, 42, WHITE);
+  if (!s_kb_ssid_stage) {
+    int x = 24 + text_w(f12, lead) + 14;
+    char b[48]; snprintf(b, sizeof(b), "%s", s_kb_ssid);
+    fit_text(b, sizeof(b), f18, W - 24 - x);
+    text(f18, b, x, 44, WHITE);
+  } else {
+    text(f9, "(a hidden network: type its name exactly)", 24 + text_w(f12, lead) + 14, 40, WHITE);
+  }
+  kb_draw_field();
+  KbKey keys[KB_MAXKEYS]; int n = kb_keys(keys);
+  for (int i = 0; i < n; i++) kb_draw_key(keys[i], false);
+  const char* h = s_kb_ssid_stage ? "Up to 32 characters, exactly as the network is named. NEXT: its password."
+                                   : "8 to 63 characters, or none for an open network. SHOW to check what you typed.";
+  text(f9, h, 24, 516, GREY);
+}
+/// A fast partial of the keyboard: DU (1-bit, ~260 ms), then GL16 on the
+/// field and keys after 20 of them to clear the ghosting DU leaves.
+static void kb_flush(EpdRect r) {
+  epd_ensure_on();
+  EpdRect a = { r.x & ~7, r.y, ((r.x + r.width + 7) & ~7) - (r.x & ~7), r.height };
+  refresh_checked(a, MODE_DU);
+  if (++s_kb_du >= 20) {
+    refresh_checked(RECT_KB_ALL, MODE_GL16);
+    s_kb_du = 0;
+  }
+}
+static EpdRect rect_union(EpdRect a, EpdRect b) {
+  int x0 = min(a.x, b.x), y0 = min(a.y, b.y);
+  int x1 = max(a.x + a.width, b.x + b.width), y1 = max(a.y + a.height, b.y + b.height);
+  return { x0, y0, x1 - x0, y1 - y0 };
+}
+static void wifi_start_join(const char* ssid, const char* pass) {
+  char name[NET_MAX_SSID_LEN + 1];
+  snprintf(name, sizeof(name), "%s", ssid);   // ssid may be s_wifi_ssid itself
+  snprintf(s_wifi_ssid, sizeof(s_wifi_ssid), "%s", name);
+  bool queued = net_connect(name, pass);
+  s_kb_modal = false;
+  s_wifi_join_ms = s_now;
+  s_wifi_join_seen = false;
+  s_wifi_join_err[0] = 0;
+  if (!queued) {   // refused at once (a password that cannot be right)
+    s_wifi_join_ok = false;
+    snprintf(s_wifi_join_err, sizeof(s_wifi_join_err), "%s", net_last_error());
+    s_wv = WV_RESULT;
+    return;
+  }
+  s_wv = WV_JOINING;
+}
+/// The Wi-Fi screens' own clock: redraw when a scan finishes; turn the
+/// joining screen into the result once the join has succeeded or failed.
+static void wifi_poll(uint32_t now) {
+  bool scanning = net_is_scanning();
+  if (s_wifi_was_scanning && !scanning) {
+    s_wifi_was_scanning = false;
+    if (s_wv == WV_LIST) { draw_board(false); s_sig_prev = signature(); }
+    return;
+  }
+  if (scanning) s_wifi_was_scanning = true;
+  if (s_wv != WV_JOINING) return;
+  NetState st = net_get_state();
+  if (st == NET_STATE_CONNECTING) s_wifi_join_seen = true;
+  bool done = s_wifi_join_seen && st != NET_STATE_CONNECTING;
+  bool timed_out = (int32_t)(now - s_wifi_join_ms) > 60000;
+  if (!done && !timed_out) return;
+  s_wifi_join_ok = done && st != NET_STATE_FAILED;
+  snprintf(s_wifi_join_err, sizeof(s_wifi_join_err), "%s", timed_out && !done ? "no answer from the Wi-Fi task" : net_last_error());
+  snprintf(s_diag_note, sizeof(s_diag_note), s_wifi_join_ok ? "joined %s" : "could not join %s", s_wifi_ssid);
+  s_wv = WV_RESULT;
+  draw_board(false);
+  s_sig_prev = signature();
+}
+/// A tap on the keyboard. Returns after its own partial refreshes.
+static void kb_tap(int tx, int ty) {
+  if (!s_kb_ssid_stage && tx >= KB_SHOW_X && tx < KB_SHOW_X + KB_SHOW_W && ty >= KB_FY && ty < KB_FY + KB_FH) {
+    s_kb_show = !s_kb_show;
+    kb_draw_field();
+    kb_flush(RECT_KB_FIELD);
+    return;
+  }
+  // The key under the touch point (the gaps count toward the nearest key).
+  KbKey keys[KB_MAXKEYS]; int n = kb_keys(keys);
+  int hit = -1;
+  for (int i = 0; i < n; i++) {
+    const KbKey& k = keys[i];
+    if (tx >= k.x - KB_GAP / 2 && tx < k.x + k.w + KB_GAP / 2 && ty >= k.y - KB_GAP / 2 && ty < k.y + k.h + KB_GAP / 2) { hit = i; break; }
+  }
+  if (hit < 0) return;   // outside the keys: nothing, and nothing typed is lost
+  KbKey k = keys[hit];
+  EpdRect kr = { k.x, k.y, k.w, k.h };
+  kb_draw_key(k, true);
+  kb_flush(kr);
+  bool relabel = false;
+  size_t len = strlen(s_kb_buf);
+  size_t cap = s_kb_ssid_stage ? NET_MAX_SSID_LEN : NET_MAX_PASS_LEN;
+  switch (k.kind) {
+    case KB_K_CHAR:
+      if (len < cap) { s_kb_buf[len] = kb_char(k.ch); s_kb_buf[len + 1] = 0; }
+      if (s_kb_shift) { s_kb_shift = false; relabel = true; }
+      break;
+    case KB_K_SPACE:
+      if (len < cap) { s_kb_buf[len] = ' '; s_kb_buf[len + 1] = 0; }
+      break;
+    case KB_K_BKSP:
+      if (len) s_kb_buf[len - 1] = 0;
+      break;
+    case KB_K_SHIFT:
+      if (s_kb_caps) s_kb_caps = false;
+      else if (s_kb_shift && s_now - s_kb_shift_ms < 700) { s_kb_shift = false; s_kb_caps = true; }
+      else s_kb_shift = !s_kb_shift;
+      s_kb_shift_ms = s_now;
+      relabel = true;
+      break;
+    case KB_K_LAYER:
+      s_kb_layer ^= 1;
+      s_kb_shift = false;
+      relabel = true;
+      break;
+    case KB_K_CANCEL:
+      s_kb_modal = false;
+      s_wv = WV_LIST;
+      s_sig_prev = 0;
+      draw_board(false);
+      return;
+    case KB_K_OK:
+      if (s_kb_ssid_stage) {
+        if (!s_kb_buf[0]) break;
+        snprintf(s_kb_ssid, sizeof(s_kb_ssid), "%.*s", NET_MAX_SSID_LEN, s_kb_buf);   // typed up to that cap
+        s_kb_buf[0] = 0;
+        s_kb_ssid_stage = false;
+        s_kb_show = false;
+        draw_board(false);
+        return;
+      }
+      wifi_start_join(s_kb_ssid, s_kb_buf);
+      s_sig_prev = 0;
+      draw_board(false);
+      return;
+  }
+  if (relabel) {
+    for (int i = 0; i < n; i++) if (keys[i].kind == KB_K_CHAR || keys[i].kind == KB_K_SHIFT || keys[i].kind == KB_K_LAYER) kb_draw_key(keys[i], false);
+    kb_draw_key(k, false);
+  } else {
+    kb_draw_key(k, false);
+  }
+  kb_draw_field();
+  kb_flush(relabel ? RECT_KB_ALL : rect_union(kr, RECT_KB_FIELD));
 }
 
 static void draw_tx() {
@@ -1530,7 +2587,7 @@ static void draw_diagnostics() {
   text(f12, "CLOSE", cl_x + (cl_w - text_w(f12, "CLOSE")) / 2, cl_y + 28, BLACK);
 
   // Section 1: DISPLAY BACKLIGHT -- the control people actually reach for
-  text(f12, "BACKLIGHT", 24, 98, BLACK);
+  text(f12, "BACKLIGHT", 24, DG_BL_BTN_Y - 8, BLACK);
   BlMode bm = periph_bl_get_mode();
   struct BlBtn { const char* lbl; BlMode m; int x; int w; } bl_btns[] = {
     { "AUTO", BL_AUTO, 24, 150 },
@@ -1542,21 +2599,21 @@ static void draw_diagnostics() {
     bool active = (bm == bb.m);
     if (active) {
       rect(bb.x, bl_btn_y, bb.w, bl_btn_h, BLACK);
-      text(f9, bb.lbl, bb.x + (bb.w - text_w(f9, bb.lbl)) / 2, bl_btn_y + 23, WHITE);
+      text(f9, bb.lbl, bb.x + (bb.w - text_w(f9, bb.lbl)) / 2, bl_btn_y + 22, WHITE);
     } else {
       box(bb.x, bl_btn_y, bb.w, bl_btn_h, BLACK);
-      text(f9, bb.lbl, bb.x + (bb.w - text_w(f9, bb.lbl)) / 2, bl_btn_y + 23, BLACK);
+      text(f9, bb.lbl, bb.x + (bb.w - text_w(f9, bb.lbl)) / 2, bl_btn_y + 22, BLACK);
     }
   }
   // Duty cycle stepper
   box(430, bl_btn_y, 40, bl_btn_h, BLACK);
-  text(f12, "-", 430 + (40 - text_w(f12, "-")) / 2, bl_btn_y + 24, BLACK);
+  text(f12, "-", 430 + (40 - text_w(f12, "-")) / 2, bl_btn_y + 23, BLACK);
   uint8_t duty = periph_bl_get_duty();
   char duty_str[32]; snprintf(duty_str, sizeof(duty_str), "%u%%", (duty * 100) / 255);
   box(478, bl_btn_y, 140, bl_btn_h, BLACK);
-  text(f9, duty_str, 478 + (140 - text_w(f9, duty_str)) / 2, bl_btn_y + 23, BLACK);
+  text(f9, duty_str, 478 + (140 - text_w(f9, duty_str)) / 2, bl_btn_y + 22, BLACK);
   box(626, bl_btn_y, 40, bl_btn_h, BLACK);
-  text(f12, "+", 626 + (40 - text_w(f12, "+")) / 2, bl_btn_y + 24, BLACK);
+  text(f12, "+", 626 + (40 - text_w(f12, "+")) / 2, bl_btn_y + 23, BLACK);
 
   char sun_buf[64];
   double sun_el = periph_sun_elevation();
@@ -1564,32 +2621,63 @@ static void draw_diagnostics() {
   snprintf(sun_buf, sizeof(sun_buf), "Sun %+.0f deg | %s | light %s",
            sun_el, periph_is_after_sundown() ? "night" : "day",
            periph_bl_is_active() ? "on" : "off");
-  text(f9, sun_buf, 680, bl_btn_y + 23, GREY);
+  text(f9, sun_buf, 680, bl_btn_y + 22, GREY);
 
-  rect(24, 154, W - 48, 1, LIGHT);
+  rect(24, DG_BL_BTN_Y + DG_BL_BTN_H + 10, W - 48, 1, LIGHT);
 
-  // Section 2: OPERATING MODE & POWER
-  text(f12, "MODE & POWER", 24, 176, BLACK);
-  int tx_btn_w = 380, tx_btn_h = DG_MODE_BTN_H, tx_btn_x = 24, tx_btn_y = DG_MODE_BTN_Y;
+  // Section 2: MODE & POWER
+  text(f12, "MODE & POWER", 24, DG_MODE_BTN_Y - 8, BLACK);
+  int tx_btn_w = 320, tx_btn_h = DG_MODE_BTN_H, tx_btn_x = 24, tx_btn_y = DG_MODE_BTN_Y;
   box(tx_btn_x, tx_btn_y, tx_btn_w, tx_btn_h, BLACK);
   box(tx_btn_x + 1, tx_btn_y + 1, tx_btn_w - 2, tx_btn_h - 2, BLACK);
-  text(f9, "SWITCH TO TEST BEACON", tx_btn_x + (tx_btn_w - text_w(f9, "SWITCH TO TEST BEACON")) / 2, tx_btn_y + 25, BLACK);
-  int pwr_btn_x = 420, pwr_btn_y = DG_MODE_BTN_Y, pwr_btn_w = 210, pwr_btn_h = DG_MODE_BTN_H;
+  text(f9, "SWITCH TO TEST BEACON", tx_btn_x + (tx_btn_w - text_w(f9, "SWITCH TO TEST BEACON")) / 2, tx_btn_y + 23, BLACK);
+  int pwr_btn_x = 360, pwr_btn_y = DG_MODE_BTN_Y, pwr_btn_w = 170, pwr_btn_h = DG_MODE_BTN_H;
   rect(pwr_btn_x, pwr_btn_y, pwr_btn_w, pwr_btn_h, BLACK);
-  text(f9, "POWER OFF", pwr_btn_x + (pwr_btn_w - text_w(f9, "POWER OFF")) / 2, pwr_btn_y + 25, WHITE);
-  text(f9, "Both ask to confirm.", pwr_btn_x + pwr_btn_w + 14, pwr_btn_y + 25, GREY);
+  text(f9, "POWER OFF", pwr_btn_x + (pwr_btn_w - text_w(f9, "POWER OFF")) / 2, pwr_btn_y + 23, WHITE);
 
-  rect(24, 236, W - 48, 1, LIGHT);
+  rect(24, DG_MODE_BTN_Y + DG_MODE_BTN_H + 10, W - 48, 1, LIGHT);
 
-  // Section 3: HARDWARE RESOURCE TELEMETRY
-  text(f12, "HARDWARE", 24, 258, BLACK);
-  int t_y = 282;
+  // Section 3: WI-FI (plan §4.3): the state in words, sticky until the next
+  // change -- including the last failure's reason -- and its four buttons.
+  text(f12, "WI-FI", 24, DG_WIFI_BTN_Y - 8, BLACK);
+  {
+    char st[96]; net_status_line(st, sizeof(st));
+    int sx = 24 + text_w(f12, "WI-FI") + 16;
+    fit_text(st, sizeof(st), f9, W - 24 - sx);
+    bool bad = net_get_state() == NET_STATE_FAILED;
+    text(f9, st, sx, DG_WIFI_BTN_Y - 9, bad ? BLACK : GREY);
+  }
+  char mode_lbl[24];
+  NetMode nm = net_get_mode();
+  snprintf(mode_lbl, sizeof(mode_lbl), "MODE: %s", nm == NET_MODE_OFF ? "OFF" : nm == NET_MODE_STAY ? "STAY" : "SYNC");
+  struct WfBtn { const char* lbl; int x; int w; } wf[4] = {
+    { "NETWORKS", DG_WF_X0, DG_WF_W0 }, { mode_lbl, DG_WF_X1, DG_WF_W1 },
+    { "SYNC NOW", DG_WF_X2, DG_WF_W2 }, { "UPDATE MAP", DG_WF_X3, DG_WF_W3 },
+  };
+  for (const auto& w : wf) {
+    box(w.x, DG_WIFI_BTN_Y, w.w, DG_WIFI_BTN_H, BLACK);
+    box(w.x + 1, DG_WIFI_BTN_Y + 1, w.w - 2, DG_WIFI_BTN_H - 2, BLACK);
+    text(f9, w.lbl, w.x + (w.w - text_w(f9, w.lbl)) / 2, DG_WIFI_BTN_Y + 24, BLACK);
+  }
+  if (s_diag_note[0]) {
+    char nb[64]; snprintf(nb, sizeof(nb), "%s", s_diag_note);
+    int nx = DG_WF_X3 + DG_WF_W3 + 14;
+    fit_text(nb, sizeof(nb), f9, W - 24 - nx);
+    text(f9, nb, nx, DG_WIFI_BTN_Y + 24, GREY);
+  }
+
+  rect(24, DG_WIFI_BTN_Y + DG_WIFI_BTN_H + 10, W - 48, 1, LIGHT);
+
+  // Section 4: HARDWARE RESOURCE TELEMETRY
+  const int hw_y = DG_WIFI_BTN_Y + DG_WIFI_BTN_H + 32;
+  text(f12, "HARDWARE", 24, hw_y, BLACK);
+  int t_y = hw_y + 22;
   // Col 1: ESP32 Memory
   char m1[48], m2[48];
   snprintf(m1, sizeof(m1), "PSRAM: %lu of %lu KB free", (unsigned long)(ESP.getFreePsram() / 1024), (unsigned long)(ESP.getPsramSize() / 1024));
   snprintf(m2, sizeof(m2), "Heap: %lu KB free", (unsigned long)(ESP.getFreeHeap() / 1024));
   text(f9, m1, 24, t_y, BLACK);
-  text(f9, m2, 24, t_y + 22, BLACK);
+  text(f9, m2, 24, t_y + 20, BLACK);
 
   // Col 2: Power & RTC
   char p1[48], p2[48];
@@ -1597,7 +2685,7 @@ static void draw_diagnostics() {
   // percentage by: 1500 mAh once the boot check has configured it.
   int mv = periph_batt_mv();
   int cap = periph_batt_full_mah();
-  char pct[8] = "--";
+  char pct[16] = "--";
   if (s_batt >= 0) snprintf(pct, sizeof(pct), "%d%%", s_batt);
   if (mv > 0 && cap > 0 && periph_gauge_configured())
     snprintf(p1, sizeof(p1), "Battery: %s, %d.%02d V, %d mAh", pct, mv / 1000, (mv % 1000) / 10, cap);
@@ -1607,12 +2695,13 @@ static void draw_diagnostics() {
   if (periph_has_utc_time()) {
     uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
     periph_get_utc_time(&cy, &cm, &cd, &ch, &cmi, &cs);
-    snprintf(p2, sizeof(p2), "Clock: %04u-%02u-%02u %02u:%02u:%02uZ", cy, cm, cd, ch, cmi, cs);
+    snprintf(p2, sizeof(p2), "Clock: %04u-%02u-%02u %02u:%02u:%02uZ%s", cy, cm, cd, ch, cmi, cs,
+             net_is_clock_synced() ? " NTP" : "");
   } else {
     snprintf(p2, sizeof(p2), "Clock: not set");
   }
   text(f9, p1, 340, t_y, BLACK);
-  text(f9, p2, 340, t_y + 22, BLACK);
+  text(f9, p2, 340, t_y + 20, BLACK);
 
   // Col 3: GPS & LittleFS Map Cache
   char g1[48], g2[48];
@@ -1623,13 +2712,13 @@ static void draw_diagnostics() {
   size_t fs_tot  = LittleFS.totalBytes() / 1024;
   snprintf(g2, sizeof(g2), "Map tiles: %lu of %lu KB", (unsigned long)fs_used, (unsigned long)fs_tot);
   text(f9, g1, 660, t_y, BLACK);
-  text(f9, g2, 660, t_y + 22, BLACK);
+  text(f9, g2, 660, t_y + 20, BLACK);
 
-  rect(24, 318, W - 48, 1, LIGHT);
+  rect(24, t_y + 30, W - 48, 1, LIGHT);
 
-  // Section 4: PANEL VCOM VOLTAGE TUNING (engineering)
-  text(f12, "PANEL VOLTAGE (VCOM)", 24, 340, BLACK);
-  text(f9, "Match the VCOM on the panel's cable label.", 580, 380, GREY);
+  // Section 5: PANEL VCOM VOLTAGE TUNING (engineering)
+  text(f12, "PANEL VOLTAGE (VCOM)", 24, DG_VCOM_BTN_Y - 8, BLACK);
+  text(f9, "Match the VCOM on the panel's cable label.", 580, DG_VCOM_BTN_Y + 23, GREY);
   int b_y = DG_VCOM_BTN_Y, b_h = DG_VCOM_BTN_H;
   struct Vbtn { const char* lbl; int x; int w; } vbtns[] = {
     { "-50 mV", 24, 90 }, { "-10 mV", 124, 90 },
@@ -1637,18 +2726,20 @@ static void draw_diagnostics() {
   };
   for (const auto& vb : vbtns) {
     box(vb.x, b_y, vb.w, b_h, BLACK);
-    text(f9, vb.lbl, vb.x + (vb.w - text_w(f9, vb.lbl)) / 2, b_y + 24, BLACK);
+    text(f9, vb.lbl, vb.x + (vb.w - text_w(f9, vb.lbl)) / 2, b_y + 23, BLACK);
   }
   // Value center badge
   rect(224, b_y, 130, b_h, BLACK);
   char cur_v[32]; snprintf(cur_v, sizeof(cur_v), "%u mV", s_vcom);
   text(f12, cur_v, 224 + (130 - text_w(f12, cur_v)) / 2, b_y + 25, WHITE);
 
-  rect(24, 398, W - 48, 1, LIGHT);
+  rect(24, DG_VCOM_BTN_Y + DG_VCOM_BTN_H + 10, W - 48, 1, LIGHT);
 
-  // Section 5: 16-LEVEL GREYSCALE CALIBRATION TEST STRIP
-  text(f12, "GREYSCALE TEST", 24, 420, BLACK);
-  int strip_x = 24, strip_y = 430, swatch_w = 56, swatch_h = 34;
+  // Section 6: 16-LEVEL GREYSCALE CALIBRATION TEST STRIP
+  const int gs_y = DG_VCOM_BTN_Y + DG_VCOM_BTN_H + 32;
+  text(f12, "GREYSCALE TEST", 24, gs_y, BLACK);
+  text(f9, "Each step should be a little lighter than the one before.", 24 + text_w(f12, "GREYSCALE TEST") + 16, gs_y - 1, GREY);
+  int strip_x = 24, strip_y = gs_y + 8, swatch_w = 56, swatch_h = 30;
   for (int i = 0; i < 16; i++) {
     int sx = strip_x + i * swatch_w;
     uint8_t shade = i * 17; // 0 to 255
@@ -1656,9 +2747,8 @@ static void draw_diagnostics() {
     box(sx, strip_y, swatch_w, swatch_h, BLACK);
     char num_buf[4]; snprintf(num_buf, sizeof(num_buf), "%d", i);
     uint8_t text_col = (i < 8) ? WHITE : BLACK;
-    text(f9, num_buf, sx + (swatch_w - text_w(f9, num_buf)) / 2, strip_y + 23, text_col);
+    text(f9, num_buf, sx + (swatch_w - text_w(f9, num_buf)) / 2, strip_y + 21, text_col);
   }
-  text(f9, "Each step should be a little lighter than the one before.", 24, strip_y + swatch_h + 18, GREY);
 
   // Footer note
   rect(0, 506, W, 34, WHITE);
@@ -1668,55 +2758,59 @@ static void draw_diagnostics() {
 
 // ---- side view: height against range, with the ceiling drawn in. The
 // plan views say where; this says how high, and who is over the limit.
+// With ADS-B it also answers how far apart vertically a drone and an
+// aircraft are: a bracket joins each traffic pair, labelled in m and ft.
 #define CEILING_M 120          // US Part 107 and EU open category: 120 m / 400 ft
 #define SV_X0 90
 #define SV_X1 650
 #define SV_Y0 100
 #define SV_Y1 440
+#define SV_PANEL_X 690         // the right-hand list
+#define SV_HCAP 1500.0         // the height scale grows for aircraft up to 1,500 m, then clips
 static int  s_sv_px[TRK_MAX], s_sv_py[TRK_MAX];
 static bool s_sv_on[TRK_MAX];
+
+/// "Δ" drawn by hand (the fonts are ASCII), then `s`; returns the width.
+static int delta_text(const GFXfont* f, const char* s, int x, int y, uint8_t c, bool draw = true) {
+  if (draw) {
+    epd_draw_line(x + 5, y - 11, x, y - 1, c, s_fb);
+    epd_draw_line(x + 5, y - 11, x + 10, y - 1, c, s_fb);
+    epd_draw_line(x, y - 1, x + 10, y - 1, c, s_fb);
+    epd_draw_line(x + 5, y - 10, x + 1, y - 2, c, s_fb);   // a second stroke: bold like the font
+    epd_draw_line(x + 5, y - 10, x + 9, y - 2, c, s_fb);
+    text(f, s, x + 15, y, c);
+  }
+  return 15 + text_w(f, s);
+}
+/// "90 m / 300 ft" for a vertical separation (ft to the nearest 10).
+static void sep_text(char* b, size_t n, double v) {
+  long m = labs(iround(v)), ft = labs(iround(v / TRAFFIC_FT_TO_M / 10)) * 10;
+  snprintf(b, n, "%ld m / %ld ft", m, ft);
+}
 
 static void draw_side() {
   const GFXfont* f9 = &FreeSansBold9pt7b;
   const GFXfont* f12 = &FreeSansBold12pt7b;
   rect(0, 72, W, 424, WHITE);
   memset(s_sv_on, 0, sizeof(s_sv_on));
+  s_pac_n = 0;
   char b[64];
-  int no_pos = 0, no_h = 0;
-  // Right panel: who is above the ceiling, highest first (live only).
-  int above[TRK_MAX], na = 0;
-  for (int k = 0; k < s_n; k++) {
-    const Track* t = &g_tracks[s_order[k]];
-    if (!ui_stale(t, s_now) && !isnan(t->height) && t->height > CEILING_M) above[na++] = k;
-  }
-  for (int i = 1; i < na; i++)
-    for (int j = i; j > 0 && g_tracks[s_order[above[j]]].height > g_tracks[s_order[above[j - 1]]].height; j--) {
-      int x = above[j]; above[j] = above[j - 1]; above[j - 1] = x;
-    }
-  const int px0 = 690;
+  int no_pos = 0, no_h = 0, ac_no_h = 0, ac_shown = 0;
+  const int px0 = SV_PANEL_X;
   rect(px0 - 20, 90, 1, 390, BLACK);
-  snprintf(b, sizeof(b), "ABOVE %d M", CEILING_M);
-  text(f12, b, px0, 118, BLACK);
-  int y = 132;
-  const int SV_LIST = 4;
-  for (int i = 0; i < na && i < SV_LIST; i++) {
-    const Track* t = &g_tracks[s_order[above[i]]];
-    rect(px0, y, W - 20 - px0, 34, BLACK);
-    snprintf(b, sizeof(b), "%d m", (int)t->height);
-    text_r(f12, b, W - 30, y + 25, WHITE);
-    char id[32]; snprintf(id, sizeof(id), "%s", label_id(above[i]));
-    fit_text(id, sizeof(id), f12, W - 30 - text_w(f12, b) - 16 - (px0 + 10));
-    text(f12, id, px0 + 10, y + 25, WHITE);
-    y += 40;
-  }
-  if (na > SV_LIST) { snprintf(b, sizeof(b), "+ %d more", na - SV_LIST); text(f9, b, px0, y + 14, BLACK); y += 22; }
-  if (!na) { text(f9, "none of the live contacts", px0, y + 14, GREY); y += 22; }
 
-  if (!g_home_set) {
-    const char* l[3] = { "NO POSITION", "The side view plots range from this", "board: it needs a GPS fix or the app." };
-    text(f12, l[0], SV_X0 + (SV_X1 - SV_X0 - text_w(f12, l[0])) / 2, 250, BLACK);
-    for (int i = 1; i < 3; i++) text(f9, l[i], SV_X0 + (SV_X1 - SV_X0 - text_w(f9, l[i])) / 2, 254 + 26 * i, GREY);
-  } else {
+  // Traffic pairs, most urgent first (the result is sorted).
+  const TrafficResult* tr = &g_traffic_result;
+  const TrafficAlert* pairs[4]; int np = 0;
+  for (int i = 0; i < tr->n && np < 4; i++) if (is_pair(&tr->alerts[i])) pairs[np++] = &tr->alerts[i];
+
+  if (g_home_set) {
+    // Where each aircraft goes: range from here, height above this board
+    // (GNSS altitude minus the board's GNSS elevation), or, without the
+    // board's elevation, the pair's own separation above its drone.
+    double elev = g_traffic_observer.elev_m;
+    double ac_d[TRAFFIC_MAX_AIRCRAFT], ac_h[TRAFFIC_MAX_AIRCRAFT];
+    bool ac_on[TRAFFIC_MAX_AIRCRAFT];
     double far = 0; float top = CEILING_M;
     for (int k = 0; k < s_n; k++) {
       const Track* t = &g_tracks[s_order[k]];
@@ -1726,11 +2820,33 @@ static void draw_side() {
       if (d > far) far = d;
       if (t->height > top) top = t->height;
     }
+    double far_drones = far;
+    for (int i = 0; i < g_traffic_count; i++) {
+      const TrafficAircraft* a = &g_traffic_ac[i];
+      ac_on[i] = false;
+      ac_d[i] = traffic_distance_m(g_home_lat, g_home_lon, a->lat, a->lon);
+      ac_h[i] = NAN;
+      if (traffic_alt_known(a->alt_geom_m) && isfinite(elev)) ac_h[i] = a->alt_geom_m - elev;
+      else if (a->on_ground) ac_h[i] = 0;   // on the ground: at the axis, whatever the field's height
+      else {
+        const TrafficAlert* al = traffic_alert_for_hex(tr, a->hex);
+        int slot = is_pair(al) ? drone_slot(al->drone_id) : -1;
+        if (slot >= 0 && isfinite(al->vert_m) && !isnan(g_tracks[slot].height))
+          ac_h[i] = g_tracks[slot].height + al->vert_m;
+      }
+      bool wanted = ac_in_scale(a, false) || (isfinite(ac_d[i]) && ac_d[i] <= max(far_drones * 1.1, 500.0));
+      if (!wanted || !isfinite(ac_d[i])) continue;
+      if (!isfinite(ac_h[i])) { ac_no_h++; continue; }
+      ac_on[i] = true;
+      if (ac_d[i] > far) far = ac_d[i];
+      if (ac_h[i] > top) top = (float)min(ac_h[i], SV_HCAP);
+    }
     double rmax = nice_scale(far > 0 ? far * 1.1 : 500);
     double hmax = ceil(top * 1.15 / 50.0) * 50.0;
     if (hmax < 150) hmax = 150;
-    auto X = [&](double d) { return SV_X0 + (int)(d / rmax * (SV_X1 - SV_X0)); };
-    auto Y = [&](double h) { return SV_Y1 - (int)((h < 0 ? 0 : h) / hmax * (SV_Y1 - SV_Y0)); };
+    if (hmax > SV_HCAP) hmax = SV_HCAP;
+    auto X = [&](double d) { return SV_X0 + (int)iround(d / rmax * (SV_X1 - SV_X0)); };
+    auto Y = [&](double h) { return SV_Y1 - (int)iround((h < 0 ? 0 : h > hmax ? hmax : h) / hmax * (SV_Y1 - SV_Y0)); };
     // Above the ceiling: a dot screen, light enough for labels to sit on.
     int yc = Y(CEILING_M);
     for (int yy = SV_Y0 + 4; yy < yc - 2; yy += 8)
@@ -1760,51 +2876,204 @@ static void draw_side() {
     rect(SV_X1 - cw - 8, yc - 24, cw + 8, 18, WHITE);
     text(f9, b, SV_X1 - cw - 4, yc - 10, BLACK);
     lb_block(SV_X1 - cw - 8, yc - 24, cw + 8, 20);
-    // marks: selected and alerts last so they sit on top
+
+    // Aircraft under the drones: diamonds, their time ghosts, and an arrow
+    // for one above the scale (drawn at the top, its label says how high).
+    const Clip clip = { SV_X0 + 2, SV_Y0 - 14, px0 - 24, SV_Y1 - 2 };
+    uint8_t lvl_of[TRAFFIC_MAX_AIRCRAFT]; int idx_of[TRAFFIC_MAX_AIRCRAFT];
+    for (int i = 0; i < g_traffic_count; i++) {
+      if (!ac_on[i]) continue;
+      const TrafficAircraft* a = &g_traffic_ac[i];
+      int x = X(ac_d[i]), y = Y(ac_h[i]);
+      bool above = ac_h[i] > hmax;
+      if (above) y = SV_Y0 + AC_R + 6;
+      if (y > clip.y1 - AC_R - 7) y = clip.y1 - AC_R - 7;   // low or on the ground: sitting on the axis
+      if (!in_clip(clip, x, y, AC_R + 6)) continue;
+      int gx[4], gy[4], ng = 0;
+      if (!above && !a->on_ground && isfinite(a->gs_mps) && isfinite(a->track_deg)) {
+        double dx, dy;
+        traffic_offset_m(g_home_lat, g_home_lon, a->lat, a->lon, &dx, &dy);
+        double vx = a->gs_mps * sin(a->track_deg * TRAFFIC_DEG), vy = a->gs_mps * cos(a->track_deg * TRAFFIC_DEG);
+        for (int st = 1; st <= 4; st++) {
+          double t = 15.0 * st, h = ac_h[i] + (isfinite(a->vs_mps) ? a->vs_mps * t : 0);
+          double d = hypot(dx + vx * t, dy + vy * t);
+          if (d > rmax || h > hmax || h < 0) continue;
+          int qx = X(d), qy = Y(h);
+          if (in_clip(clip, qx, qy, 3) && !lb_hits(qx - 3, qy - 3, 7, 7)) { gx[ng] = qx; gy[ng] = qy; ng++; }
+        }
+      }
+      const TrafficAlert* al = traffic_alert_for_hex(tr, a->hex);
+      uint8_t lvl = al ? al->level : (uint8_t)TRAFFIC_NONE;
+      aircraft_mark(x, y, gx, gy, ng, NAN, lvl, ac_old(a), a->on_ground);
+      if (above) tri(x - 6, y - AC_R - 19, 12, true);
+      s_pac_x[s_pac_n] = x; s_pac_y[s_pac_n] = y;
+      snprintf(s_pac_hex[s_pac_n], sizeof(s_pac_hex[0]), "%s", a->hex);
+      lvl_of[s_pac_n] = lvl; idx_of[s_pac_n] = i;
+      s_pac_n++; ac_shown++;
+    }
+
+    // Drones: selected and alerts last so they sit on top.
     int rows[TRK_MAX]; int nr = priority_rows(rows);
     for (int i = nr - 1; i >= 0; i--) {
       int k = rows[i];
       const Track* t = &g_tracks[s_order[k]];
       if (!t->has_pos || isnan(t->height)) continue;
       int x = X(ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon)), yy = Y(t->height);
-      if (yy < SV_Y0) yy = SV_Y0;
       s_sv_px[k] = x; s_sv_py[k] = yy; s_sv_on[k] = true;
       bool stale = ui_stale(t, s_now), over = t->height > CEILING_M;
       uint8_t ink = stale ? GREY : BLACK;
       if (over) rect(x - 7, yy - 7, 14, 14, ink); else epd_fill_circle(x, yy, 6, ink, s_fb);
       if (k == s_sel) epd_draw_circle(x, yy, 13, BLACK, s_fb);
-      if (ui_danger(t, s_now)) epd_draw_circle(x, yy, 17, BLACK, s_fb);
+      if (ui_danger(t, s_now) || alert_for_drone(t)) epd_draw_circle(x, yy, 17, BLACK, s_fb);
     }
-    // labels: the selected aircraft and alerts first, then the rest where they fit
+    for (int k = 0; k < s_n; k++) if (s_sv_on[k]) lb_block(s_sv_px[k] - 10, s_sv_py[k] - 10, 20, 20);
+    for (int j = 0; j < s_pac_n; j++) lb_block(s_pac_x[j] - AC_R - 1, s_pac_y[j] - AC_R - 1, 2 * AC_R + 3, 2 * AC_R + 3);
+
+    // A bracket from each paired drone to its aircraft, labelled with the
+    // separation the rules measured (GNSS against GNSS), in m and ft.
+    for (int p = 0; p < np; p++) {
+      const TrafficAlert* al = pairs[p];
+      int slot = drone_slot(al->drone_id), k = -1, j = -1;
+      for (int q = 0; q < s_n; q++) if (s_order[q] == slot) k = q;
+      for (int q = 0; q < s_pac_n; q++) if (!strcmp(s_pac_hex[q], al->hex)) j = q;
+      if (k < 0 || !s_sv_on[k] || j < 0 || al->on_ground) continue;   // the list says "on the ground"
+      int xd = s_sv_px[k], yd = s_sv_py[k], xa = s_pac_x[j], ya = s_pac_y[j];
+      int bx = (xd + xa) / 2;
+      if (abs(xa - xd) < 40) bx = min(xd, xa) - 24;   // stacked: beside them, not through them
+      if (bx < SV_X0 + 6) bx = max(xd, xa) + 24;
+      int y0 = min(yd, ya), y1 = max(yd, ya);
+      if (al->on_ground) snprintf(b, sizeof(b), "on the ground");
+      else if (!isfinite(al->vert_m) || al->height_unknown) snprintf(b, sizeof(b), "height unknown");
+      else sep_text(b, sizeof(b), al->vert_m);
+      bool delta = isfinite(al->vert_m) && !al->height_unknown && !al->on_ground;
+      if (delta && y1 - y0 >= 8) {
+        rect(bx - 1, y0, 2, y1 - y0, BLACK);
+        rect(bx - 7, y0, 14, 2, BLACK);
+        rect(bx - 7, y1 - 1, 14, 2, BLACK);
+      }
+      int w = (delta ? delta_text(f9, b, 0, 0, WHITE, false) : text_w(f9, b)) + 12, lx, ly;
+      if (!lb_place(bx, (y0 + y1) / 2, w, 22, clip.x0, clip.y0, clip.x1, clip.y1, &lx, &ly, 8)) continue;
+      rect(lx, ly, w, 22, BLACK);
+      if (delta) delta_text(f9, b, lx + 6, ly + 16, WHITE); else text(f9, b, lx + 6, ly + 16, WHITE);
+    }
+
+    // Labels: the selected drone and alerts first, then the rest where they
+    // fit, then the aircraft (warnings first).
     for (int pass = 0; pass < 2; pass++) {
-      if (pass == 1) for (int k = 0; k < s_n; k++) if (s_sv_on[k]) lb_block(s_sv_px[k] - 10, s_sv_py[k] - 10, 20, 20);
       for (int i = 0; i < nr; i++) {
         int k = rows[i];
         if (!s_sv_on[k]) continue;
         const Track* t = &g_tracks[s_order[k]];
-        bool first = (k == s_sel) || ui_danger(t, s_now);
+        bool first = (k == s_sel) || ui_danger(t, s_now) || alert_for_drone(t);
         if (first != (pass == 0)) continue;
         snprintf(b, sizeof(b), "%s %dm", label_id(k), (int)t->height);
         int w = text_w(f9, b) + 6, lx, ly;
-        if (!lb_place(s_sv_px[k], s_sv_py[k], w, 16, SV_X0 + 2, SV_Y0 - 14, px0 - 24, SV_Y1 - 2, &lx, &ly)) continue;   // clear of the panel rule
+        if (!lb_place(s_sv_px[k], s_sv_py[k], w, 16, clip.x0, clip.y0, clip.x1, clip.y1, &lx, &ly)) continue;   // clear of the panel rule
         bool stale = ui_stale(t, s_now);
         rect(lx, ly, w, 16, WHITE);
         box(lx, ly, w, 16, stale ? GREY : BLACK);
         text(f9, b, lx + 3, ly + 12, stale ? GREY : BLACK);
       }
     }
+    for (int lv = TRAFFIC_WARNING; lv >= TRAFFIC_NONE; lv--)
+      for (int j = 0; j < s_pac_n; j++)
+        if (lvl_of[j] == lv) aircraft_label(&g_traffic_ac[idx_of[j]], lvl_of[j], s_pac_x[j], s_pac_y[j], clip);
+  } else {
+    const char* l[3] = { "NO POSITION", "The side view plots range from this", "board: it needs a GPS fix or the app." };
+    text(f12, l[0], SV_X0 + (SV_X1 - SV_X0 - text_w(f12, l[0])) / 2, 250, BLACK);
+    for (int i = 1; i < 3; i++) text(f9, l[i], SV_X0 + (SV_X1 - SV_X0 - text_w(f9, l[i])) / 2, 254 + 26 * i, GREY);
   }
-  // What is on the panel and what is not.
+
+  // Right panel: traffic pairs while an alert lasts, else who is above the
+  // ceiling; then the feed; then what the marks mean and what is missing.
+  const int pw = W - 20 - px0, ybot = 482;
+  int y;
+  if (np) {
+    text(f12, "TRAFFIC PAIRS", px0, 118, BLACK);
+    y = 130;
+    for (int p = 0; p < np && p < 3; p++) {
+      const TrafficAlert* al = pairs[p];
+      rect(px0, y, pw, 58, BLACK);
+      char id[TRAFFIC_ID_LEN], nm[12];
+      traffic_drone_label(al->drone_id, id, sizeof(id));
+      snprintf(nm, sizeof(nm), "%s", al->callsign[0] ? al->callsign : al->hex);
+      if (!al->callsign[0]) for (char* q = nm; *q; q++) *q = (char)toupper((unsigned char)*q);
+      snprintf(b, sizeof(b), "%s > %s", nm, id);
+      fit_text(b, sizeof(b), f12, pw - 20);
+      text(f12, b, px0 + 10, y + 24, WHITE);
+      char km[16], sep[32];
+      traffic_km_text(al->horiz_m, km, sizeof(km));
+      if (al->on_ground) snprintf(sep, sizeof(sep), "on the ground");
+      else if (!isfinite(al->vert_m) || al->height_unknown) snprintf(sep, sizeof(sep), "height unknown");
+      else snprintf(sep, sizeof(sep), "%ld m", labs(iround(al->vert_m)));
+      snprintf(b, sizeof(b), "%s km | %s%s", km, sep, isfinite(al->cpa_s) ? " | closing" : "");
+      fit_text(b, sizeof(b), f9, pw - 36);
+      if (isfinite(al->vert_m) && !al->height_unknown && !al->on_ground) {
+        // "1.1 km | Δ 90 m | closing": the Δ is drawn, so split the line at it.
+        snprintf(b, sizeof(b), "%s km |", km);
+        text(f9, b, px0 + 10, y + 47, WHITE);
+        int x2 = px0 + 10 + text_w(f9, b) + 5;
+        snprintf(b, sizeof(b), "%s%s", sep, isfinite(al->cpa_s) ? " | closing" : "");
+        delta_text(f9, b, x2, y + 47, WHITE);
+      } else {
+        text(f9, b, px0 + 10, y + 47, WHITE);
+      }
+      y += 64;
+    }
+    if (np > 3) { snprintf(b, sizeof(b), "+ %d more", np - 3); text(f9, b, px0, y + 14, BLACK); y += 22; }
+  } else {
+    int above[TRK_MAX], na = 0;
+    for (int k = 0; k < s_n; k++) {
+      const Track* t = &g_tracks[s_order[k]];
+      if (!ui_stale(t, s_now) && !isnan(t->height) && t->height > CEILING_M) above[na++] = k;
+    }
+    for (int i = 1; i < na; i++)
+      for (int j = i; j > 0 && g_tracks[s_order[above[j]]].height > g_tracks[s_order[above[j - 1]]].height; j--) {
+        int x = above[j]; above[j] = above[j - 1]; above[j - 1] = x;
+      }
+    snprintf(b, sizeof(b), "ABOVE %d M", CEILING_M);
+    text(f12, b, px0, 118, BLACK);
+    y = 132;
+    const int SV_LIST = tr->have_data ? 3 : 4;
+    for (int i = 0; i < na && i < SV_LIST; i++) {
+      const Track* t = &g_tracks[s_order[above[i]]];
+      rect(px0, y, pw, 34, BLACK);
+      snprintf(b, sizeof(b), "%d m", (int)t->height);
+      text_r(f12, b, W - 30, y + 25, WHITE);
+      char id[32]; snprintf(id, sizeof(id), "%s", label_id(above[i]));
+      fit_text(id, sizeof(id), f12, W - 30 - text_w(f12, b) - 16 - (px0 + 10));
+      text(f12, id, px0 + 10, y + 25, WHITE);
+      y += 40;
+    }
+    if (na > SV_LIST) { snprintf(b, sizeof(b), "+ %d more", na - SV_LIST); text(f9, b, px0, y + 14, BLACK); y += 22; }
+    if (!na) { text(f9, "none of the live contacts", px0, y + 14, GREY); y += 22; }
+  }
+  // The feed, in the rules' words (never "clear").
+  if (tr->have_data && y + 70 <= ybot) {
+    y += 10;
+    text(f12, "ADS-B", px0, y + 20, BLACK);
+    snprintf(b, sizeof(b), "%u aircraft within 30 km", (unsigned)tr->aircraft_count);
+    text(f9, b, px0, y + 42, GREY);
+    if (tr->stale) snprintf(b, sizeof(b), "TRAFFIC DATA STALE");
+    else snprintf(b, sizeof(b), "data %ld s old", iround(tr->data_age_s));
+    text(f9, b, px0, y + 62, tr->stale ? BLACK : GREY);
+    y += 70;
+  }
   y += 6;
-  const char* note[3] = { "Heights as each aircraft sends", "them: above take-off or above", "ground, which is not the same." };
-  for (int i = 0; i < 3; i++) text(f9, note[i], px0, y + 16 + 20 * i, GREY);
-  y += 66;
-  if (no_pos || no_h) {
+  if (ac_shown && y + 60 <= ybot) {
+    y += 20 * text_para(f9, "Diamonds are aircraft; the dots, 15 s apart, show where each is heading over the next minute.",
+                        px0, y + 16, 20, pw, GREY, (ybot - y - 40) / 20) + 6;
+  } else if (!np && y + 60 <= ybot) {
+    y += 20 * text_para(f9, "Heights as each drone sends them: above take-off or above ground, which is not the same.",
+                        px0, y + 16, 20, pw, GREY, (ybot - y - 40) / 20) + 6;
+  }
+  if ((no_pos || no_h || ac_no_h) && y + 40 <= ybot) {
     text(f9, "not plotted:", px0, y + 16, GREY);
     b[0] = 0;
     if (no_pos) snprintf(b, sizeof(b), "%d no position", no_pos);
     if (no_h) snprintf(b + strlen(b), sizeof(b) - strlen(b), "%s%d no height", b[0] ? ", " : "", no_h);
-    fit_text(b, sizeof(b), f9, W - 20 - px0);
+    if (ac_no_h) snprintf(b + strlen(b), sizeof(b) - strlen(b), "%s%d aircraft no height", b[0] ? ", " : "", ac_no_h);
+    fit_text(b, sizeof(b), f9, pw);
     text(f9, b, px0, y + 36, GREY);
   }
 }
@@ -1858,12 +3127,54 @@ static void glance_facts(Glance* g) {
     }
   }
 }
+/// Glance's traffic words (§8.3): for the band, the alerts' kinds
+/// ("TRAFFIC NEAR DRONE", "LOW TRAFFIC", "1 EMERGENCY SQUAWK"); for the
+/// line, the nearest aircraft ("nearest traffic 2.1 km NE, 1,900 ft") or
+/// the feed's state in the rules' words. Both empty without a feed.
+static void glance_traffic(char* band, size_t nb, char* line, size_t nl, char* lo = nullptr, size_t nlo = 0) {
+  band[0] = line[0] = 0;
+  if (lo && nlo) lo[0] = 0;
+  const TrafficResult* r = &g_traffic_result;
+  if (!r->have_data) return;
+  int near = 0, conv = 0, low = 0, em = 0;
+  for (int i = 0; i < r->n; i++) {
+    uint8_t k = r->alerts[i].kind;
+    if (k == TRAFFIC_KIND_NEAR) near++; else if (k == TRAFFIC_KIND_CONVERGING) conv++;
+    else if (k == TRAFFIC_KIND_LOW) low++; else em++;
+  }
+  // Warnings in `band`; cautions and advisories after the drones' own alerts
+  // (in `lo` when given, else also in `band`).
+  char* lb = lo && nlo ? lo : band; size_t lbn = lo && nlo ? nlo : nb;
+  auto add = [&](char* d, size_t n, const char* s) { size_t l = strlen(d); snprintf(d + l, n - l, "%s%s", l ? " | " : "", s); };
+  if (near) add(band, nb, "TRAFFIC NEAR DRONE");
+  if (conv) add(band, nb, "TRAFFIC CONVERGING");
+  if (low) add(lb, lbn, "LOW TRAFFIC");
+  if (em) { char e[32]; snprintf(e, sizeof(e), "%d EMERGENCY SQUAWK", em); add(lb, lbn, e); }
+  if (r->stale) { traffic_summary(r, line, nl); return; }
+  int best = -1; double bd = 0, bdx = 0, bdy = 0;
+  if (g_home_set)
+    for (int i = 0; i < g_traffic_count; i++) {
+      double dx, dy;
+      traffic_offset_m(g_home_lat, g_home_lon, g_traffic_ac[i].lat, g_traffic_ac[i].lon, &dx, &dy);
+      double d = hypot(dx, dy);
+      if (isfinite(d) && (best < 0 || d < bd)) { best = i; bd = d; bdx = dx; bdy = dy; }
+    }
+  if (best < 0 || bd > TRAFFIC_LOW_R_M) { traffic_summary(r, line, nl); return; }
+  char km[16], alt[20] = "";
+  traffic_km_text(bd, km, sizeof(km));
+  if (isfinite(g_traffic_ac[best].alt_baro_m)) ft_text(alt, sizeof(alt), g_traffic_ac[best].alt_baro_m);
+  snprintf(line, nl, "nearest traffic %s km %s%s%s", km, traffic_compass8(traffic_bearing_of(bdx, bdy)),
+           alt[0] ? ", " : "", alt);
+}
 static uint32_t glance_signature() {
   Glance g; glance_facts(&g);
   uint32_t h = 2166136261u;
   auto mix = [&](uint32_t v) { h ^= v; h *= 16777619u; };
   mix(g.live); mix(g.emerg); mix(g.tfr); mix(g.bad); mix(g.near);
   if (g.near) { mix((uint32_t)(g.near_m / 25)); mix((uint32_t)(g.near_brg / 22.5)); mix(isnan(g.near_h) ? 0xFFFF : (int)g.near_h / 10); }
+  char tb[96], tl[96]; glance_traffic(tb, sizeof(tb), tl, sizeof(tl));
+  for (const char* p = tb; *p; p++) mix((uint8_t)*p);
+  for (const char* p = tl; *p; p++) mix((uint8_t)*p);
   return h;
 }
 
@@ -1897,14 +3208,42 @@ static void draw_glance() {
     size_t l = strlen(b);
     snprintf(b + l, sizeof(b) - l, "%s%d %s", l ? " | " : "", n, n == 1 ? one : many);
   };
+  char tb[96], tl[96], tlo[64]; glance_traffic(tb, sizeof(tb), tl, sizeof(tl), tlo, sizeof(tlo));
+  if (tb[0]) snprintf(b, sizeof(b), "%s", tb);   // traffic warnings lead the band (§8.3)
   add(g.emerg, "EMERGENCY", "EMERGENCIES");
   add(g.tfr, "IN A TFR", "IN TFRS");
   add(g.bad, "ID SIG INVALID", "ID SIGS INVALID");
+  if (tlo[0]) { size_t l = strlen(b); snprintf(b + l, sizeof(b) - l, "%s%s", l ? " | " : "", tlo); }
+  if (tl[0]) {
+    fit_text(tl, sizeof(tl), f18, W - col - 24);
+    text(f18, tl, col, 266, GREY);
+  }
   if (b[0]) {
+    // One line in 24 pt, else 18 pt, else two lines of 18 pt broken at a
+    // " | " -- smaller, never cut.
+    const int bw = W - 80 - 48;
     rect(40, 330, W - 80, 96, BLACK);
-    const GFXfont* bf = text_w(f24, b) <= W - 80 - 48 ? f24 : f18;   // three alerts: smaller, never cut
-    fit_text(b, sizeof(b), bf, W - 80 - 48);
-    text(bf, b, 64, bf == f24 ? 392 : 388, WHITE);
+    if (text_w(f24, b) <= bw) text(f24, b, 64, 392, WHITE);
+    else if (text_w(f18, b) <= bw) text(f18, b, 64, 388, WHITE);
+    else {
+      int cut = -1;
+      for (char* p = strstr(b, " | "); p; p = strstr(p + 3, " | ")) {
+        *p = 0; bool ok = text_w(f18, b) <= bw; *p = ' ';
+        if (ok) cut = (int)(p - b); else break;
+      }
+      if (cut < 0) { fit_text(b, sizeof(b), f18, bw); text(f18, b, 64, 388, WHITE); }
+      else {
+        b[cut] = 0;
+        char l2[96]; snprintf(l2, sizeof(l2), "%s", b + cut + 3);
+        while (text_w(f18, l2) > bw) {   // whole items only, the least urgent go first
+          char* bar = strrchr(l2, '|');
+          if (!bar || bar - l2 < 3) { fit_text(l2, sizeof(l2), f18, bw); break; }
+          bar[-1] = 0;
+        }
+        text(f18, b, 64, 370, WHITE);
+        text(f18, l2, 64, 408, WHITE);
+      }
+    }
   }
   char when[24] = "";
   if (periph_has_utc_time()) {
@@ -1917,10 +3256,67 @@ static void draw_glance() {
   refresh(true);
 }
 
+// ---- phone pairing (C8). NimBLE shows the passkey through rx_hook_pairing
+// on its own task; the hook only records it and the loop draws. The code is
+// fixed and published (every Orecchino uses it), and the screen says so.
+extern "C" void rx_hook_pairing(uint32_t passkey, bool show) {
+  s_pair_key = passkey;
+  s_pair_show = show;
+}
+static bool s_pair_drawn = false;
+static void draw_pairing_modal() {
+  const GFXfont* f9 = &FreeSansBold9pt7b;
+  const GFXfont* f12 = &FreeSansBold12pt7b;
+  const GFXfont* f24 = &FreeSansBold24pt7b;
+  const int mw = 600, mh = 290, mx = (W - mw) / 2, my = (H - mh) / 2;
+  rect(mx, my, mw, mh, WHITE);
+  for (int i = 0; i < 3; i++) box(mx + i, my + i, mw - 2 * i, mh - 2 * i, BLACK);
+  rect(mx + 3, my + 3, mw - 6, 46, BLACK);
+  const char* t = "PAIRING WITH A PHONE";
+  text(f12, t, mx + (mw - text_w(f12, t)) / 2, my + 34, WHITE);
+  const char* l1 = "Enter this code on the phone:";
+  text(f12, l1, mx + (mw - text_w(f12, l1)) / 2, my + 92, BLACK);
+  char code[12]; snprintf(code, sizeof(code), "%06lu", (unsigned long)(s_pair_key % 1000000UL));
+  int cw = text_big(f24, code, 0, 0, 2, false);
+  text_big(f24, code, mx + (mw - cw) / 2, my + 180, 2, true);
+  const char* l2 = "Every Orecchino uses this code. It encrypts the link;";
+  const char* l3 = "it does not prove which phone is on the other end.";
+  text(f9, l2, mx + (mw - text_w(f9, l2)) / 2, my + 234, GREY);
+  text(f9, l3, mx + (mw - text_w(f9, l3)) / 2, my + 256, GREY);
+}
+
+/// The right half of TABLE: the traffic card while a warning lasts or an
+/// aircraft is chosen, else the plot (without a position: the contact card).
+static void draw_right_panel() {
+  const TrafficAircraft* ac; const TrafficAlert* al;
+  if (traffic_card_pick(&ac, &al)) {
+    rect(RECT_PLOT.x, RECT_PLOT.y, RECT_PLOT.width, RECT_PLOT.height, WHITE);
+    memset(s_plot_on, 0, sizeof(s_plot_on));
+    s_pac_n = 0;
+    draw_traffic_card(ac, al);
+  } else {
+    draw_plot();
+  }
+}
+/// TABLE's body after a tap there: exactly what draw_board draws below the
+/// header (so nothing stale is left behind a card), as one partial refresh.
+static void redraw_body() {
+  draw_table();
+  draw_right_panel();
+  UiSummary fsm; ui_summarize(&fsm, s_now);
+  draw_footer(fsm, nullptr);
+  refresh_area(RECT_BODY, false);
+  s_sig_prev = signature();
+}
+
 static void draw_board(bool force_full) {
   if (s_diag) {
-    draw_diagnostics();
+    if (s_kb_modal) draw_keyboard();
+    else if (s_wifi_modal) draw_wifi_screen();
+    else draw_diagnostics();
     if (s_confirm_switch) draw_switch_modal();
+    if (s_pair_show) draw_pairing_modal();
+    s_pair_drawn = s_pair_show;
     refresh(force_full);
     return;
   }
@@ -1934,29 +3330,21 @@ static void draw_board(bool force_full) {
   UiSummary sm; ui_summarize(&sm, s_now);
   if (s_map) {
     draw_map();
-    if (s_inspector) draw_inspector_modal();
-    if (s_confirm_switch) draw_switch_modal();
-    refresh(force_full);
-    s_alert_prev = sm.alert;
-    return;
-  }
-  if (s_side) {
+  } else if (s_side) {
     draw_header(sm, nullptr);
     draw_side();
     draw_footer(sm, "tap a mark: select | again: details");
-    if (s_inspector) draw_inspector_modal();
-    if (s_confirm_switch) draw_switch_modal();
-    refresh(force_full || sm.alert != s_alert_prev);
-    s_alert_prev = sm.alert;
-    return;
+  } else {
+    draw_header(sm, nullptr);
+    draw_table();
+    draw_right_panel();
+    draw_footer(sm, nullptr);
   }
-  draw_header(sm, nullptr);
-  draw_table();
-  draw_plot();
-  draw_footer(sm, nullptr);
   if (s_inspector) draw_inspector_modal();
   if (s_confirm_switch) draw_switch_modal();
-  refresh(force_full || sm.alert != s_alert_prev);
+  if (s_pair_show) draw_pairing_modal();
+  s_pair_drawn = s_pair_show;
+  refresh(force_full || (!s_map && sm.alert != s_alert_prev));
   s_alert_prev = sm.alert;
 }
 
@@ -2030,6 +3418,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     ~EpdIdleGuard() { epd_idle_check(now); }
   } idle_guard{now};
 
+  if (s_epd_redo) { s_epd_redo = false; epd_repaint_all(); }
+
   bool syncing = sync_files >= 0;
   static bool was_syncing = false;
   if (syncing != was_syncing) { was_syncing = syncing; if (!syncing) { s_sig_prev = 0; } }
@@ -2064,6 +3454,28 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
   }
   if (!k && was && hold_level == 0 && (now - down > 30)) tap = true;
   was = k;
+
+  // Traffic (traffic.h), once a second in receiver mode. A NEW warning is
+  // the one thing that interrupts whatever is on screen: a full GC16
+  // refresh -- the black flash is the only motion e-paper can make -- and
+  // three pulses of the front light, by day too (§8.3).
+  if (s_mode == UI_MODE_RX && now - s_traffic_ms >= 1000) {
+    if (ui_traffic_update(now)) {
+      periph_bl_pulse(3);
+      s_ac_hex[0] = 0;          // the card goes to the new warning
+      build_order();
+      if (s_glance) { s_glance_sig = glance_signature(); draw_glance(); }
+      else { draw_board(true); s_sig_prev = signature(); }
+      return;
+    }
+  }
+  // A phone is pairing (or stopped): show or clear the passkey at once.
+  if (s_pair_show != s_pair_drawn && s_mode == UI_MODE_RX) {
+    if (s_glance) { s_glance = false; s_last_input_ms = now; build_order(); }
+    draw_board(false);
+    s_sig_prev = signature();
+    return;
+  }
 
   // Glance mode: any touch or button only wakes the board, exactly as it was.
   bool home = periph_home_key();
@@ -2104,10 +3516,13 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     return;
   }
 
-  // Asynchronous touch event consumption (produced on Core 0)
+  // Asynchronous touch event consumption (produced on Core 0). A touch
+  // released while the panel was refreshing is dropped: e-paper cannot show
+  // what it did, and a queued double tap would type a letter twice.
   int tap_x = -1, tap_y = -1, drag_dx = 0, drag_dy = 0;
   TouchEvent evt;
   bool touched = periph_poll_touch_event(&evt);
+  while (touched && (int32_t)(evt.ms - s_touch_ignore_ms) < 0) touched = periph_poll_touch_event(&evt);
   if (touched) s_last_input_ms = now;
   if (touched) {
     // Slop and drag discrimination:
@@ -2124,6 +3539,111 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       drag_dx = evt.dx;
       drag_dy = evt.dy;
     }
+  }
+
+  // The keyboard: every tap is a key (or nothing); only CANCEL leaves it,
+  // so a stray touch can never throw away a half-typed password.
+  if (s_kb_modal) {
+    if (tap_x >= 0) kb_tap(tap_x, tap_y);
+    return;
+  }
+
+  // The Wi-Fi screens
+  if (s_wifi_modal) {
+    wifi_poll(now);
+    if (tap_x < 0) return;
+    if (s_wv == WV_JOINING) return;   // it stays until the join succeeds or fails
+    if (s_wv == WV_RESULT) {
+      if (tap_y >= 400 && tap_y < 464 && tap_x >= 48 && tap_x < 268 && !s_wifi_join_ok) {
+        // TRY AGAIN: the keyboard, with what was typed still there
+        snprintf(s_kb_ssid, sizeof(s_kb_ssid), "%s", s_wifi_ssid);
+        s_kb_ssid_stage = false; s_kb_show = false; s_kb_du = 0;
+        s_kb_modal = true; s_wv = WV_LIST;
+        draw_board(true);
+      } else if (tap_y >= 400 && tap_y < 464 && tap_x >= W - 268 && tap_x < W - 48) {
+        s_wv = WV_LIST;
+        net_scan_start();
+        draw_board(false);
+      }
+      s_sig_prev = signature();
+      return;
+    }
+    if (s_wv == WV_ACTION) {
+      const int mw = 600, mh = 250, mx = (W - mw) / 2, my = (H - mh) / 2, by = my + mh - 24 - 64, bw = 170;
+      if (tap_y >= by - 8 && tap_y < by + 72) {
+        if (tap_x >= mx + 24 && tap_x < mx + 24 + bw) {
+          wifi_start_join(s_wifi_ssid, nullptr);   // its saved password
+        } else if (tap_x >= mx + 24 + bw + 15 && tap_x < mx + 24 + 2 * bw + 15) {
+          bool gone = net_forget(s_wifi_ssid);
+          snprintf(s_diag_note, sizeof(s_diag_note), gone ? "forgot %s" : "%s was not saved", s_wifi_ssid);
+          s_wv = WV_LIST;
+        } else if (tap_x >= mx + mw - 24 - bw && tap_x < mx + mw - 24) {
+          s_wv = WV_LIST;
+        } else {
+          return;
+        }
+      } else if (tap_x < mx || tap_x > mx + mw || tap_y < my || tap_y > my + mh) {
+        s_wv = WV_LIST;
+      } else {
+        return;
+      }
+      draw_board(false);
+      s_sig_prev = signature();
+      return;
+    }
+    // The list
+    if (tap_y < WF_HEAD_H) {
+      if (tap_x >= W - 24 - 2 * WF_BTN_W - 12 && tap_x < W - 24 - WF_BTN_W - 6) {   // SCAN
+        net_scan_start();
+        s_wifi_was_scanning = true;
+        draw_board(false);
+      } else if (tap_x >= W - 24 - WF_BTN_W - 6) {                                  // CLOSE
+        s_wifi_modal = false;
+        net_serial_setup(false);
+        draw_board(true);
+      }
+      s_sig_prev = signature();
+      return;
+    }
+    uint8_t count = 0;
+    const ScannedNetwork* nets = net_get_scanned(&count);
+    int pages = wifi_pages();
+    if (pages > 1 && tap_y >= WF_PAGE_Y - 6 && tap_y < WF_PAGE_Y + 62) {
+      if (tap_x < 24 + 160) s_wifi_page = (s_wifi_page + pages - 1) % pages;
+      else if (tap_x >= W - 24 - 160) s_wifi_page = (s_wifi_page + 1) % pages;
+      else return;
+      draw_board(false);
+      s_sig_prev = signature();
+      return;
+    }
+    if (tap_y >= WF_ROW_Y0 && tap_y < WF_ROW_Y0 + WF_ROWS * WF_ROW_H && tap_x >= 24 && tap_x < W - 24) {
+      int e = s_wifi_page * WF_ROWS + (tap_y - WF_ROW_Y0) / WF_ROW_H;
+      if (e > count) return;
+      s_kb_layer = 0; s_kb_shift = s_kb_caps = false; s_kb_show = false; s_kb_du = 0;
+      if (e == count) {                                   // Other network...
+        s_kb_ssid_stage = true;
+        s_kb_buf[0] = 0; s_kb_ssid[0] = 0;
+        s_kb_modal = true;
+        draw_board(true);
+      } else {
+        snprintf(s_wifi_ssid, sizeof(s_wifi_ssid), "%s", nets[e].ssid);
+        if (nets[e].saved) {
+          s_wv = WV_ACTION;
+          draw_board(false);
+        } else if (!nets[e].auth_mode) {
+          wifi_start_join(nets[e].ssid, "");              // open: no keyboard
+          draw_board(false);
+        } else {
+          snprintf(s_kb_ssid, sizeof(s_kb_ssid), "%s", nets[e].ssid);
+          s_kb_ssid_stage = false;
+          s_kb_buf[0] = 0;
+          s_kb_modal = true;
+          draw_board(true);
+        }
+      }
+      s_sig_prev = signature();
+    }
+    return;
   }
 
   // Confirmation Modal Touch Routing
@@ -2161,8 +3681,6 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     if (tap_x >= 0) {
       int mw = 680, mh = 380;
       int mx = (W - mw) / 2, my = (H - mh) / 2;
-      int close_w = 34, close_h = 34;
-      int close_x = mx + mw - close_w - 6, close_y = my + 7;
       int btn_w = 200, btn_h = 44;
       int btn_y = my + mh - btn_h - 16;
       int btn1_x = mx + 60;
@@ -2261,22 +3779,62 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
           return;
         }
       }
-      // Mode Switch: TX Beacon button (x: 24..404)
-      if (tap_y >= DG_MODE_BTN_Y && tap_y <= DG_MODE_BTN_Y + DG_MODE_BTN_H && tap_x >= 24 && tap_x <= 404) {
+      // Mode Switch: TX Beacon button (x: 24..344)
+      if (tap_y >= DG_MODE_BTN_Y && tap_y <= DG_MODE_BTN_Y + DG_MODE_BTN_H && tap_x >= 24 && tap_x <= 344) {
         s_confirm_switch = true;
         s_target_mode = UI_MODE_TX;
         s_sig_prev = 0;
         draw_board(false);
         return;
       }
-      // Power Off button (x: 420..630): confirm first, like the mode switch
-      if (tap_y >= DG_MODE_BTN_Y && tap_y <= DG_MODE_BTN_Y + DG_MODE_BTN_H && tap_x >= 420 && tap_x <= 630) {
+      // Power Off button (x: 360..530): confirm first, like the mode switch
+      if (tap_y >= DG_MODE_BTN_Y && tap_y <= DG_MODE_BTN_Y + DG_MODE_BTN_H && tap_x >= 360 && tap_x <= 530) {
         s_confirm_switch = true;
         s_target_mode = UI_TARGET_POWER_OFF;
         s_sig_prev = 0;
         draw_board(false);
         return;
       }
+      // Wi-Fi row: NETWORKS, MODE, SYNC NOW, UPDATE MAP
+      if (tap_y >= DG_WIFI_BTN_Y - 6 && tap_y <= DG_WIFI_BTN_Y + DG_WIFI_BTN_H + 6) {
+        if (tap_x >= DG_WF_X0 && tap_x < DG_WF_X0 + DG_WF_W0) {
+          s_wifi_modal = true; s_wv = WV_LIST; s_wifi_page = 0;
+          net_serial_setup(true);   // the phone or Mac may provision over USB while this is open
+          net_scan_start();
+          s_wifi_was_scanning = true;
+          s_sig_prev = 0;
+          draw_board(true);
+          return;
+        } else if (tap_x >= DG_WF_X1 && tap_x < DG_WF_X1 + DG_WF_W1) {
+          NetMode m = net_get_mode();
+          NetMode nm = m == NET_MODE_OFF ? NET_MODE_SYNC : m == NET_MODE_SYNC ? NET_MODE_STAY : NET_MODE_OFF;
+          net_set_mode(nm);
+          snprintf(s_diag_note, sizeof(s_diag_note), "%s",
+                   nm == NET_MODE_OFF ? "no Wi-Fi joins" : nm == NET_MODE_SYNC ? "joins to sync, then listens"
+                   : "Remote ID Wi-Fi: its channel only");
+        } else if (tap_x >= DG_WF_X2 && tap_x < DG_WF_X2 + DG_WF_W2) {
+          net_sync_now();
+          snprintf(s_diag_note, sizeof(s_diag_note), "sync asked for");
+        } else if (tap_x >= DG_WF_X3 && tap_x < DG_WF_X3 + DG_WF_W3) {
+          if (!g_home_set) snprintf(s_diag_note, sizeof(s_diag_note), "needs a position first");
+          else { net_update_map(); snprintf(s_diag_note, sizeof(s_diag_note), "map update asked for"); }
+        } else {
+          return;
+        }
+        s_sig_prev = 0;
+        draw_board(false);
+        return;
+      }
+    }
+    // Keep the Wi-Fi line (and the rest) current while SYSTEM is open.
+    static uint32_t last_diag = 0, diag_sig = 0;
+    if (now - last_diag >= 2000) {
+      last_diag = now;
+      char st[96]; net_status_line(st, sizeof(st));
+      uint32_t h = 2166136261u;
+      for (const char* p = st; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+      h ^= (uint32_t)net_get_mode() * 31u + net_is_clock_synced() + (periph_gps_fix() << 4) + ((uint32_t)periph_gps_sats() << 8);
+      if (h != diag_sig) { diag_sig = h; draw_board(false); }
     }
     return;
   }
@@ -2411,31 +3969,36 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
             return;
           }
           select_row(k);
-          draw_table();
-          draw_plot();
-          { UiSummary fsm; ui_summarize(&fsm, s_now); draw_footer(fsm, nullptr); }
-          refresh_area(RECT_BODY, false);
-          s_sig_prev = signature();
+          redraw_body();
           return;
         }
       } else if (tap_x > 560 && tap_y > 70 && tap_y < 496) {        // plot area
-        // Hit test aircraft on the plot!
-        int hit = -1;
+        // The traffic card: its drone's details, or (a chosen aircraft) close it.
+        const TrafficAircraft* tc; const TrafficAlert* ta;
+        if (traffic_card_pick(&tc, &ta)) {
+          int slot = is_pair(ta) ? drone_slot(ta->drone_id) : -1;
+          for (int k = 0; k < s_n && slot >= 0; k++)
+            if (s_order[k] == slot) { select_row(k); s_inspector = true; s_sig_prev = 0; draw_board(false); return; }
+          if (s_ac_hex[0]) { s_ac_hex[0] = 0; redraw_body(); }
+          return;
+        }
+        // The marks where the plot drew them: an aircraft's diamond opens its
+        // card, a drone's dot selects its row.
+        int hit = -1, ac_hit = -1, best = 24 * 24;
         if (g_home_set) {
-          double far = 0;
           for (int k = 0; k < s_n; k++) {
-            const Track* t = &g_tracks[s_order[k]];
-            if (t->has_pos) { double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon); if (d > far) far = d; }
+            if (!s_plot_on[k]) continue;
+            int dx = s_plot_px[k] - tap_x, dy = s_plot_py[k] - tap_y;
+            if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; hit = k; }
           }
-          double scale = nice_scale(far > 0 ? far * 1.1 : 500);
-          for (int k = 0; k < s_n; k++) {
-            const Track* t = &g_tracks[s_order[k]];
-            if (!t->has_pos) continue;
-            double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
-            double br = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon) * M_PI / 180;
-            int px = PLOT_CX + (int)(sin(br) * d / scale * PLOT_R);
-            int py = PLOT_CY - (int)(cos(br) * d / scale * PLOT_R);
-            if (abs(px - tap_x) < 24 && abs(py - tap_y) < 24) { hit = k; break; }
+          for (int j = 0; j < s_pac_n; j++) {
+            int dx = s_pac_x[j] - tap_x, dy = s_pac_y[j] - tap_y;
+            if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; ac_hit = j; hit = -1; }
+          }
+          if (ac_hit >= 0) {
+            snprintf(s_ac_hex, sizeof(s_ac_hex), "%s", s_pac_hex[ac_hit]);
+            redraw_body();
+            return;
           }
         } else {
           // In Target Card mode: tapping the card opens the full inspector modal
@@ -2448,11 +4011,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         }
         if (hit >= 0) {
           select_row(hit);
-          draw_table();
-          draw_plot();
-          { UiSummary fsm; ui_summarize(&fsm, s_now); draw_footer(fsm, nullptr); }
-          refresh_area(RECT_BODY, false);
-          s_sig_prev = signature();
+          redraw_body();
           return;
         }
         // If tapped outside any aircraft on radar, switch to map
@@ -2461,16 +4020,11 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
         draw_board(true);
         return;
       } else if (tap_y >= 485) {
-        if (tap_x >= 310 && tap_x <= 490 && s_n > ROWS) {
+        if (s_page_bw && tap_x >= s_page_bx - 12 && tap_x <= s_page_bx + s_page_bw + 12 && s_n > ROWS) {
           int max_pages = (s_n + ROWS - 1) / ROWS;
           s_table_page = (s_table_page + 1) % max_pages;
           select_row(s_table_page * ROWS);
-          draw_table();
-          draw_plot();
-          UiSummary sm; ui_summarize(&sm, s_now);
-          draw_footer(sm, nullptr);
-          refresh_area(RECT_BODY, false);
-          s_sig_prev = signature();
+          redraw_body();
           return;
         } else if (tap_x >= W - 230 && tap_x <= W - 115 && s_n > 0 && s_sel >= 0 && s_sel < s_n) {
           s_inspector = true;
@@ -2486,20 +4040,23 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       }
     } else {
       s_map_touched = true;
-      // Tactical HUD button hit-test
-      if (s_n > 0 && s_sel >= 0 && s_sel < s_n) {
+      // Tactical HUD button hit-test (an aircraft's HUD first: it is drawn instead)
+      bool ac_hud = ac_index(s_ac_hex) >= 0;
+      if (ac_hud || (s_n > 0 && s_sel >= 0 && s_sel < s_n)) {
         const int hud_h = MAP_HUD_H;
         const int hud_y = MAP_Y0 + MAP_H - hud_h - 40;
         if (tap_y >= hud_y && tap_y <= hud_y + hud_h) {
           if (tap_x >= W - 172 && tap_x <= W - 66) {
-            // [ DETAILS ] button
+            // [ DETAILS ]: the drone's inspector, or the aircraft's card on TABLE
+            if (ac_hud) { s_map = false; draw_board(true); s_sig_prev = signature(); return; }
             s_inspector = true;
             s_sig_prev = 0;
             draw_board(false);
             return;
           } else if (tap_x >= W - 64 && tap_x <= W - 14) {
             // [ X ] button -> deselect
-            select_row(-1);
+            if (ac_hud) s_ac_hex[0] = 0;
+            else select_row(-1);
             draw_map();
             refresh_area(RECT_MAP, false);
             s_sig_prev = signature();
@@ -2540,15 +4097,20 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       } else if (tap_y >= MAP_Y0 && tap_y < MAP_Y0 + MAP_H) {
         // a marker near the tap selects it; anywhere else on the map re-centres there
         double left = s_cam_wx - W / 2.0, top = s_cam_wy - MAP_H / 2.0;
-        int hit = -1;
+        int hit = -1, ac_hit = -1, best = 36 * 36;
         for (int k = 0; k < s_n; k++) {
           const Track* t = &g_tracks[s_order[k]];
           if (!t->has_pos) continue;
           double wx, wy; world_px(t->lat, t->lon, s_cam_z, &wx, &wy);
-          int x = (int)(wx - left), y = MAP_Y0 + (int)(wy - top);
-          if (abs(x - tap_x) < 36 && abs(y - tap_y) < 36) { hit = k; break; }
+          int dx = (int)(wx - left) - tap_x, dy = MAP_Y0 + (int)(wy - top) - tap_y;
+          if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; hit = k; }
         }
-        if (hit >= 0) select_row(hit);
+        for (int j = 0; j < s_pac_n; j++) {   // where the last map drew them
+          int dx = s_pac_x[j] - tap_x, dy = s_pac_y[j] - tap_y;
+          if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; ac_hit = j; hit = -1; }
+        }
+        if (ac_hit >= 0) snprintf(s_ac_hex, sizeof(s_ac_hex), "%s", s_pac_hex[ac_hit]);
+        else if (hit >= 0) { s_ac_hex[0] = 0; select_row(hit); }
         else { s_cam_wx = left + tap_x; s_cam_wy = top + (tap_y - MAP_Y0); s_cam_manual = true; s_cam_manual_ms = now; }
         draw_map();
         refresh_area(RECT_MAP, false);
@@ -2575,11 +4137,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
     else if (s_side) { s_side = false; select_row(0); draw_board(true); s_sig_prev = signature(); return; }
     else if (s_n > 0 && s_sel < s_n - 1) {
       select_row(s_sel + 1);
-      draw_table();
-      draw_plot();
-      { UiSummary fsm; ui_summarize(&fsm, s_now); draw_footer(fsm, nullptr); }
-      refresh_area(RECT_BODY, false);
-      s_sig_prev = signature();
+      redraw_body();
       return;
     } else {
       s_map = true;
@@ -2596,7 +4154,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct, int sync_files) {
       char b[48]; snprintf(b, sizeof(b), "SYNCING MAP TILES | %d RECEIVED", sync_files);
       text(&FreeSansBold9pt7b, b, TABLE_X, 524, BLACK);
       EpdRect r = {0, 496, W, 44};
-      epd_ensure_on(); epd_hl_update_area(&s_hl, MODE_GL16, TEMP_C, r);
+      refresh_checked(r, MODE_GL16);
     }
     return;
   }

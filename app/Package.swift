@@ -12,7 +12,9 @@ let package = Package(
         .testTarget(
             name: "OrecchinoTests",
             dependencies: ["Orecchino"],
-            path: "Tests/OrecchinoTests"
+            path: "Tests/OrecchinoTests",
+            // Recorded answers the tests read by path (#filePath).
+            exclude: ["Fixtures"]
         )
     ]
 )

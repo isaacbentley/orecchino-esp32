@@ -31,6 +31,26 @@ static int s_tp_max_x = 0, s_tp_max_y = 0;
 static bool s_gps_fix = false;
 static int  s_gps_sats = 0;
 static uint32_t s_gps_fix_ms = 0;
+// GGA height above the WGS-84 ellipsoid (MSL altitude + geoid separation),
+// the reference the ADS-B traffic rules compare with; NAN until reported.
+// Written on the input task, read by the UI: one aligned float.
+static volatile float s_gps_elev_m = NAN;
+
+// The GPS is read on the input task (core 0) but the home position belongs
+// to the receiver core, which the loop and host commands also write: a fix
+// is parked here under a spinlock and handed over from periph_tick, so the
+// doubles are never written from two tasks or read half-written.
+static portMUX_TYPE s_fix_mux = portMUX_INITIALIZER_UNLOCKED;
+static double s_fix_lat = 0, s_fix_lon = 0;
+static bool   s_fix_new = false;
+static void gps_post_fix(double lat, double lon) {
+  portENTER_CRITICAL(&s_fix_mux);
+  s_fix_lat = lat; s_fix_lon = lon; s_fix_new = true;
+  portEXIT_CRITICAL(&s_fix_mux);
+}
+// From the receiver core (rx_core.h, in the sketch's translation unit).
+void rx_set_home(double lat, double lon, const char* src);
+void rx_log_flush();
 
 static const uint8_t BQ25896_ADDR = 0x6B;
 
@@ -98,13 +118,6 @@ static void rail_on() {
   pca_rmw(0x06, 0x01, 0x00);   // config port 0: bit 0 output
   pca_rmw(0x02, 0x00, 0x01);   // output port 0: LORA_EN high -> LoRa + GPS 3V3
   pca_rmw(0x07, 0x00, 0x04);   // config port 1: bit 2 input (PCA_PIN_PC12 = S3 button)
-
-  uint8_t p0_out = 0, p0_cfg = 0;
-  uint8_t r_out = 0x02, r_cfg = 0x06;
-  wrrd(s_pca, &r_out, 1, &p0_out, 1);
-  wrrd(s_pca, &r_cfg, 1, &p0_cfg, 1);
-  Serial.printf("[T5] PCA9535 Rail ON: out=0x%02X cfg=0x%02X (LORA_EN=%d)\n",
-                p0_out, p0_cfg, (p0_out & 1));
   delay(150);
 }
 
@@ -529,6 +542,22 @@ void periph_bl_set_duty(uint8_t duty) {
 }
 
 uint8_t periph_bl_get_duty() { return s_bl_duty; }
+
+// Pulses run on the input task (core 0), so they show while the loop is
+// busy with the very refresh they accompany. Half-cycles left; odd = lit.
+static volatile uint8_t s_bl_pulse_left = 0;
+static uint32_t s_bl_pulse_ms = 0;
+void periph_bl_pulse(uint8_t times) {
+  s_bl_pulse_ms = millis() - 1000;   // the first flash at once
+  s_bl_pulse_left = (uint8_t)(times * 2);
+}
+static void bl_pulse_tick(uint32_t now) {
+  if (!s_bl_pulse_left || now - s_bl_pulse_ms < 220) return;
+  s_bl_pulse_ms = now;
+  uint8_t left = (uint8_t)(s_bl_pulse_left - 1);
+  s_bl_pulse_left = left;
+  ledcWrite(PIN_BL_EN, (left & 1) ? 255 : (s_bl_active ? s_bl_duty : 0));
+}
 bool periph_bl_is_active() { return s_bl_active; }
 bool periph_is_after_sundown() { return s_after_sundown; }
 double periph_sun_elevation() { return s_sun_elev; }
@@ -587,8 +616,11 @@ static void nmea_line(const char* s, uint32_t now) {
     if (quality > 0) {
       double lat = nmea_coord(f[2], f[3]), lon = nmea_coord(f[4], f[5]);
       if (!isnan(lat) && !isnan(lon) && (lat != 0 || lon != 0)) {
-        g_home_lat = lat; g_home_lon = lon; g_home_set = true;
+        gps_post_fix(lat, lon);
         s_gps_fix = true; s_gps_fix_ms = now;
+        // f[9] altitude above MSL, f[11] geoid separation (both metres).
+        if (f[9][0] && f[11][0]) s_gps_elev_m = (float)(atof(f[9]) + atof(f[11]));
+        else if (f[9][0]) s_gps_elev_m = (float)atof(f[9]);   // MSL: well inside the rules' margins
       }
     }
     if (strlen(f[1]) >= 6 && s_have_utc_time) {
@@ -614,7 +646,7 @@ static void nmea_line(const char* s, uint32_t now) {
     if (valid) {
       double lat = nmea_coord(f[3], f[4]), lon = nmea_coord(f[5], f[6]);
       if (!isnan(lat) && !isnan(lon) && (lat != 0 || lon != 0)) {
-        g_home_lat = lat; g_home_lon = lon; g_home_set = true;
+        gps_post_fix(lat, lon);
         s_gps_fix = true; s_gps_fix_ms = now;
       }
     }
@@ -624,6 +656,7 @@ static void nmea_line(const char* s, uint32_t now) {
 bool periph_gps_detected() { return !s_gps_disabled && s_gps_detected && (millis() - s_gps_last_sentence < 15000); }
 bool periph_gps_fix() { return s_gps_fix; }
 int  periph_gps_sats() { return s_gps_sats; }
+float periph_gps_elev_m() { return s_gps_fix ? s_gps_elev_m : NAN; }
 
 bool periph_poll_touch_event(TouchEvent* evt) {
   if (!s_touch_queue || !evt) return false;
@@ -631,11 +664,8 @@ bool periph_poll_touch_event(TouchEvent* evt) {
 }
 
 static void periph_input_task(void* arg) {
-  Serial.printf("[T5] Async Input & Touch Task running on Core %d (PRO_CPU)\n", xPortGetCoreID());
-
   static bool s_touching = false;
   static int s_x0 = 0, s_y0 = 0, s_xl = 0, s_yl = 0;
-  static uint32_t s_down_ms = 0;
 
   for (;;) {
     uint32_t now = millis();
@@ -699,7 +729,6 @@ static void periph_input_task(void* arg) {
         s_touching = true;
         s_x0 = sx;
         s_y0 = sy;
-        s_down_ms = now;
       }
       s_xl = sx;
       s_yl = sy;
@@ -731,6 +760,8 @@ static void periph_input_task(void* arg) {
         }
       }
     }
+
+    bl_pulse_tick(now);
 
     // 15ms sampling period (~66 Hz)
     vTaskDelay(pdMS_TO_TICKS(15));
@@ -778,10 +809,17 @@ void periph_begin() {
     &s_input_task_handle,
     0   // Pin to Core 0 (PRO_CPU)
   );
-  Serial.println("[T5] Multi-core input & touch task launched on Core 0 (PRO_CPU)");
 }
 
 void periph_tick(uint32_t now) {
+  // A fix parked by the GPS reader becomes the home position here, on the loop.
+  bool fix = false;
+  double lat = 0, lon = 0;
+  portENTER_CRITICAL(&s_fix_mux);
+  if (s_fix_new) { lat = s_fix_lat; lon = s_fix_lon; s_fix_new = false; fix = true; }
+  portEXIT_CRITICAL(&s_fix_mux);
+  if (fix) rx_set_home(lat, lon, "gps");
+
   // If input task is not running for some reason, fallback to reading Serial1 here
   if (!s_input_task_handle && !s_gps_disabled) {
     while (Serial1.available()) {
@@ -831,6 +869,7 @@ bool periph_on_vbus() {
 
 void periph_power_off() {
   Serial.println("[ORECCHINO] Powering off device...");
+  rx_log_flush();   // records since the last timed save would be lost
 
   // Stop background input task
   if (s_input_task_handle) {

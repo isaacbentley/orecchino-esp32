@@ -1,0 +1,185 @@
+{
+ "name": "converging",
+ "description": "WARNING CONVERGING from both velocity vectors; a descent that puts the aircraft 200 m below at CPA, a CPA beyond 60 s and a drone without a velocity do not count; 20 s later the same pair is NEAR.",
+ "worked_example": [
+  "t=0: r = aircraft - drone = (1500 E, 300 N) m, horiz 1529.3 m (no NEAR).",
+  "v_ac = 120 kt = 61.733 m/s at 270 -> (-61.733, 0); v_drone = 10 m/s at 0 -> (0, 10); w = v_ac - v_drone = (-61.733, -10).",
+  "t_cpa = -(r.w)/|w|^2 = (1500*61.733 + 300*10) / (61.733^2 + 10^2) = 24.44 s in (0, 60]; miss = |r + w t| < 500 m; vertical at CPA = 200 - 150 + 0 = 50 m -> TRAFFIC CONVERGING WITH D9A03, 24 S.",
+  "N55Q mirrors it from the W (same t_cpa) but descends 2000 fpm (-10.16 m/s): vertical at CPA = 50 - 10.16 * 24.44 = -198.3 m, beyond 150 -> nothing.",
+  "SKW9 heads straight at the drone from 4.4 km: CPA 71.6 s > 60 -> nothing. N77 converges on DJI-1, whose speed and heading are unknown -> rule skipped; 1.5 km -> no NEAR.",
+  "t=20: the drone has flown 200 m N, UAL123 1234.7 m W: horiz 283.5 m <= 1000, vert 50 -> the pair becomes TRAFFIC NEAR DRONE D9A03 (cpa_s still 4.4 s)."
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": 20
+ },
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 2,
+   "drones": [
+    {
+     "id": "1581F20000D9A03",
+     "lat": 37.810873,
+     "lon": -122.4194,
+     "alt_geo_m": 150,
+     "speed_mps": 10,
+     "heading_deg": 0,
+     "live": true
+    },
+    {
+     "id": "DJI-1",
+     "lat": 37.810873,
+     "lon": -122.453541,
+     "alt_geo_m": 150,
+     "speed_mps": null,
+     "heading_deg": null,
+     "live": true
+    }
+   ],
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.813571,
+     "lon": -122.402329,
+     "altg_m": 200,
+     "gs_kt": 120,
+     "trk": 270,
+     "vr_fpm": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "e5f6a7",
+     "cs": "N55Q",
+     "ty": "PA28",
+     "lat": 37.813571,
+     "lon": -122.436471,
+     "altg_m": 200,
+     "gs_kt": 120,
+     "trk": 90,
+     "vr_fpm": -2000,
+     "age_s": 2
+    },
+    {
+     "hex": "f6a7b8",
+     "cs": "SKW9",
+     "ty": "CRJ9",
+     "lat": 37.850443,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 180,
+     "vr_fpm": 0,
+     "age_s": 2
+    },
+    {
+     "hex": "0b1c2d",
+     "cs": "N77",
+     "ty": "R44",
+     "lat": 37.824363,
+     "lon": -122.453545,
+     "altg_m": 150,
+     "gs_kt": 100,
+     "trk": 180,
+     "vr_fpm": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 4,
+    "summary": "no ADS-B traffic reported within 3 km, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "converging",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC CONVERGING WITH D9A03, 24 S",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 1529.3446172082834,
+      "vert_m": 50.0,
+      "bearing_deg": 78.68721135060196,
+      "cpa_s": 24.43803121870913,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 20,
+   "data_age_s": 2,
+   "drones": [
+    {
+     "id": "1581F20000D9A03",
+     "lat": 37.812672,
+     "lon": -122.4194,
+     "alt_geo_m": 150,
+     "speed_mps": 10,
+     "heading_deg": 0,
+     "live": true
+    },
+    {
+     "id": "DJI-1",
+     "lat": 37.810873,
+     "lon": -122.453541,
+     "alt_geo_m": 150,
+     "speed_mps": null,
+     "heading_deg": null,
+     "live": true
+    }
+   ],
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.813571,
+     "lon": -122.41638,
+     "altg_m": 200,
+     "gs_kt": 120,
+     "trk": 270,
+     "vr_fpm": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 1,
+    "summary": "no ADS-B traffic reported within 3 km, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 283.50243823975245,
+      "vert_m": 50.0,
+      "bearing_deg": 69.35329826994332,
+      "cpa_s": 4.443132513757079,
+      "age_s": 2.0
+     }
+    ]
+   }
+  }
+ ]
+}

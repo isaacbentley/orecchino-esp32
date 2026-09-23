@@ -56,7 +56,7 @@ static volatile uint8_t s_dwell = 0;
 static float   s_a24[N_CH];
 static uint8_t s_wf[WF_ROWS][13];
 static int     s_wf_head = 0;
-void ui_feed_wifi(uint8_t chan, int8_t rssi) { if (s_spec && chan >= 1 && chan <= N_CH) { s_wsum[chan] += rssi; s_wcnt[chan]++; } }
+void ui_feed_wifi(uint8_t chan, int8_t rssi) { if (s_spec && chan >= 1 && chan <= N_CH) { s_wsum[chan] += rssi; s_wcnt[chan] += 1; } }
 void ui_set_wifi_channel(uint8_t chan) { s_dwell = chan; }
 bool ui_spectrum_active() { return s_spec; }
 
@@ -401,7 +401,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
   s_now = now; s_ble_ok = ble_ok; s_batt = batt_pct;
 
   // touch: tap vs drag
-  static bool t_was = false; static int tx0 = 0, ty0 = 0, ty_last = 0; static bool dragged = false;
+  static bool t_was = false; static int ty0 = 0, ty_last = 0; static bool dragged = false;
   static uint32_t t_last_poll = 0;
   static int y_last_valid = 0;
   if (now - t_last_poll >= 25) {
@@ -409,7 +409,7 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     int x, y;
     bool t = touch_read(&x, &y);
     if (t) y_last_valid = y;
-    if (t && !t_was) { tx0 = x; ty0 = y; ty_last = y; dragged = false; }
+    if (t && !t_was) { ty0 = y; ty_last = y; dragged = false; }
     if (t && t_was && s_view == V_LIST && abs(y - ty0) > 16) {
       dragged = true;
       int dr = (ty_last - y) / 36;

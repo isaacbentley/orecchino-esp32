@@ -204,16 +204,43 @@ struct FeedStats {
     var bleExt = false
     var lastHeartbeat: Date?
     var firmware: String?
+    /// From the boot line (FW_BOARD) and whether its Wi-Fi sniffer started.
+    var board: String?
+    var bootWifi: Bool?
+    /// Optional heartbeat fields: BLE lines dropped, BLE host lines dropped,
+    /// the decode task's least free stack in bytes.
+    var bleDrop: Int?
+    var bleRxDrop: Int?
+    var rxStack: Int?
+}
+
+/// One sidebar list selection: a drone track or an ADS-B aircraft. Keeps an
+/// aircraft's ICAO address from ever landing in the drone selection.
+enum SidebarItem: Hashable {
+    case drone(String)
+    case traffic(String)
+}
+
+/// A request for the map to show these points (the alert strip's "Show").
+struct MapFocus: Equatable {
+    var serial: Int
+    var coords: [CLLocationCoordinate2D]
+    static func == (a: MapFocus, b: MapFocus) -> Bool { a.serial == b.serial }
 }
 
 @MainActor
 @Observable
 final class AppModel {
     var tracks: [String: DroneTrack] = [:]
-    /// The drone card and the TFR card are mutually exclusive: picking one
-    /// closes the other, so at most one card ever covers the map.
+    /// The drone card, TFR card, and Traffic card are mutually exclusive:
+    /// picking one closes the others, so at most one card covers the map.
     var selection: String? {
-        didSet { if selection != nil { selectedTFR = nil } }
+        didSet {
+            if selection != nil {
+                selectedTFR = nil
+                selectedTraffic = nil
+            }
+        }
     }
     var stats = FeedStats()
     var serialStatus: SerialStatus = .searching
@@ -222,6 +249,10 @@ final class AppModel {
     var followAll = true
     var demoMode = false {
         didSet {
+            guard demoMode != oldValue else { return }
+            // Real and simulated aircraft never share a set.
+            traffic.clear()
+            selectedTraffic = nil
             if demoMode { demo.start(model: self) } else {
                 demo.stop()
                 tracks = tracks.filter { !$0.value.isDemo }
@@ -239,12 +270,32 @@ final class AppModel {
     let tileSync = TileSync()
     let deviceLog = DeviceLog()
     let location = LocationService()
+    let traffic = TrafficService()
+    var showTraffic = true
+    /// Capabilities the receiver reported ("caps" on its boot or heartbeat
+    /// line); nil until it says. Reset when the port changes.
+    var receiverCaps: Set<String>?
+    /// Bumped by focus(on:) for the map to fit.
+    var mapFocus: MapFocus?
+    var selectedTraffic: String? {
+        didSet {
+            if selectedTraffic != nil {
+                selection = nil
+                selectedTFR = nil
+            }
+        }
+    }
     /// False whenever the device needs a fresh home/TFR context push (on
     /// connect, first location fix, TFR refresh, and daily).
     var deviceCtxPushed = false
     var showTFR = true
     var selectedTFR: String? {
-        didSet { if selectedTFR != nil { selection = nil } }
+        didSet {
+            if selectedTFR != nil {
+                selection = nil
+                selectedTraffic = nil
+            }
+        }
     }
 
     @ObservationIgnored private var macIndex: [String: String] = [:]
@@ -254,6 +305,14 @@ final class AppModel {
     @ObservationIgnored private var expiryTimer: Timer?
     @ObservationIgnored private var clockTimer: Timer?
     @ObservationIgnored private let decoder = JSONDecoder()
+    @ObservationIgnored private let notifier = TrafficNotifier()
+    @ObservationIgnored private var focusSerial = 0
+    /// False in unit tests: no network fetch is ever started.
+    @ObservationIgnored private let servicesOn: Bool
+    /// TFRs were due but no position was known to pick them by.
+    @ObservationIgnored private var tfrAwaitingReference = false
+    /// Where lines for the receiver go: the serial link (a test captures them).
+    @ObservationIgnored var sendLine: (String) -> Void = { _ in }
 
     /// Tracks older than this are dropped from the list entirely.
     static let expiry: TimeInterval = 600
@@ -316,19 +375,29 @@ final class AppModel {
     /// touches neither the network nor Core Location -- for unit tests that
     /// only exercise message ingestion.
     init(startServices: Bool = true) {
+        servicesOn = startServices
+        let link = serial
+        sendLine = { link.send($0) }
         serial.onLine = { [weak self] line in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated { self?.ingest(line: line) }
             }
         }
         serial.onStatus = { [weak self] st in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     // A different port (or none) starts from "waiting for
                     // data"; a heartbeat from the old port must not vouch
                     // for the new one.
-                    if st != self.serialStatus { self.stats.lastHeartbeat = nil }
+                    if st != self.serialStatus {
+                        self.stats.lastHeartbeat = nil
+                        // Another port may be another receiver: learn it afresh.
+                        self.receiverCaps = nil
+                        self.stats.board = nil
+                        self.deviceLog.forgetCursor()
+                        self.traffic.resetPush()
+                    }
                     self.serialStatus = st
                     if !st.isConnected {
                         self.deviceCtxPushed = false
@@ -353,15 +422,20 @@ final class AppModel {
         }
         guard startServices else { return }
         expiryTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated { self?.expireOld() }
             }
         }
         clockTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.now = Date() }
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.now = Date()
+                    self.trafficTick()
+                }
             }
         }
+        notifier.requestAuthorization()
         serial.start(preferred: nil)
         tfr.start()
         location.start()
@@ -375,6 +449,118 @@ final class AppModel {
 
     var trackList: [DroneTrack] {
         tracks.values.sorted { $0.firstSeen < $1.firstSeen }
+    }
+
+    // MARK: - ADS-B traffic
+
+    /// The id a drone goes by in the traffic rules and their words: its UAS
+    /// ID, else its MAC (the track key without its "uas:"/"mac:" prefix).
+    nonisolated static func trafficId(trackKey k: String) -> String {
+        k.hasPrefix("uas:") || k.hasPrefix("mac:") ? String(k.dropFirst(4)) : k
+    }
+    /// The track an alert's droneId names.
+    func track(trafficId id: String) -> DroneTrack? {
+        tracks["uas:\(id)"] ?? tracks["mac:\(id)"] ?? tracks[id]
+    }
+
+    /// The traffic rules' observer: this Mac only, never a drone. Elevation
+    /// (ellipsoid height, like ADS-B alt_geom) only when Core Location says
+    /// the vertical fix is valid.
+    var trafficObserver: TrafficObserver {
+        guard let loc = location.currentLocation else { return .unknown }
+        return TrafficObserver(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude,
+                               elevM: loc.verticalAccuracy >= 0 ? loc.ellipsoidalAltitude : nil)
+    }
+
+    func trafficDrones(now: Date) -> [TrafficDrone] {
+        trackList.map { t in
+            TrafficDrone(id: Self.trafficId(trackKey: t.id), lat: t.coordinate?.latitude,
+                         lon: t.coordinate?.longitude, altGeoM: t.altGeo, speedMps: t.speed,
+                         headingDeg: t.heading,
+                         live: t.coordinate != nil && now.timeIntervalSince(t.lastSeen) <= Self.staleAfter)
+        }
+    }
+
+    /// Where to look for aircraft: this Mac, else the middle of the drones
+    /// with a position, else nowhere (never a made-up place).
+    nonisolated static func reference(mac: CLLocationCoordinate2D?,
+                                      drones: [CLLocationCoordinate2D]) -> CLLocationCoordinate2D? {
+        if let m = mac { return m }
+        guard !drones.isEmpty else { return nil }
+        let lat = drones.map(\.latitude).reduce(0, +) / Double(drones.count)
+        let lon = drones.map(\.longitude).reduce(0, +) / Double(drones.count)
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+    var referencePoint: CLLocationCoordinate2D? {
+        Self.reference(mac: location.current,
+                       drones: tracks.values.filter { !isStale($0) }.compactMap(\.coordinate))
+    }
+
+    /// Boards known to take `traffic` lines, for firmware whose serial lines
+    /// carry no "caps" (the list the BLE Device Info characteristic has):
+    /// rx_core.h adds "traffic" only where ORECCHINO_TRAFFIC is defined.
+    nonisolated static let trafficBoards: Set<String> = ["lilygo-t5-epaper-s3-pro"]
+    nonisolated static func takesTraffic(caps: Set<String>?, board: String?) -> Bool {
+        if let caps { return caps.contains("traffic") }
+        return board.map { trafficBoards.contains($0) } ?? false
+    }
+    var receiverTakesTraffic: Bool {
+        Self.takesTraffic(caps: receiverCaps, board: stats.board)
+    }
+
+    /// Every clock tick: fetch when due, run the rules, notify, push.
+    func trafficTick() {
+        let nowMs = TrafficRules.nowMs(now)
+        if showTraffic && !demoMode {
+            if servicesOn { traffic.pollIfDue(nowMs: nowMs, reference: referencePoint) }
+        } else if !demoMode {
+            traffic.pause()
+        }
+        traffic.tick(nowMs: nowMs, observer: trafficObserver, drones: trafficDrones(now: now))
+        if showTraffic {
+            notifier.consider(traffic.result, aircraft: traffic.aircraft, nowMs: nowMs, simulated: demoMode)
+        }
+        pushTrafficIfDue(nowMs: nowMs)
+    }
+
+    /// The `traffic` lines to a receiver that takes them (plan §8.1), every
+    /// 10 s while there is data. Simulated aircraft never leave the app.
+    func pushTrafficIfDue(nowMs: Int64) {
+        guard serialStatus.isConnected, receiverTakesTraffic, showTraffic, !demoMode,
+              let lines = traffic.hostLinesIfDue(nowMs: nowMs, unixS: nowMs / 1000) else { return }
+        lines.forEach(sendLine)
+    }
+
+    /// Centre the map on these points (the alert strip's "Show").
+    func focus(on coords: [CLLocationCoordinate2D]) {
+        guard !coords.isEmpty else { return }
+        focusSerial += 1
+        followAll = false
+        mapFocus = MapFocus(serial: focusSerial, coords: coords)
+    }
+
+    /// The drone and aircraft of a traffic alert, whichever are on the map.
+    func coordinates(of alert: TrafficAlert) -> [CLLocationCoordinate2D] {
+        var out: [CLLocationCoordinate2D] = []
+        if !alert.droneId.isEmpty, let c = track(trafficId: alert.droneId)?.coordinate { out.append(c) }
+        if let a = traffic.aircraft.first(where: { $0.hex == alert.hex }) { out.append(a.coordinate) }
+        return out
+    }
+
+    /// Sidebar list selection over drones and aircraft.
+    var sidebarSelection: SidebarItem? {
+        get {
+            if let s = selection { return .drone(s) }
+            if let t = selectedTraffic { return .traffic(t) }
+            return nil
+        }
+        set {
+            switch newValue {
+            case .drone(let id)?:   selection = id
+            case .traffic(let h)?:  selectedTraffic = h
+            case nil:               selection = nil; selectedTraffic = nil
+            }
+        }
     }
 
     func selectPort(_ path: String?) {
@@ -399,14 +585,27 @@ final class AppModel {
             stats.channel = msg.ch ?? stats.channel
             stats.bleOk = msg.ble ?? stats.bleOk
             stats.bleExt = msg.ble_ext ?? stats.bleExt
+            stats.bleDrop = msg.ble_drop
+            stats.bleRxDrop = msg.ble_rx_drop
+            stats.rxStack = msg.rx_stack ?? stats.rxStack
+            if let c = msg.caps { receiverCaps = Set(c) }
             stats.lastHeartbeat = Date()
             if !deviceCtxPushed {
                 deviceCtxPushed = true
                 pushDeviceContext()
+            } else if tfrAwaitingReference, let ref = referencePoint {
+                tfrAwaitingReference = false
+                for line in Self.tfrLines(zones: tfr.zones, reference: ref) { sendLine(line) }
             }
         case "boot":
             stats.firmware = "\(msg.fw ?? "?") \(msg.ver ?? "")"
+            stats.board = msg.board
+            stats.bootWifi = msg.wifi
+            receiverCaps = msg.caps.map { Set($0) }
             stats.lastHeartbeat = Date()
+            // A reset receiver has lost its clock, home, TFRs and traffic.
+            deviceCtxPushed = false
+            traffic.resetPush()
         case "rid":
             ingestRid(msg, demo: demo)
         case "ack", "fs_ok", "fs_err", "fs_f", "fs_ls_done":
@@ -527,41 +726,53 @@ final class AppModel {
     /// receiver so it can keep its clock, range contacts and buzz on TFR
     /// incursions. Boards without a clock command ignore set_time.
     private func pushDeviceContext() {
-        serial.send(Self.setTimeCommand(now: Date()))
+        sendLine(Self.setTimeCommand(now: Date()))
         let home = location.current
         if let h = home {
-            serial.send(String(format: #"{"cmd":"set_home","lat":%.6f,"lon":%.6f}"#,
-                               h.latitude, h.longitude))
+            sendLine(String(format: #"{"cmd":"set_home","lat":%.6f,"lon":%.6f}"#,
+                            h.latitude, h.longitude))
         }
         if tfr.zones.isEmpty {
             // A fetched-but-empty snapshot means the restrictions the device
             // holds have ended; only a fetch that never completed says nothing.
             if case .loaded = tfr.status {
-                serial.send(#"{"cmd":"tfr_clear"}"#)
+                sendLine(#"{"cmd":"tfr_clear"}"#)
             }
             return
         }
-        let ref = home ?? CLLocationCoordinate2D(latitude: 37.7749,
-                                                 longitude: -122.4194)
+        // No position for this Mac or any drone: which TFRs are near is
+        // unknown, so the receiver keeps what it has; the first fix (or
+        // drone position, next context push) sends them.
+        tfrAwaitingReference = false
+        guard let ref = referencePoint else {
+            tfrAwaitingReference = true
+            return
+        }
+        for line in Self.tfrLines(zones: tfr.zones, reference: ref) { sendLine(line) }
+    }
+
+    /// tfr_clear, then up to 16 TFRs within 200 km of `reference`, nearest
+    /// first, each an enclosing polygon of <= 24 points (TFRShape).
+    nonisolated static func tfrLines(zones: [TFRZone], reference ref: CLLocationCoordinate2D) -> [String] {
         let refLoc = CLLocation(latitude: ref.latitude, longitude: ref.longitude)
-        serial.send(#"{"cmd":"tfr_clear"}"#)
-        var sent = 0
-        for z in tfr.zones {
-            guard sent < 16 else { break }
-            let d = refLoc.distance(from: CLLocation(latitude: z.centroid.latitude,
-                                                     longitude: z.centroid.longitude))
-            guard d < 200_000 else { continue }
-            let ring = z.outerRing
-            let step = max(1, Int(ceil(Double(ring.count) / 24.0)))
-            let pts = stride(from: 0, to: ring.count, by: step).map { ring[$0] }
+        let near = zones
+            .map { z in (z, refLoc.distance(from: CLLocation(latitude: z.centroid.latitude,
+                                                              longitude: z.centroid.longitude))) }
+            .filter { $0.1 < 200_000 }
+            .sorted { $0.1 < $1.1 }
+        var out = [#"{"cmd":"tfr_clear"}"#]
+        for (z, _) in near {
+            guard out.count <= 16 else { break }
+            let pts = TFRShape.enclosing(z.outerRing)
             guard pts.count >= 3 else { continue }
             let ptsStr = pts
                 .map { String(format: "[%.5f,%.5f]", $0.latitude, $0.longitude) }
                 .joined(separator: ",")
-            let id = String(z.notam.prefix(14))
-            serial.send(#"{"cmd":"tfr_add","id":"\#(id)","pts":[\#(ptsStr)]}"#)
-            sent += 1
+            let id = String(z.notam.prefix(14)).replacingOccurrences(of: "\"", with: "")
+                .replacingOccurrences(of: "\\", with: "")
+            out.append(#"{"cmd":"tfr_add","id":"\#(id)","pts":[\#(ptsStr)]}"#)
         }
+        return out
     }
 
     private func expireOld() {

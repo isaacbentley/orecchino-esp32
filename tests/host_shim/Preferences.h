@@ -23,6 +23,7 @@ class Preferences {
   uint16_t getUShort(const char* key, uint16_t d = 0) { return get(key, d); } void putUShort(const char* key, uint16_t v) { put(key, v); }
   uint8_t getUChar(const char* key, uint8_t d = 0) { return get(key, d); } void putUChar(const char* key, uint8_t v) { put(key, v); }
   uint32_t getULong(const char* key, uint32_t d = 0) { return get(key, d); } void putULong(const char* key, uint32_t v) { put(key, v); }
+  double getDouble(const char* key, double d = 0) { return get(key, d); } void putDouble(const char* key, double v) { put(key, v); }
   size_t getBytesLength(const char* key) { auto it = shim_nvs().find(k(key)); return it == shim_nvs().end() ? 0 : it->second.size(); }
   size_t getBytes(const char* key, void* buf, size_t n) {
     auto it = shim_nvs().find(k(key)); if (it == shim_nvs().end()) return 0;

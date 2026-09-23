@@ -28,8 +28,13 @@ struct RidMessage: Decodable {
     var msg: String? = nil
     var total: Int? = nil
 
-    // match log records (log / log_done), see DeviceLog
+    // match log records (log / log_done), see DeviceLog. `seq`/`i` are null
+    // for a contact still live; log_done's `next` is the cursor for the next
+    // {"cmd":"log_get","since":next}, `oldest` the lowest seq still held.
+    var seq: Int? = nil
     var i: Int? = nil
+    var next: Int? = nil
+    var oldest: Int? = nil
     var active: Bool? = nil
     var uas: String? = nil
     var srcs: Int? = nil
@@ -59,6 +64,12 @@ struct RidMessage: Decodable {
     var ble_ext: Bool? = nil
     var fw: String? = nil
     var ver: String? = nil
+    var board: String? = nil
+    var wifi: Bool? = nil          // boot: the Wi-Fi sniffer started
+    var caps: [String]? = nil      // boot/hb, when the firmware sends it (see AppModel.receiverTakesTraffic)
+    var ble_drop: Int? = nil       // hb, optional: BLE lines dropped
+    var ble_rx_drop: Int? = nil    // hb, optional: BLE host lines dropped
+    var rx_stack: Int? = nil       // hb, optional: decode task's least free stack (bytes)
 }
 
 struct BasicId: Decodable {
@@ -96,7 +107,9 @@ struct SystemMsg: Decodable {
 }
 
 /// Authentication (ODID message type 2) as reported by the receiver.
-/// `state` is one of id_valid / invalid / partial / unknown_key / none.
+/// `state` is one of id_valid / invalid / partial / unknown_key / test_key /
+/// none. test_key: signed with the public test key (the bench beacon), shown
+/// neutrally as "TEST KEY", never as a verified identity.
 struct AuthInfo: Decodable {
     var type: Int
     var len: Int
@@ -137,6 +150,7 @@ enum RidNames {
         case "invalid":     return "ID signature INVALID"
         case "partial":     return "pages incomplete"
         case "unknown_key": return "signed, key not trusted"
+        case "test_key":    return "TEST KEY"
         case "none", nil:   return nil
         default:            return s
         }

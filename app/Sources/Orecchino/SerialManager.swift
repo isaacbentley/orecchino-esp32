@@ -136,20 +136,27 @@ final class SerialManager: @unchecked Sendable {
         reconnect = t
     }
 
-    /// ORECCHINO_DEBUG=1 traces port selection to /tmp/orecchino-serial.log
+    /// ORECCHINO_DEBUG=1 traces port selection to
+    /// ~/Library/Logs/Orecchino/serial.log: a per-user place, opened without
+    /// following a symlink and readable by this user only (0600).
     private let debug = ProcessInfo.processInfo.environment["ORECCHINO_DEBUG"] != nil
+    static var debugLogPath: String {
+        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Logs/Orecchino", isDirectory: true)
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Logs/Orecchino")
+        return logs.appendingPathComponent("serial.log").path
+    }
     private func dlog(_ s: String) {
         guard debug else { return }
-        let line = "\(Date()) \(s)\n"
-        if let d = line.data(using: .utf8),
-           let h = FileHandle(forWritingAtPath: "/tmp/orecchino-serial.log") {
-            h.seekToEndOfFile()
-            h.write(d)
-            try? h.close()
-        } else {
-            FileManager.default.createFile(atPath: "/tmp/orecchino-serial.log",
-                                           contents: line.data(using: .utf8))
-        }
+        let path = Self.debugLogPath
+        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
+                                                 withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        let f = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard f >= 0 else { return }
+        defer { Darwin.close(f) }
+        let bytes = Array("\(Date()) \(s)\n".utf8)
+        _ = bytes.withUnsafeBytes { Darwin.write(f, $0.baseAddress, $0.count) }
     }
 
     private func tryOpen() {

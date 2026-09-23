@@ -3,6 +3,7 @@
 #include "Arduino.h"
 typedef struct { int x, y, width, height; } EpdRect;
 enum EpdDrawMode { MODE_GC16 = 1, MODE_GL16 = 2, MODE_DU = 4 };
+enum EpdDrawError { EPD_DRAW_SUCCESS = 0, EPD_DRAW_EMPTY_LINE_QUEUE = 0x400 };
 enum EpdRotation { EPD_ROT_LANDSCAPE = 0 };
 typedef struct { int dummy; } EpdWaveform;
 typedef struct { int dummy; } EpdBoardDefinition;
@@ -21,7 +22,8 @@ static inline void epd_set_vcom(uint16_t) {}
 static inline void epd_set_rotation(enum EpdRotation) {}
 static inline void epd_poweron() {}
 static inline void epd_poweroff() {}
-static inline void epd_clear() {}
+inline int g_epd_clears = 0;
+static inline void epd_clear() { g_epd_clears++; }
 static inline float epd_ambient_temperature() { return 25; }
 static inline void epd_draw_pixel(int x, int y, uint8_t color, uint8_t* fb) {
   if (x < 0 || x >= EPD_W || y < 0 || y >= EPD_H) return;

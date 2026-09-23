@@ -1,6 +1,6 @@
 # Third-party components and licenses
 
-Compiled into or referenced by this project. Audited 2026-08-17.
+Compiled into or referenced by this project. Audited 2026-09-23.
 
 ## Firmware libraries (linked at build time, not vendored)
 
@@ -11,7 +11,34 @@ Compiled into or referenced by this project. Audited 2026-08-17.
 | [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library) | BSD | `Fonts/` headers only, on every board with a screen (see fonts note) |
 | [PNGdec](https://github.com/bitbank2/PNGdec) | Apache-2.0 | Map tile decoding |
 | [PCA95x5](https://github.com/hideakitai/PCA95x5) | MIT | TCA9535 IO expander |
-| [arduino-esp32](https://github.com/espressif/arduino-esp32) / ESP-IDF | LGPL-2.1 / Apache-2.0 | Core, WiFi promiscuous, radio stacks |
+| [arduino-esp32](https://github.com/espressif/arduino-esp32) / ESP-IDF | LGPL-2.1 / Apache-2.0 | Core, WiFi promiscuous, radio stacks; on the T5 also `esp_http_client`, mbedTLS and the ESP-IDF root certificate bundle (`esp_crt_bundle`, Mozilla's CA list) for the Wi-Fi fetches |
+
+## Phone app (`mobile/`, Flutter packages fetched by `flutter pub get`, not vendored)
+
+Versions as locked in `mobile/pubspec.lock`; licenses read from each
+package's `LICENSE` in the pub cache. All are GPL-compatible.
+
+| Package | Version | License | Use |
+| --- | --- | --- | --- |
+| [Flutter](https://github.com/flutter/flutter) SDK (framework, engine) | ≥ 3.27 (CI: 3.47.5) | BSD-3-Clause | UI toolkit |
+| [flutter_blue_plus](https://pub.dev/packages/flutter_blue_plus) (+ `_android`, `_darwin`, `_platform_interface`) | 1.36.8 | BSD-3-Clause | BLE central: scan, bond, NUS link |
+| [drift](https://pub.dev/packages/drift) | 2.35.0 | MIT | Local database (history, detectors, settings) |
+| [sqlite3](https://pub.dev/packages/sqlite3), [sqlite3_flutter_libs](https://pub.dev/packages/sqlite3_flutter_libs) | 3.5.2, 0.5.42 | MIT (bundles SQLite, public domain) | SQLite for drift |
+| [geolocator](https://pub.dev/packages/geolocator) (+ platform packages) | 12.0.0 | MIT | Phone position |
+| [flutter_compass](https://pub.dev/packages/flutter_compass) | 0.8.1 | MIT | Heading for the heading-up radar |
+| [flutter_local_notifications](https://pub.dev/packages/flutter_local_notifications) (+ platform packages) | 22.3.1 | BSD-3-Clause | Traffic and drone alert notifications |
+| [timezone](https://pub.dev/packages/timezone) | 0.11.1 | BSD-2-Clause | Pulled in by flutter_local_notifications |
+| [flutter_tts](https://pub.dev/packages/flutter_tts) | 4.2.5 | MIT | Optional spoken traffic callout |
+| [http](https://pub.dev/packages/http) | 1.6.0 | BSD-3-Clause | adsb.lol requests |
+| [path_provider](https://pub.dev/packages/path_provider), [path](https://pub.dev/packages/path) | 2.1.6, 1.9.1 | BSD-3-Clause | Database location |
+
+The remaining transitive packages in the lock file are the Dart team's
+BSD-3-Clause utilities and a few MIT, BSD-2-Clause and Apache-2.0 ones
+(e.g. `rxdart` Apache-2.0, `uuid` MIT, `logger` MIT, `xml` MIT). Two are
+MPL-2.0 — `bluez` and `dbus`, flutter_blue_plus's Linux backend — and are
+only compiled into a Linux desktop build, which this project does not
+ship; MPL-2.0 is GPL-compatible in any case. Build-time only (not shipped):
+`build_runner`, `drift_dev`, `flutter_lints` (BSD-3-Clause / MIT).
 
 ## Vendored / derived code
 
@@ -26,13 +53,29 @@ Compiled into or referenced by this project. Audited 2026-08-17.
   and `README.md`. Drives the T5 E-Paper S3 Pro's ED047TC1 panel as an
   epdiy v7 board. LGPL-3.0 is compatible with this project's
   GPL-3.0-or-later. (LilyGO's own fork of epdiy 2.0.0 targets ESP-IDF 4.x
-  and does not build on the current Arduino core.) One local patch, marked
-  "Orecchino patch" in `src/output_lcd/lcd_driver.{c,h}` and
-  `render_lcd.c`: on the ESP32-S3 the LCD output drove every waveform
-  phase with one fixed CKV high time, ignoring the waveform's per-phase
-  times, so ED047TC1's short grey-building pulses ran several times too
-  long and grey 4 and up came out nearly white. The patch applies each
-  phase's time, capped to fit a line, as epdiy's ESP32 output already does.
+  and does not build on the current Arduino core.) Local patches, each
+  marked "Orecchino patch" in the source:
+  - `src/output_lcd/lcd_driver.{c,h}` and `render_lcd.c`: on the ESP32-S3
+    the LCD output drove every waveform phase with one fixed CKV high time,
+    ignoring the waveform's per-phase times, so ED047TC1's short
+    grey-building pulses ran several times too long and grey 4 and up came
+    out nearly white. The patch applies each phase's time, capped to fit a
+    line, as epdiy's ESP32 output already does.
+  - `src/render.c`: the two line-feeder tasks run at
+    `EPD_FEED_TASK_PRIORITY` (19, overridable) instead of
+    `configMAX_PRIORITIES - 1`. They busy-wait for a whole refresh, and at
+    the top priority the one on core 0 starved the Wi-Fi and Bluetooth
+    tasks, `esp_timer` (the channel hop) and the NimBLE host.
+  - `src/output_lcd/render_lcd.c` (`lcd_calculate_frame`): a feeder now
+    waits for room in its queue first, then claims a line number, computes
+    and commits that line with its core's scheduler suspended (a few
+    microseconds; interrupts still run). The frame starts exactly once per
+    frame (`frame_started`, added to the render context): when the trigger
+    line is committed, or as soon as a feeder finds its queue full first,
+    and on the error path too. Upstream claimed the line first and then
+    waited, so a feeder preempted by a radio task held a line the output
+    interrupt needed and the refresh ended in "line buffer underrun" with
+    the panel half driven.
 - `firmware/orecchino_tembed/`, `firmware/orecchino_t5epd/`,
   `firmware/orecchino_amoled/` — written for this project. Pin and
   power-sequence facts come from the vendors' MIT-licensed example code:
@@ -83,6 +126,13 @@ program. Compatible with either a GPL or permissive license for this repo.
 the golden values in `tests/odid_test.c` were cross-checked against that
 dissector's output (one Lua 5.4 compatibility fix applied locally).
 
+`tests/vectors/traffic/` (the shared traffic-rule cases) are this project's
+own. `tests/vectors/net/` and `app/Tests/OrecchinoTests/Fixtures/` hold
+trimmed answers recorded from the FAA TFR WFS (US-government data, public
+domain) and from adsb.lol, whose data is published under the
+[ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/) (© adsb.lol
+contributors); they are used only as test input.
+
 ## Data
 
 - **UAS make/model table** (`tools/uas_models.json`, generated into
@@ -96,8 +146,14 @@ dissector's output (one Lua 5.4 compatibility fix applied locally).
   map data © OpenStreetMap contributors (ODbL), tiles © CARTO, subject to
   CARTO's basemap terms. For redistribution or heavier use, generate tiles
   from OSM data or self-host (e.g. Protomaps/OpenMapTiles) instead.
-- **FAA TFR polygons** (macOS app) are fetched live from tfr.faa.gov
-  (US-government data, public domain).
+- **FAA TFR polygons** (macOS app, and the T5 over Wi-Fi) are fetched
+  live from tfr.faa.gov (US-government data, public domain).
+- **ADS-B aircraft** (macOS app, phone app, and the T5 over Wi-Fi) are
+  fetched live from [adsb.lol](https://www.adsb.lol/docs/open-data/api/),
+  a community feed whose data is licensed ODbL 1.0; aircraft are held in
+  memory only while current (at most 60 s) and never redistributed. The T5 also fetches CARTO tiles for
+  its own area (at most 4 a second, within 8 km, zooms 11-15) on the same
+  terms as `tools/fetch_tiles.py` above.
 
 ## Specifications
 

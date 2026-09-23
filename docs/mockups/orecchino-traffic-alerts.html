@@ -1,0 +1,334 @@
+<title>Orecchino Traffic Alerts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ground: #EEF1F2; --panel: #FFFFFF; --ink: #14191C; --muted: #5B6870;
+  --rule: #CBD3D6; --accent: #0E8C7B; --chip: #E2E8EA; --warn: #9A6A12; --danger: #B83A3A;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #0B0F12; --panel: #12181C; --ink: #E3E8EA; --muted: #8C9AA2;
+    --rule: #243036; --accent: #35D0BA; --chip: #1A2227; --warn: #E0A83A; --danger: #E05A5A;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0B0F12; --panel: #12181C; --ink: #E3E8EA; --muted: #8C9AA2;
+  --rule: #243036; --accent: #35D0BA; --chip: #1A2227; --warn: #E0A83A; --danger: #E05A5A;
+}
+body { background: var(--ground); color: var(--ink); font: 15px/1.55 var(--body); }
+.wrap { max-width: 1060px; margin: 0 auto; padding: 40px 20px 72px; }
+.eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 700 clamp(30px, 5vw, 44px)/1.05 var(--display); margin: 10px 0 12px; text-wrap: balance; }
+.lede { max-width: 70ch; color: var(--muted); font-size: 16px; margin: 0 0 18px; }
+h2 { font: 700 13px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+     margin: 44px 0 14px; padding-bottom: 10px; border-bottom: 1px solid var(--rule); }
+h3 { font: 700 22px/1.15 var(--display); margin: 0 0 8px; text-wrap: balance; }
+p { margin: 0 0 10px; max-width: 64ch; }
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 8px 0 0; }
+.rule { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 14px; }
+.rule .sev { font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.rule .sev.w { color: var(--danger); } .rule .sev.c { color: var(--warn); } .rule .sev.a { color: var(--muted); }
+.rule b { display: block; font: 700 16px/1.25 var(--display); margin: 6px 0 4px; }
+.rule span { font-size: 13.5px; color: var(--muted); }
+.concept { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 28px; align-items: start; padding: 24px 0; border-bottom: 1px solid var(--rule); }
+.concept.narrow { grid-template-columns: minmax(0, .8fr) minmax(0, 1fr); }
+.screen { border-radius: 8px; padding: 10px; background: #6d6f70; }
+.screen.phone { background: #111; border-radius: 34px; padding: 12px; max-width: 360px; }
+.screen.mac { background: #2a2f33; padding: 0; overflow: hidden; }
+.screen svg { display: block; width: 100%; height: auto; max-width: 100%; }
+.caption { font: 11px/1.4 var(--mono); color: var(--muted); margin-top: 8px; }
+ul.points { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; max-width: 62ch; }
+.never { margin-top: 36px; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 18px 20px; }
+.never h3 { font-size: 19px; }
+footer { margin-top: 36px; color: var(--muted); font-size: 13px; max-width: 72ch; }
+@media (max-width: 780px) { .concept, .concept.narrow { grid-template-columns: 1fr; gap: 14px; } }
+</style>
+
+<div class="wrap">
+<span class="eyebrow">Orecchino · ADS-B traffic alerts · design</span>
+<h1>Manned aircraft near the drones you hear</h1>
+<p class="lede">The receivers know where the drones are; the ADS-B feed knows where the aircraft are. Put together, they can say the thing that matters most: a manned aircraft is close to a drone. Every surface uses the same rules and the same words, and every one shows how old the data is.</p>
+
+<div class="rules">
+  <div class="rule"><span class="sev w">warning</span><b>TRAFFIC NEAR DRONE D9A03</b><span>within 1 km and 150 m (500 ft) of a live drone, heights compared GNSS to GNSS</span></div>
+  <div class="rule"><span class="sev w">warning</span><b>TRAFFIC CONVERGING WITH D9A03, 40 S</b><span>closest approach under 500 m within the next 60 s, from both tracks</span></div>
+  <div class="rule"><span class="sev c">caution</span><b>LOW TRAFFIC NE 2.1 KM</b><span>below 1,500 ft above you, within 3 km</span></div>
+  <div class="rule"><span class="sev a">advisory</span><b>EMERGENCY UAL123</b><span>squawk 7700, 7600 or 7500 within 30 km</span></div>
+</div>
+
+<h2>T5 · e-paper</h2>
+
+<section class="concept">
+  <div>
+    <div class="screen">
+      <svg viewBox="0 0 960 540" role="img" aria-label="T5 table view with a black traffic header and a traffic card in the right panel">
+        <rect width="960" height="540" fill="#fff"/>
+        <rect width="960" height="70" fill="#000"/>
+        <text x="20" y="46" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="24" fill="#fff">TRAFFIC NEAR DRONE D9A03</text>
+        <rect x="322" y="12" width="252" height="46" fill="#000" stroke="#fff" stroke-width="2" opacity="0"/>
+        <g font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="17" fill="#fff">
+          <text x="690" y="44">ADS-B 12</text><text x="790" y="44">GPS 9</text><text x="874" y="46" font-size="21">RX OK</text>
+        </g>
+        <g font-family="IBM Plex Sans Condensed, sans-serif">
+          <g font-size="14" fill="#333" font-weight="700"><text x="20" y="96">ID</text><text x="212" y="96">HGT m</text><text x="290" y="96">RNG</text><text x="360" y="96">BRG</text></g>
+          <rect x="20" y="104" width="520" height="46" fill="#000"/>
+          <text x="28" y="126" font-size="20" font-weight="700" fill="#fff">1581F20..9A03</text><text x="28" y="144" font-size="14" font-weight="700" fill="#fff">TRAFFIC NEAR | now</text>
+          <text x="212" y="126" font-size="19" fill="#fff">141</text><text x="290" y="126" font-size="19" fill="#fff">350m</text><text x="360" y="126" font-size="19" fill="#fff">016</text>
+          <g font-size="19" font-weight="700"><text x="28" y="176">1581F2..D9A01</text><text x="28" y="222">DJI-1</text><text x="28" y="268">DRONE..-9A01</text></g>
+          <g font-size="14" fill="#555"><text x="28" y="192">airborne | now</text><text x="28" y="238">airborne | now</text><text x="28" y="284">airborne | 4s ago</text></g>
+          <g font-size="19"><text x="212" y="176">125</text><text x="212" y="222">60</text><text x="212" y="268">40</text><text x="290" y="176">116m</text><text x="290" y="222">--</text><text x="290" y="268">640m</text><text x="360" y="176">016</text><text x="360" y="222">--</text><text x="360" y="268">250</text></g>
+          <line x1="20" y1="150" x2="540" y2="150" stroke="#bbb"/><line x1="20" y1="196" x2="540" y2="196" stroke="#bbb"/><line x1="20" y1="242" x2="540" y2="242" stroke="#bbb"/><line x1="20" y1="288" x2="540" y2="288" stroke="#bbb"/>
+        </g>
+        <line x1="562" y1="76" x2="562" y2="490" stroke="#000"/>
+        <rect x="574" y="80" width="372" height="400" fill="#fff" stroke="#000" stroke-width="3"/>
+        <rect x="574" y="80" width="372" height="34" fill="#000"/>
+        <g font-family="IBM Plex Sans Condensed, sans-serif">
+          <text x="586" y="103" font-size="16" font-weight="700" fill="#fff">TRAFFIC</text><text x="934" y="103" text-anchor="end" font-size="15" fill="#fff">ADS-B 6 s old</text>
+          <text x="590" y="160" font-size="40" font-weight="700">UAL123</text>
+          <text x="590" y="186" font-size="17" fill="#444">B738 · A1B2C3</text>
+          <text x="590" y="230" font-size="22" font-weight="700">1.1 km NE of D9A03</text>
+          <text x="590" y="258" font-size="22" font-weight="700">90 m above it</text>
+          <line x1="590" y1="276" x2="930" y2="276" stroke="#bbb"/>
+          <text x="590" y="304" font-size="14" fill="#555">ALTITUDE</text><text x="770" y="304" font-size="14" fill="#555">SPEED</text>
+          <text x="590" y="330" font-size="22" font-weight="700">2,650 ft</text><text x="770" y="330" font-size="22" font-weight="700">180 kt</text>
+          <polygon points="598,352 610,352 604,366" fill="#000"/>
+          <text x="616" y="366" font-size="20" font-weight="700">descending 640 fpm</text>
+          <text x="590" y="410" font-size="15" fill="#444">Positions as reported, not a prediction.</text>
+          <text x="590" y="432" font-size="15" fill="#444">Not every aircraft broadcasts ADS-B.</text>
+          <rect x="574" y="446" width="372" height="34" fill="#E6E6E6"/>
+          <text x="760" y="469" text-anchor="middle" font-size="16" font-weight="700">TAP FOR THE DRONE'S DETAILS</text>
+        </g>
+        <rect y="492" width="960" height="48" fill="#fff"/><line x1="0" y1="492" x2="960" y2="492" stroke="#000" stroke-width="2"/>
+        <text x="20" y="522" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="17">RECEIVING | 10 LIVE | TRAFFIC 12</text>
+      </svg>
+    </div>
+    <div class="caption">T5 table · the plot panel becomes a traffic card while a warning lasts</div>
+  </div>
+  <div>
+    <h3>A traffic card, and the flash as the alarm</h3>
+    <p>E-paper cannot blink, so a new warning forces a full refresh: the panel's black flash is the one motion the board can make, and it is used on purpose. The front light pulses three times with it, so the alert can be noticed across a room even in daylight.</p>
+    <ul class="points">
+      <li>The header leads with the traffic words; the row carries them too.</li>
+      <li>The card speaks relative to the drone: <em>1.1 km NE of D9A03, 90 m above it</em>.</li>
+      <li>Data age is always in the card's top corner.</li>
+      <li>The two honest sentences stay on the card, where the decision is made.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="concept">
+  <div>
+    <div class="screen">
+      <svg viewBox="0 0 960 540" role="img" aria-label="T5 side view with an aircraft diamond, a drone square and a vertical separation bracket, plus time-ghost dots">
+        <rect width="960" height="540" fill="#fff"/>
+        <rect width="960" height="70" fill="#000"/>
+        <text x="20" y="46" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="24" fill="#fff">TRAFFIC NEAR DRONE D9A03</text>
+        <rect x="322" y="12" width="252" height="46" fill="#000" stroke="#fff" stroke-width="2"/><line x1="406" y1="12" x2="406" y2="58" stroke="#fff" stroke-width="2"/><line x1="490" y1="12" x2="490" y2="58" stroke="#fff" stroke-width="2"/>
+        <rect x="491" y="14" width="81" height="42" fill="#fff"/>
+        <g font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="20"><text x="336" y="42" fill="#fff">TABLE</text><text x="428" y="42" fill="#fff">MAP</text><text x="508" y="42">SIDE</text></g>
+        <g font-family="IBM Plex Mono, monospace" font-size="14" fill="#555"><text x="30" y="105">1,200 m</text><text x="48" y="275">600 m</text><text x="68" y="445">0 m</text><text x="90" y="468">0</text><text x="354" y="468">1.0 km</text><text x="610" y="468">2.0 km</text></g>
+        <line x1="100" y1="440" x2="650" y2="440" stroke="#000" stroke-width="2"/><line x1="100" y1="100" x2="100" y2="440" stroke="#000" stroke-width="2"/>
+        <line x1="100" y1="406" x2="650" y2="406" stroke="#000" stroke-width="2" stroke-dasharray="10 6"/>
+        <text x="648" y="398" text-anchor="end" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="14">120 M / 400 FT CEILING</text>
+        <g fill="#000"><rect x="191" y="393" width="14" height="14"/><circle cx="160" cy="410" r="6"/><circle cx="300" cy="430" r="6" fill="#777"/></g>
+        <text x="212" y="386" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="15">D9A03 141m</text>
+        <polygon points="268,266 280,254 292,266 280,278" fill="#fff" stroke="#000" stroke-width="3"/>
+        <text x="298" y="262" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="15">UAL123 2.6k ft</text>
+        <g fill="#000"><circle cx="252" cy="284" r="3"/><circle cx="224" cy="302" r="3"/><circle cx="196" cy="320" r="3"/><circle cx="168" cy="338" r="3"/></g>
+        <text x="120" y="330" font-family="IBM Plex Mono, monospace" font-size="12" fill="#555">60 s</text>
+        <g stroke="#000" stroke-width="2"><line x1="236" y1="272" x2="236" y2="394"/><line x1="228" y1="272" x2="244" y2="272"/><line x1="228" y1="394" x2="244" y2="394"/></g>
+        <rect x="244" y="320" width="116" height="26" fill="#000"/>
+        <text x="252" y="339" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="16" fill="#fff">Δ 90 m / 300 ft</text>
+        <line x1="680" y1="90" x2="680" y2="480" stroke="#000"/>
+        <g font-family="IBM Plex Sans Condensed, sans-serif">
+          <text x="700" y="118" font-weight="700" font-size="20">TRAFFIC PAIRS</text>
+          <rect x="700" y="132" width="240" height="64" fill="#000"/>
+          <text x="712" y="158" font-weight="700" font-size="18" fill="#fff">UAL123 › D9A03</text>
+          <text x="712" y="184" font-size="16" fill="#fff">1.1 km · Δ 90 m · closing</text>
+          <text x="700" y="232" font-weight="700" font-size="20">ADS-B</text>
+          <text x="700" y="258" font-size="16" fill="#444">12 aircraft within 30 km</text>
+          <text x="700" y="280" font-size="16" fill="#444">data 6 s old · adsb.lol</text>
+          <text x="700" y="330" font-size="15" fill="#444">Diamonds are aircraft, dots</text><text x="700" y="350" font-size="15" fill="#444">every 15 s show where each</text><text x="700" y="370" font-size="15" fill="#444">is heading over the next minute.</text>
+        </g>
+        <rect y="492" width="960" height="48" fill="#fff"/><line x1="0" y1="492" x2="960" y2="492" stroke="#000" stroke-width="2"/>
+        <text x="20" y="522" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="17">RECEIVING | 10 LIVE | TRAFFIC 12</text>
+      </svg>
+    </div>
+    <div class="caption">T5 side view · the separation bracket and the aircraft's time ghost</div>
+  </div>
+  <div>
+    <h3>Separation you can read at a glance</h3>
+    <p>The side view already answers "how high". With traffic it answers the question that matters: how far apart vertically. A bracket joins the drone to the aircraft with the separation in metres and feet, and the aircraft trails a <em>time ghost</em>: a dot every 15 seconds along its next minute, which e-paper can show without animating anything.</p>
+    <ul class="points">
+      <li>Aircraft are outlined diamonds; drones are filled. They cannot be confused, in grey or in a hurry.</li>
+      <li>The right panel lists traffic pairs, most urgent first, instead of the ceiling list while an alert lasts.</li>
+    </ul>
+  </div>
+</section>
+
+<h2>Phone · iOS and Android</h2>
+
+<section class="concept narrow">
+  <div>
+    <div class="screen phone">
+      <svg viewBox="0 0 390 760" role="img" aria-label="iPhone lock screen with a Dynamic Island traffic readout and a time-sensitive notification">
+        <defs><linearGradient id="wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1B2A33"/><stop offset="1" stop-color="#0A1014"/></linearGradient></defs>
+        <rect width="390" height="760" rx="26" fill="url(#wall)"/>
+        <rect x="104" y="14" width="182" height="36" rx="18" fill="#000"/>
+        <path d="M122 32 l10 -3 l6 -8 l3 0 l-3 9 l8 -2 l3 -3 l2 0 l-1 5 l1 5 l-2 0 l-3 -3 l-8 -2 l3 9 l-3 0 l-6 -8 l-10 -3 z" fill="#E0A83A"/>
+        <text x="156" y="37" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="14" fill="#fff">1.1 km</text>
+        <text x="274" y="37" text-anchor="end" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="14" fill="#E0A83A">2 o'clock</text>
+        <text x="195" y="150" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="80" font-weight="300" fill="#fff">9:41</text>
+        <text x="195" y="92" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="16" fill="#cfd8dc">Wednesday 23 September</text>
+        <rect x="16" y="430" width="358" height="140" rx="20" fill="#2A3238" opacity=".95"/>
+        <rect x="30" y="446" width="30" height="30" rx="7" fill="#07090E"/><circle cx="45" cy="461" r="7" fill="none" stroke="#35D0BA" stroke-width="2.5"/>
+        <text x="70" y="458" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#aab4ba">ORECCHINO · TIME SENSITIVE</text><text x="358" y="458" text-anchor="end" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#aab4ba">now</text>
+        <text x="30" y="496" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="16" fill="#fff">Traffic near drone D9A03</text>
+        <text x="30" y="518" font-family="IBM Plex Sans, sans-serif" font-size="14" fill="#dfe6e9">B738 UAL123 · 2,650 ft · 1.1 km NE of</text>
+        <text x="30" y="537" font-family="IBM Plex Sans, sans-serif" font-size="14" fill="#dfe6e9">the drone · reported 6 s ago</text>
+        <rect x="30" y="548" width="160" height="0" fill="none"/>
+        <rect x="16" y="582" width="175" height="40" rx="14" fill="#2A3238"/><text x="103" y="607" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="14" fill="#fff">Show</text>
+        <rect x="199" y="582" width="175" height="40" rx="14" fill="#2A3238"/><text x="286" y="607" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="14" fill="#fff">Mute 10 min</text>
+        <rect x="140" y="736" width="110" height="5" rx="2.5" fill="#fff" opacity=".7"/>
+      </svg>
+    </div>
+    <div class="caption">Lock screen · Dynamic Island and a time-sensitive notification</div>
+  </div>
+  <div>
+    <h3>Clock position, the way pilots say it</h3>
+    <p>The phone has what the boards lack: a compass. So the Dynamic Island (and Android's ongoing notification) gives traffic as a clock position relative to where the phone points, "2 o'clock", which is how traffic is called in a cockpit, and needs no map to understand.</p>
+    <ul class="points">
+      <li>Warnings are time-sensitive on iOS and a high-importance channel on Android; cautions are not.</li>
+      <li>One notification per drone-aircraft pair every five minutes; the Live Activity stays up while the alert does.</li>
+      <li>Actions: <strong>Show</strong> (opens the pair on the radar) and <strong>Mute 10 min</strong>.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="concept narrow">
+  <div>
+    <div class="screen phone">
+      <svg viewBox="0 0 390 760" role="img" aria-label="In-app live radar with a separation bridge between a drone and an aircraft, and a traffic banner">
+        <rect width="390" height="760" rx="26" fill="#07090E"/>
+        <rect x="16" y="56" width="358" height="78" rx="14" fill="#3A1414"/>
+        <text x="30" y="84" font-family="IBM Plex Sans Condensed, sans-serif" font-weight="700" font-size="18" fill="#FFB0B0">TRAFFIC NEAR DRONE D9A03</text>
+        <text x="30" y="108" font-family="IBM Plex Sans, sans-serif" font-size="14" fill="#F2D6D6">2 o'clock · 1.1 km · 2,650 ft · descending</text>
+        <text x="30" y="126" font-family="IBM Plex Mono, monospace" font-size="11" fill="#C79A9A">ADS-B 6 s old · reported positions</text>
+        <g transform="translate(195 360)">
+          <circle r="150" fill="none" stroke="#1C222C" stroke-width="1.5"/><circle r="100" fill="none" stroke="#141A22"/><circle r="50" fill="none" stroke="#141A22"/>
+          <text x="-4" y="-156" font-family="IBM Plex Mono, monospace" font-size="11" fill="#8A99AD">▲ you face</text>
+          <circle r="5" fill="#8A99AD"/>
+          <circle cx="30" cy="-72" r="6" fill="#E05A5A"/><text x="-40" y="-78" font-family="IBM Plex Mono, monospace" font-size="11" fill="#E2E8F0">D9A03</text>
+          <polygon points="98,-40 108,-50 118,-40 108,-30" fill="none" stroke="#E0A83A" stroke-width="2.5"/>
+          <text x="84" y="-58" font-family="IBM Plex Mono, monospace" font-size="11" fill="#E0A83A">UAL123</text>
+          <g fill="#E0A83A" opacity=".75"><circle cx="92" cy="-46" r="2"/><circle cx="76" cy="-52" r="2"/><circle cx="60" cy="-58" r="2"/><circle cx="44" cy="-64" r="2"/></g>
+          <path d="M36 -68 Q70 -80 102 -44" fill="none" stroke="#E05A5A" stroke-width="10" stroke-linecap="round" opacity=".28"/>
+          <rect x="44" y="-112" width="92" height="22" rx="11" fill="#E05A5A"/>
+          <text x="90" y="-97" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-weight="600" font-size="11" fill="#fff">1.1 km · Δ90 m</text>
+          <circle cx="-70" cy="60" r="5" fill="#00B4D8"/><circle cx="-20" cy="110" r="5" fill="#B78BFF"/>
+          <polygon points="-120,-90 -112,-98 -104,-90 -112,-82" fill="none" stroke="#8A99AD" stroke-width="2"/>
+        </g>
+        <rect x="0" y="560" width="390" height="200" rx="26" fill="#10141C"/>
+        <rect x="175" y="570" width="40" height="4" rx="2" fill="#2A3240"/>
+        <g font-family="IBM Plex Sans, sans-serif">
+          <text x="24" y="606" font-weight="600" font-size="15" fill="#E2E8F0">UAL123 · B738</text><text x="366" y="606" text-anchor="end" font-size="13" fill="#E0A83A">near D9A03</text>
+          <text x="24" y="628" font-size="13" fill="#8A99AD">2,650 ft · 180 kt · ▼ 640 fpm · 2 o'clock 1.1 km</text>
+          <line x1="24" y1="644" x2="366" y2="644" stroke="#1C222C"/>
+          <text x="24" y="670" font-weight="600" font-size="15" fill="#E2E8F0">1581F20..9A03</text><text x="366" y="670" text-anchor="end" font-size="13" fill="#E05A5A">EMERGENCY REPORTED</text>
+          <text x="24" y="692" font-size="13" fill="#8A99AD">141 m above take-off · closing 4.2 m/s · 350 m</text>
+        </g>
+        <rect x="140" y="736" width="110" height="5" rx="2.5" fill="#fff" opacity=".5"/>
+      </svg>
+    </div>
+    <div class="caption">Live radar · heading-up, with the separation bridge</div>
+  </div>
+  <div>
+    <h3>A separation bridge</h3>
+    <p>On the heading-up radar, a translucent bridge joins the drone to the aircraft it is close to, labelled with horizontal and vertical separation. As they converge the bridge shortens and thickens, so the danger reads as a shape before any text is read. The aircraft trails the same time ghost as on the T5.</p>
+    <ul class="points">
+      <li>A distinct haptic (three short pulses) for traffic, different from drone alerts.</li>
+      <li>An optional spoken callout, off by default: <em>"Traffic, two o'clock, one point one kilometres, two thousand six hundred feet, descending."</em></li>
+      <li>Find mode can point its big arrow at the aircraft instead of a drone.</li>
+    </ul>
+  </div>
+</section>
+
+<h2>Mac app</h2>
+
+<section class="concept">
+  <div>
+    <div class="screen mac">
+      <svg viewBox="0 0 960 600" role="img" aria-label="Mac app window: menu bar extra with an airplane glyph, toolbar Traffic toggle, alert strip and a map with aircraft, drones and a separation bridge">
+        <rect width="960" height="600" fill="#0B0F12"/>
+        <rect width="960" height="24" fill="#1C2227"/>
+        <text x="14" y="17" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#cfd8dc">Orecchino   File   Edit   View   Window</text>
+        <rect x="770" y="3" width="44" height="18" rx="4" fill="#E05A5A"/>
+        <path d="M778 13 l7 -2 l4 -6 l2 0 l-2 6 l6 -1 l2 -2 l1 0 l-1 3 l1 3 l-1 0 l-2 -2 l-6 -1 l2 6 l-2 0 l-4 -6 l-7 -2 z" fill="#fff"/>
+        <text x="806" y="16" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="11" fill="#fff">3</text>
+        <text x="900" y="17" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#cfd8dc">Wed 9:41</text>
+        <rect x="0" y="24" width="960" height="44" fill="#141A1F"/>
+        <circle cx="20" cy="46" r="6" fill="#E05A5A"/><circle cx="40" cy="46" r="6" fill="#E0A83A"/><circle cx="60" cy="46" r="6" fill="#5ECB7A"/>
+        <text x="90" y="51" font-family="IBM Plex Sans, sans-serif" font-weight="600" font-size="14" fill="#E2E8F0">Orecchino</text>
+        <g font-family="IBM Plex Sans, sans-serif" font-size="12">
+          <rect x="560" y="34" width="80" height="24" rx="6" fill="#1E262C"/><text x="574" y="50" fill="#5ECB7A">● receiving</text>
+          <rect x="648" y="34" width="54" height="24" rx="6" fill="#1E262C"/><text x="662" y="50" fill="#cfd8dc">TFR</text>
+          <rect x="710" y="34" width="78" height="24" rx="6" fill="#0E5A50"/><text x="722" y="50" fill="#E2E8F0">✈ Traffic</text>
+          <rect x="796" y="34" width="62" height="24" rx="6" fill="#1E262C"/><text x="808" y="50" fill="#cfd8dc">Follow</text>
+          <rect x="866" y="34" width="80" height="24" rx="6" fill="#1E262C"/><text x="878" y="50" fill="#cfd8dc">Device ▾</text>
+        </g>
+        <rect x="0" y="68" width="250" height="532" fill="#10151A"/>
+        <g font-family="IBM Plex Sans, sans-serif">
+          <text x="16" y="96" font-size="11" fill="#8A99AD" font-weight="600">TRAFFIC ALERTS</text>
+          <rect x="10" y="104" width="230" height="58" rx="8" fill="#3A1414"/>
+          <text x="20" y="124" font-size="13" font-weight="600" fill="#FFB0B0">TRAFFIC NEAR DRONE D9A03</text>
+          <text x="20" y="142" font-size="12" fill="#F2D6D6">UAL123 B738 · 1.1 km · Δ 90 m</text>
+          <text x="20" y="156" font-size="11" fill="#C79A9A">ADS-B 6 s old · Show</text>
+          <text x="16" y="190" font-size="11" fill="#8A99AD" font-weight="600">DRONES — 10</text>
+          <text x="20" y="214" font-size="13" font-weight="600" fill="#E2E8F0">1581F20..9A03</text><text x="20" y="230" font-size="11" fill="#E05A5A">EMERGENCY REPORTED · traffic 1.1 km</text>
+          <text x="20" y="258" font-size="13" font-weight="600" fill="#E2E8F0">1581F2..D9A01</text><text x="20" y="274" font-size="11" fill="#8A99AD">116 m · 125 m high</text>
+          <text x="20" y="302" font-size="13" font-weight="600" fill="#E2E8F0">DJI-1</text><text x="20" y="318" font-size="11" fill="#8A99AD">no position</text>
+        </g>
+        <rect x="250" y="68" width="710" height="532" fill="#0D1418"/>
+        <g stroke="#1C2A30" stroke-width="6"><line x1="250" y1="220" x2="960" y2="190"/><line x1="420" y1="68" x2="470" y2="600"/><line x1="250" y1="430" x2="960" y2="470"/><line x1="760" y1="68" x2="790" y2="600"/></g>
+        <polygon points="640,300 820,280 850,400 670,430" fill="#E05A5A" opacity=".10" stroke="#E05A5A" stroke-dasharray="6 5"/>
+        <circle cx="560" cy="360" r="7" fill="#E05A5A"/><circle cx="560" cy="360" r="14" fill="none" stroke="#E05A5A" stroke-width="2"/>
+        <text x="574" y="386" font-family="IBM Plex Mono, monospace" font-size="12" fill="#E2E8F0">D9A03 · 141 m</text>
+        <path d="M566 354 Q610 300 648 280" fill="none" stroke="#E05A5A" stroke-width="12" stroke-linecap="round" opacity=".25"/>
+        <rect x="560" y="296" width="96" height="22" rx="11" fill="#E05A5A"/><text x="608" y="311" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" font-weight="600" fill="#fff">1.1 km · Δ90 m</text>
+        <g transform="translate(656 272) rotate(-115)"><path d="M-12 0 l8 -3 l5 -8 l3 0 l-2 8 l8 -2 l3 -4 l2 0 l-1 6 l1 6 l-2 0 l-3 -4 l-8 -2 l2 8 l-3 0 l-5 -8 l-8 -3 z" fill="#E0A83A"/></g>
+        <line x1="662" y1="268" x2="740" y2="232" stroke="#E0A83A" stroke-width="2" stroke-dasharray="4 6"/>
+        <text x="676" y="258" font-family="IBM Plex Mono, monospace" font-size="12" fill="#E0A83A">UAL123 2,650 ft ▼</text>
+        <g transform="translate(380 160) rotate(20)"><path d="M-10 0 l7 -2 l4 -7 l2 0 l-2 7 l7 -2 l2 -3 l1 0 l-1 5 l1 5 l-1 0 l-2 -3 l-7 -2 l2 7 l-2 0 l-4 -7 l-7 -2 z" fill="#8A99AD"/></g>
+        <text x="394" y="152" font-family="IBM Plex Mono, monospace" font-size="11" fill="#8A99AD">SWA4211 11,000 ft</text>
+        <circle cx="470" cy="470" r="6" fill="#00B4D8"/><circle cx="520" cy="430" r="6" fill="#B78BFF"/>
+        <rect x="266" y="548" width="420" height="36" rx="8" fill="#141A1F" opacity=".95"/>
+        <text x="280" y="571" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#cfd8dc">12 aircraft · ADS-B 6 s old · not every aircraft broadcasts ADS-B</text>
+      </svg>
+    </div>
+    <div class="caption">Mac app · Traffic layer, alert list and the menu bar indicator</div>
+  </div>
+  <div>
+    <h3>Traffic from any app</h3>
+    <p>The Mac fetches the feed itself and draws a Traffic layer beside TFRs: aircraft rotated to their track with a dashed minute of projection, and the same separation bridge as the phone. Alerts sit above drone alerts in the sidebar, and the drone's card gains a "Nearest traffic" row.</p>
+    <ul class="points">
+      <li>A <strong>menu bar indicator</strong>: an airplane glyph with the count of aircraft within 3 km, red while a warning is active, so traffic is visible without switching to the app.</li>
+      <li>The Mac also passes the aircraft to the plugged-in receiver, so a T-Embed or SenseCAP without Wi-Fi alerts too.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="never">
+  <h3>What no surface ever says</h3>
+  <p>Not every aircraft broadcasts ADS-B, and the feed has gaps and delay. So no screen says "clear", "no traffic" or "safe", and none says "collision" or "conflict": these are reported positions, not predictions. The most any screen says is <em>no ADS-B traffic reported within 3 km</em>, always with the age of the data. When the data is more than 30 seconds old, new alerts stop and every surface says <em>TRAFFIC DATA STALE</em>.</p>
+</section>
+
+<footer>
+  <p>Rules, thresholds, the <code>traffic</code> command and the milestone are in section 8 of <code>docs/plans/mobile-app-and-t5-wifi.md</code> in the orecchino-esp32 repository. Aircraft positions from the adsb.lol community feed; the figures in these mockups are illustrative.</p>
+</footer>
+</div>

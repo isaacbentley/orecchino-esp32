@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #define FW_BOARD "sensecap-indicator"
 #define ORECCHINO_BOARD_HOOKS
+#define RX_CAPS_BOARD ",\"tiles\""   // BLE Device Info: the map tile store
 #include "../common/rx_core.h"
 #include "../common/tile_store.h"
 #include "display.h"
@@ -77,8 +78,8 @@ void rx_hook_track(Track*, bool, bool tfr_entered) {
 
 // Tile store: the shared implementation, with eviction scored from where
 // the map is looking.
-bool rx_hook_host_line(const char* cmd, char* line, uint32_t now) {
-  return tile_store_host_line(cmd, line, now);
+bool rx_hook_host_line(const char* cmd, char* line, uint32_t now, HostSrc src) {
+  return tile_store_host_line(cmd, line, now, src);
 }
 
 // ------------------------------------------------------------------ sketch

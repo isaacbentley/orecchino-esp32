@@ -23,6 +23,7 @@ uint32_t g_seen_count = 0;
 bool     g_home_set = false;
 double   g_home_lat = 37.8039, g_home_lon = -122.4640;
 uint8_t  g_tfr_n = 0; bool g_tfr_loaded = false; uint32_t g_tfr_ms = 0;
+void rx_log_flush() {}
 void ring_begin() {} void ring_tick(uint32_t, uint8_t, float) {} void ring_off() {} void ring_set_dim(bool) {}
 bool cc1101_sweep_begin() { return true; }
 uint32_t cc1101_bin_hz(int i) { return 300000000u + (uint32_t)i * 4900000u; }
@@ -145,7 +146,20 @@ int main() {
   for (int i = 0; i < 13; i++) s_a24[i] = -95 + 3 * i;
   for (int i = 0; i < CC_SWEEP_BINS; i++) { s_swp[i] = (int8_t)(-100 + (i % 17 == 0 ? 40 : i % 5)); s_pk[i] = s_swp[i] + 6; }
   s_cc_ok = true; draw_spectrum();                scene_check("tembed_spectrum");
-  s_menu_sel = 1; draw_menu();                    scene_check("tembed_menu");
+  s_menu_sel = 1; draw_menu();
+  {
+    // The selection box's top and bottom edges must not run through a line
+    // of text (they once cut through the subtitle).
+    int top = MENU_Y(1), bot = MENU_Y(1) + MENU_RH - 2, cut = 0;
+    for (const TextRun& r : g_runs)
+      if ((r.y0 <= top && r.y1 > top) || (r.y0 <= bot && r.y1 > bot)) {
+        printf("   \"%s\" [%d-%d] crosses the menu box edge (%d / %d)\n", r.s.c_str(), r.y0, r.y1, top, bot);
+        cut++;
+      }
+    printf("%s menu box clear of its text\n", cut ? "FAIL" : "ok  ");
+    if (cut) g_fails++;
+  }
+  scene_check("tembed_menu");
   s_tx_sel = 4; draw_tx();                        scene_check("tembed_tx");
   // Only what changed goes over SPI: an identical frame sends nothing, a
   // clock tick a band or two.

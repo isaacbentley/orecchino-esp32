@@ -1,0 +1,255 @@
+{
+ "name": "stale",
+ "description": "Data older than 30 s: no new alert (even for a fresh aircraft 300 m from the drone), the existing one is held and TRAFFIC DATA STALE is shown; the held alert clears 20 s after its aircraft drops out at 60 s; then no source at all.",
+ "worked_example": [
+  "t=0: data 5 s old, UAL123 600 m N of D9A03, vert +50 -> TRAFFIC NEAR DRONE D9A03.",
+  "t=30: data 35 s old > 30 -> stale: no new alert (N9, 300 m away and only 10 s old, is not raised); UAL123's alert is kept, held, its position 35 s old; summary TRAFFIC DATA STALE, data 35 s old.",
+  "t=56: UAL123's position is 61 s old -> dropped from the evaluation; its alert is out of hold from t=56 and still shown with the last numbers.",
+  "t=75: 19 s out -> still shown. t=76: 20 s out -> cleared. t=80: no ADS-B source at all -> 'no ADS-B source'."
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": 20
+ },
+ "drones": [
+  {
+   "id": "1581F20000D9A03",
+   "lat": 37.806376,
+   "lon": -122.4194,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 5,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.811772,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 5
+    },
+    {
+     "hex": "b2c3d4",
+     "cs": "N12345",
+     "ty": "C172",
+     "lat": 37.819866,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 5
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 2,
+    "summary": "no ADS-B traffic reported within 3 km, data 5 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 600.0078241737625,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 5.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 30,
+   "data_age_s": 35,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.811772,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 35
+    },
+    {
+     "hex": "b2c3d4",
+     "cs": "N12345",
+     "ty": "C172",
+     "lat": 37.819866,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 0,
+     "age_s": 35
+    },
+    {
+     "hex": "c3d4e5",
+     "cs": "N9",
+     "ty": "C172",
+     "lat": 37.806376,
+     "lon": -122.415985,
+     "altg_m": 180,
+     "gs_kt": 80,
+     "trk": 0,
+     "age_s": 10
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": true,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 3,
+    "summary": "TRAFFIC DATA STALE, data 35 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 600.0078241737625,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 35.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 56,
+   "data_age_s": 61,
+   "aircraft": [
+    {
+     "hex": "c3d4e5",
+     "cs": "N9",
+     "ty": "C172",
+     "lat": 37.806376,
+     "lon": -122.415985,
+     "altg_m": 180,
+     "gs_kt": 80,
+     "trk": 0,
+     "age_s": 36
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": true,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 1,
+    "summary": "TRAFFIC DATA STALE, data 61 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 600.0078241737625,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 61.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 75,
+   "data_age_s": 80,
+   "aircraft": [],
+   "expect": {
+    "have_data": true,
+    "stale": true,
+    "highest": "warning",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 0,
+    "summary": "TRAFFIC DATA STALE, data 80 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 600.0078241737625,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 80.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 76,
+   "data_age_s": 81,
+   "aircraft": [],
+   "expect": {
+    "have_data": true,
+    "stale": true,
+    "highest": "none",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 0,
+    "summary": "TRAFFIC DATA STALE, data 81 s old",
+    "alerts": []
+   }
+  },
+  {
+   "t_s": 80,
+   "data_age_s": null,
+   "aircraft": [],
+   "expect": {
+    "have_data": false,
+    "stale": false,
+    "highest": "none",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 0,
+    "summary": "no ADS-B source",
+    "alerts": []
+   }
+  }
+ ]
+}

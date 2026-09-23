@@ -25,6 +25,8 @@ typedef struct {
 
     /// index of the next line of data to process
     atomic_int lines_prepared;
+    /// Orecchino patch: set once the LCD frame has been started this frame
+    atomic_int frame_started;
     volatile int lines_consumed;
     int lines_total;
 

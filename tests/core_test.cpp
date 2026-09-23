@@ -3,7 +3,9 @@
 // odid_test.c cannot reach: one aircraft staying one contact across several
 // addresses, Authentication pages assembled across frames, the transmitter's
 // format fields reaching the encoder, and its off switches actually
-// silencing the BLE advertising sets.
+// silencing the BLE advertising sets. Also the host protocol: where each
+// line goes (USB, BLE), the match log's sync cursor, and what a host may
+// not do (paths out of /tiles, absurd numbers).
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 #define FW_BOARD "host"
@@ -12,6 +14,8 @@
 #include "rx_core.h"
 #include "odid_build.h"
 #include "odid_auth.h"
+#include "ui_common.h"
+#include "tile_path.h"
 
 static int g_fails = 0;
 #define CHECK(c, name) do { if (c) printf("ok   %s\n", name); else { printf("FAIL %s\n", name); g_fails++; } } while (0)
@@ -73,7 +77,8 @@ static void test_tx(void) {
   CHECK(fl > 0 && !memcmp(s_frame + 10, PATHS[P_DUAL].mac, 6) && !memcmp(s_frame + 16, PATHS[P_DUAL].mac, 6),
         "tx: beacon SA/BSSID use the path's own MAC");
   n = build_payload(P_AUTH, out, 5000);
-  CHECK(odid_decode_payload(out, n, &u) && odid_verify_auth(&u) == ODID_AUTH_ID_VALID, "tx: P_AUTH pack verifies id_valid");
+  CHECK(odid_decode_payload(out, n, &u) && odid_verify_auth(&u) == ODID_AUTH_TEST_KEY,
+        "tx: P_AUTH pack verifies under the published test key -> test_key, never id_valid");
   n = build_payload(P_AUTHBAD, out, 5000);
   CHECK(odid_decode_payload(out, n, &u) && odid_verify_auth(&u) == ODID_AUTH_INVALID, "tx: P_AUTHBAD pack verifies invalid");
 
@@ -182,24 +187,33 @@ static size_t count_in(const std::string& h, const char* needle) {
 static void test_rx(void) {
   odid_auth_init();
   rx_begin(nullptr);
+  // The app may attach after boot, so the capabilities ride on the boot line
+  // and on every fifth heartbeat.
+  CHECK(count_in(Serial.out, "\"type\":\"boot\"") == 1 && count_in(Serial.out, "\"caps\":[\"log\",\"log_since\",\"tfr\"") == 1,
+        "rx: the boot line carries the capabilities");
+  Serial.out.clear();
+  for (int i = 0; i < 5; i++) emit_heartbeat();
+  CHECK(count_in(Serial.out, "\"type\":\"hb\"") == 5 && count_in(Serial.out, "\"caps\":") == 1,
+        "rx: one heartbeat in five carries the capabilities");
   uint8_t pack[240];
   int n = build_signed(pack, false);
   memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
   feed(SRC_WIFI_BEACON, M1, pack, n);
-  CHECK(by_mac(M1) && by_mac(M1)->auth_state == ODID_AUTH_ID_VALID, "rx: signed pack in one frame -> id_valid");
-  CHECK(count_in(Serial.out, "\"state\":\"id_valid\"") == 1, "rx: JSON reports id_valid for the pack");
+  CHECK(by_mac(M1) && by_mac(M1)->auth_state == ODID_AUTH_TEST_KEY, "rx: signed pack in one frame -> test_key");
+  CHECK(count_in(Serial.out, "\"state\":\"test_key\"") == 1 && count_in(Serial.out, "id_valid") == 0,
+        "rx: JSON reports test_key for the pack, not id_valid");
 
   memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
   uint32_t pf = s_cnt_pfail;
   feed(SRC_BLE, M2, MSG(pack, 0), 25);                              // Basic ID alone
   for (int pg = 0; pg < 4; pg++) feed(SRC_BLE, M2, MSG(pack, 5 + pg), 25);  // one page per frame
   CHECK(s_cnt_pfail == pf, "rx: auth-only frames decode instead of counting as parse failures");
-  CHECK(by_mac(M2) && by_mac(M2)->auth_state == ODID_AUTH_ID_VALID, "rx: Basic ID + four single-message pages -> id_valid");
-  CHECK(count_in(Serial.out, "\"state\":\"partial\"") == 3 && count_in(Serial.out, "\"state\":\"id_valid\"") == 1,
-        "rx: JSON says partial three times, then id_valid");
+  CHECK(by_mac(M2) && by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: Basic ID + four single-message pages -> test_key");
+  CHECK(count_in(Serial.out, "\"state\":\"partial\"") == 3 && count_in(Serial.out, "\"state\":\"test_key\"") == 1,
+        "rx: JSON says partial three times, then test_key");
   feed(SRC_BLE, M2, MSG(pack, 1), 25);                              // Location alone
-  CHECK(by_mac(M2)->auth_state == ODID_AUTH_ID_VALID, "rx: a later Location frame keeps the verdict");
-  CHECK(count_in(Serial.out, "\"state\":\"id_valid\"") == 2, "rx: ...and its JSON line still carries it");
+  CHECK(by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: a later Location frame keeps the verdict");
+  CHECK(count_in(Serial.out, "\"state\":\"test_key\"") == 2, "rx: ...and its JSON line still carries it");
 
   memset(g_tracks, 0, sizeof g_tracks);
   n = build_signed(pack, true);
@@ -212,17 +226,17 @@ static void test_rx(void) {
   memset(g_tracks, 0, sizeof g_tracks); n = build_signed(pack, false, 100);
   feed(SRC_BLE, M2, MSG(pack, 0), 25);
   for (int pg = 0; pg < 4; pg++) feed(SRC_BLE, M2, MSG(pack, 5 + pg), 25);
-  CHECK(by_mac(M2)->auth_state == ODID_AUTH_ID_VALID, "rx: first set verifies");
+  CHECK(by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: first set verifies");
   uint8_t pack2[240]; build_signed(pack2, true, 200);            // second set: corrupted, page 0 last
   for (int pg = 1; pg < 4; pg++) feed(SRC_BLE, M2, MSG(pack2, 5 + pg), 25);
-  CHECK(by_mac(M2)->auth_state == ODID_AUTH_ID_VALID, "rx: the old verdict holds while the new set is incomplete");
+  CHECK(by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: the old verdict holds while the new set is incomplete");
   Serial.out.clear();
   feed(SRC_BLE, M2, MSG(pack2, 5), 25);
   CHECK(by_mac(M2)->auth_state == ODID_AUTH_INVALID && count_in(Serial.out, "\"state\":\"invalid\"") == 1, "rx: the late page 0 completes the new set, which fails as it should");
   uint8_t pack3[240]; build_signed(pack3, false, 300);            // third set: good again, page 0 last
   for (int pg = 1; pg < 4; pg++) feed(SRC_BLE, M2, MSG(pack3, 5 + pg), 25);
   feed(SRC_BLE, M2, MSG(pack3, 5), 25);
-  CHECK(by_mac(M2)->auth_state == ODID_AUTH_ID_VALID, "rx: and a good set after a bad one clears it");
+  CHECK(by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: and a good set after a bad one clears it");
 
   memset(g_tracks, 0, sizeof g_tracks);
   n = build_signed(pack, false);
@@ -313,11 +327,11 @@ static void test_json_and_log(void) {
       bool zero = true; for (const char* c = want + 1; *c; c++) if (*c != '0' && *c != '.') zero = false;
       if (zero) memmove(want, want + 1, strlen(want));
     }
-    jbegin(s_jb, sizeof s_jb); jfix(v, d); *s_jp = 0;
+    jbegin(s_jb, JLINE_MAX); jfix(v, d); *s_jp = 0;
     if (strcmp(s_jb, want)) { printf("     jfix(%g, %d) = %s, printf %s\n", v, d, s_jb, want); same = false; }
   }
   CHECK(same, "json: fixed-point numbers match printf");
-  jbegin(s_jb, sizeof s_jb); jfix(NAN, 2); *s_jp = 0;
+  jbegin(s_jb, JLINE_MAX); jfix(NAN, 2); *s_jp = 0;
   CHECK(!strcmp(s_jb, "null"), "json: a non-finite number is null, not nan");
 
   uint8_t pack[240];
@@ -359,7 +373,7 @@ static void test_json_and_log(void) {
   s_rx_now += LOG_SAVE_MS + 1;
   rx_tick(s_rx_now);                              // debounced save
   CHECK(!s_log_dirty, "log: saved to NVS after it settles");
-  memset(s_log, 0, sizeof s_log); s_log_n = 0; s_log_head = 0; s_log_total = 0;
+  memset(s_log, 0, LOG_BYTES); s_log_n = 0; s_log_head = 0; s_log_total = 0;
   log_load();
   CHECK(s_log_n == 1 && !strcmp(log_at(0)->uas, "ORECCHINO-TX-AUTH"), "log: a reload restores it");
 
@@ -376,6 +390,8 @@ static void test_json_and_log(void) {
   CHECK(count_in(Serial.out, "\"type\":\"log\"") == 3 + TRK_MAX && count_in(Serial.out, "\"active\":true") == TRK_MAX &&
         Serial.out.find("\"type\":\"log_done\",\"n\":3,\"live\":16") != std::string::npos,
         "log: log_get sends every record, the live contacts, then log_done");
+  CHECK(count_in(Serial.out, "\"seq\":null") == TRK_MAX && json_has("\"next\":3,") && json_has("\"oldest\":0}"),
+        "log: live contacts carry no seq, and next counts only ended records");
   CHECK(Serial.out.find("\"uas\":\"ORECCHINO-TX-AUTH\"") != std::string::npos && Serial.out.find("\"clock\":true") != std::string::npos,
         "log: records carry the ID, and log_done says the clock is set");
   Serial.out.clear();
@@ -384,12 +400,348 @@ static void test_json_and_log(void) {
   CHECK(s_log_n == 0 && Serial.out.find("log_cleared") != std::string::npos, "log: log_clear empties it and says so");
 }
 
+// ------------------------------------------------ host link: USB and BLE
+
+static size_t tx_count_in(const char* needle) {
+  size_t n = 0;
+  for (auto& l : ble_link_test_get_tx()) n += count_in(l, needle);
+  return n;
+}
+static void ble_cmd(const char* line) {
+  ble_link_test_inject_rx(line, strlen(line));
+}
+
+static void test_host_link_and_ble(void) {
+  // rx_begin (test_rx) registered the BLE sink; a second init -- the old
+  // test did one -- must not register it twice and deliver every line twice.
+  ble_link_init("host-test", RX_CAPS);
+  CHECK(s_host_sink_count == 1, "ble: the sink is registered once however often init runs");
+  ble_link_test_set_connected(true);
+  ble_link_test_set_subscribed(true);
+  ble_link_test_set_encrypted(true);
+  ble_link_test_clear_tx();
+  Serial.out.clear();
+
+  // A received line is queued, not run on the BLE task: nothing happens
+  // until the loop's rx_tick drains it.
+  ble_cmd("{\"cmd\":\"feed\",\"on\":false}\n");
+  CHECK(ble_link_test_get_tx().empty() && Serial.out.empty(), "ble: a received command waits for the loop");
+  ble_link_poll(s_rx_now);
+  CHECK(Serial.out.find("feed_status") == std::string::npos, "ble: BLE command reply does not leak to Serial");
+  CHECK(ble_link_test_get_tx().size() == 1 && tx_count_in("\"feed_status\"") == 1 && tx_count_in("\"on\":false") == 1,
+        "ble: exactly one feed_status reply, to BLE");
+
+  // With the feed off, broadcasts of the feed go to Serial only.
+  ble_link_test_clear_tx(); Serial.out.clear();
+  host_printf("{\"type\":\"rid\",\"uas\":\"TEST-UAS\"}\n");
+  host_printf("{\"type\":\"hb\",\"up\":1}\n");
+  CHECK(count_in(Serial.out, "\"type\":\"rid\"") == 1 && count_in(Serial.out, "\"type\":\"hb\"") == 1,
+        "feed: Serial receives rid and hb broadcasts");
+  CHECK(ble_link_test_get_tx().empty(), "feed: BLE receives neither while its feed is off");
+
+  // A BLE log_get answers BLE alone, while a frame decoded in the same pass
+  // still goes out on Serial: the reply's destination is the command's, not
+  // a global the decode path could read.
+  ble_link_test_clear_tx(); Serial.out.clear();
+  uint8_t pack[240]; build_signed(pack, false);
+  ble_cmd("{\"cmd\":\"log_get\"}\n");
+  feed(SRC_WIFI_BEACON, M3, MSG(pack, 1), 25);
+  const auto& tx = ble_link_test_get_tx();
+  CHECK(count_in(Serial.out, "\"type\":\"rid\"") == 1 && Serial.out.find("log_done") == std::string::npos,
+        "route: the rid line reaches Serial, the log reply does not");
+  CHECK(!tx.empty() && tx.back().find("\"type\":\"log_done\"") != std::string::npos && tx_count_in("log_done") == 1 &&
+        tx_count_in("\"type\":\"rid\"") == 0, "route: BLE gets the log records then one log_done, and no rid");
+  bool all_log = true;
+  for (size_t i = 0; i + 1 < tx.size(); i++) if (tx[i].find("\"type\":\"log\"") == std::string::npos) all_log = false;
+  CHECK(all_log, "route: every BLE line before log_done is a log record, in order, none twice");
+
+  // Feed on: each rid broadcast reaches BLE exactly once.
+  ble_cmd("{\"cmd\":\"feed\",\"on\":true}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(host_get_feed(SRC_BLE_BONDED) == true, "feed: BLE feed is now on");
+  ble_link_test_clear_tx();
+  host_printf("{\"type\":\"rid\",\"uas\":\"TEST-UAS\"}\n");
+  CHECK(ble_link_test_get_tx().size() == 1, "feed: BLE receives one rid broadcast when its feed is on");
+
+  // A peer that cannot keep up loses feed lines, never replies or records.
+  ble_link_test_clear_tx();
+  ble_link_test_set_feed_room(1);
+  uint32_t drops0 = ble_link_drops();
+  host_printf("{\"type\":\"rid\",\"uas\":\"A\"}\n");
+  host_printf("{\"type\":\"rid\",\"uas\":\"B\"}\n");
+  ble_cmd("{\"cmd\":\"log_get\"}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(tx_count_in("\"type\":\"rid\"") == 1 && ble_link_drops() == drops0 + 1, "ble: a full link drops the second rid line");
+  CHECK(tx_count_in("log_done") == 1, "ble: ...but still delivers the log reply");
+  ble_link_test_set_feed_room(SIZE_MAX);
+
+  // Nothing reaches a link that is not encrypted; a disconnect forgets the feed.
+  ble_link_test_clear_tx();
+  ble_link_test_set_encrypted(false);
+  host_printf("{\"type\":\"boot\",\"fw\":\"x\"}\n");
+  host_printf("{\"type\":\"rid\",\"uas\":\"TEST-UAS\"}\n");
+  CHECK(ble_link_test_get_tx().empty(), "ble: an unencrypted peer receives nothing");
+  ble_link_test_set_connected(false);
+  CHECK(!host_get_feed(SRC_BLE_BONDED), "ble: a disconnect turns the feed off for the next peer");
+  ble_link_test_set_connected(true); ble_link_test_set_subscribed(true); ble_link_test_set_encrypted(true);
+  host_printf("{\"type\":\"rid\",\"uas\":\"TEST-UAS\"}\n");
+  CHECK(ble_link_test_get_tx().empty(), "ble: ...so a new peer gets no rid until it asks");
+
+  // Location push over BLE updates home location
+  ble_cmd("{\"cmd\":\"set_home\",\"lat\":37.7749,\"lon\":-122.4194,\"alt\":15.0,\"acc\":3.5,\"src\":\"ble\"}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(fabs(g_home_lat - 37.7749) < 0.0001 && fabs(g_home_lon - (-122.4194)) < 0.0001,
+        "home: location push updates coordinates");
+  CHECK(fabs(g_home_acc - 3.5f) < 0.01f && !strcmp(g_home_src, "ble"),
+        "home: accuracy and source set");
+
+  // Channel hop hold
+  rx_hop_hold(true);
+  CHECK(rx_hop_is_held(), "hop: channel hop held when set");
+  rx_hop_hold(false);
+  CHECK(!rx_hop_is_held(), "hop: channel hop hold cleared");
+  ble_link_test_set_connected(false);
+}
+
+// ------------------------------------------------ what a host may not do
+
+static void serial_cmd(const char* line) {
+  Serial.in = line; Serial.in_pos = 0;
+  rx_tick(s_rx_now);
+}
+
+static void test_host_input_limits(void) {
+  // host_printf: a line longer than its buffer is dropped whole (it used to
+  // be sent with vsnprintf's wanted length: a read past the buffer).
+  Serial.out.clear();
+  std::string big(3000, 'x');
+  host_printf("{\"type\":\"x\",\"s\":\"%s\"}\n", big.c_str());
+  CHECK(Serial.out.empty(), "limits: an over-long host_printf line is dropped, not over-read");
+
+  // set_time: 0, negative, before 2024, past uint32, NaN all refused.
+  uint32_t before = s_utc_at_boot;
+  const char* bad_times[] = { "0", "-5", "1000000", "1e20", "nan" };
+  for (const char* v : bad_times) {
+    char l[80]; snprintf(l, sizeof l, "{\"cmd\":\"set_time\",\"utc\":%s}\n", v);
+    serial_cmd(l);
+  }
+  CHECK(s_utc_at_boot == before, "limits: set_time refuses 0, negative, pre-2024, huge and NaN");
+  serial_cmd("{\"cmd\":\"set_time\",\"utc\":1790000000}\n");
+  CHECK(log_utc(s_rx_now) == 1790000000, "limits: ...and takes a real time");
+
+  // set_home: out of range or NaN leaves home alone.
+  double lat0 = g_home_lat, lon0 = g_home_lon;
+  serial_cmd("{\"cmd\":\"set_home\",\"lat\":91,\"lon\":10}\n");
+  serial_cmd("{\"cmd\":\"set_home\",\"lat\":nan,\"lon\":10}\n");
+  serial_cmd("{\"cmd\":\"set_home\",\"lat\":10,\"lon\":-181}\n");
+  serial_cmd("{\"cmd\":\"set_home\",\"lat\":10}\n");
+  CHECK(g_home_lat == lat0 && g_home_lon == lon0, "limits: set_home ignores NaN, out-of-range and half positions");
+
+  // log_get: a cursor past 2^32 is clamped, not undefined behaviour.
+  Serial.out.clear();
+  serial_cmd("{\"cmd\":\"log_get\",\"since\":1e30,\"after_utc\":-4}\n");
+  CHECK(json_has("\"type\":\"log_done\""), "limits: log_get with an absurd cursor still answers");
+
+  // Tile paths: only /tiles/<z>/<x>/<y>.png may be written.
+  CHECK(tile_path_ok("/tiles/14/2620/6332.png") && tile_path_ok("/tiles/0/0/0.png"), "tiles: z/x/y.png accepted");
+  const char* bad_paths[] = { "/tiles/../log/x", "/tiles/14/2620/../../x.png", "/tiles/14/2620/6332.png.bak",
+                              "/tiles/123/1/1.png", "/tilesX/1/1/1.png", "/tiles/1/1/1.png/", "/tiles/a/1/1.png",
+                              "/tiles/1/1/.png", "tiles/1/1/1.png", "/log/records.bin", "" };
+  bool none = true;
+  for (const char* p : bad_paths) if (tile_path_ok(p)) { printf("     accepted %s\n", p); none = false; }
+  CHECK(none, "tiles: traversal, extra suffixes and non-digits refused for writing");
+  CHECK(tile_rm_path_ok("/tiles/14/2620/6332.png") && tile_rm_path_ok("/tiles/.DS_Store"),
+        "tiles: a stray file inside /tiles may be removed");
+  CHECK(!tile_rm_path_ok("/tiles/../log/records.bin") && !tile_rm_path_ok("/tiles/14/../../x") &&
+        !tile_rm_path_ok("/tiles//x") && !tile_rm_path_ok("/tiles/") && !tile_rm_path_ok("/tiles/a b") &&
+        !tile_rm_path_ok("/tiles/14/.."), "tiles: ...but nothing that climbs out");
+  CHECK(tile_bytes_needed(20000, 6u << 20) == 20000 + TILE_FS_MARGIN, "tiles: a tile needs its size plus the margin");
+  CHECK(tile_bytes_needed(0, 6u << 20) == 0 && tile_bytes_needed(TILE_FILE_MAX + 1, 6u << 20) == 0 &&
+        tile_bytes_needed(UINT32_MAX, 6u << 20) == 0 && tile_bytes_needed(200000, 100000) == 0,
+        "tiles: empty, huge, 4 GB and larger-than-the-disk files refused (no wrap, no evict-all)");
+}
+
+// ------------------------------------------------ timestamps across tasks
+
+static void test_wrap(void) {
+  // The decode task stamps with its own millis(), which can be newer than
+  // the `now` the loop read at the top of its pass.
+  memset(g_tracks, 0, sizeof g_tracks);
+  bool c;
+  tracker_upsert(M1, "W", 50000, &c);
+  CHECK(tracker_expire(49990) == 0 && tracker_count() == 1, "wrap: a contact stamped after the loop's now is not expired");
+  CHECK(tracker_expire(50000 + TRK_EXPIRE_MS + 1) == 1, "wrap: ...and still expires on time");
+  Track t; memset(&t, 0, sizeof t); t.used = true; t.last_ms = 70000;
+  CHECK(!ui_stale(&t, 69990) && ui_stale(&t, 70000 + UI_ACTIVE_MS + 1), "wrap: ui_stale is not fooled either");
+  bool dirty = s_log_dirty; uint32_t dms = s_log_dirty_ms;
+  s_log_dirty = true; s_log_dirty_ms = 80000;
+  CHECK(!log_due(79990) && log_due(80000 + LOG_SAVE_MS), "wrap: a log save stamped after now is not overdue");
+  s_log_dirty = dirty; s_log_dirty_ms = dms;
+}
+
+// ------------------------------------------------ match log sync protocol
+
+static void end_contact(const uint8_t* mac, const char* id) {
+  bool c;
+  RX_LOCK();
+  Track* t = tracker_upsert(mac, id, s_rx_now, &c);
+  trk_on_end(t);
+  t->used = false;
+  RX_UNLOCK();
+}
+static std::string log_get(const char* args) {
+  Serial.out.clear();
+  char l[128]; snprintf(l, sizeof l, "{\"cmd\":\"log_get\"%s}\n", args);
+  serial_cmd(l);
+  return Serial.out;
+}
+
+static void test_log_sync(void) {
+  log_clear();
+  memset(g_tracks, 0, sizeof g_tracks);
+  serial_cmd("{\"cmd\":\"set_time\",\"utc\":1790000000}\n");
+  end_contact(M1, "SEQ-0");
+  end_contact(M2, "SEQ-1");
+  s_rx_now += 100000;
+  end_contact(M3, "SEQ-2");
+  bool c; tracker_upsert(M1, "LIVE", s_rx_now, &c);   // one contact still in the table
+
+  std::string o = log_get("");
+  CHECK(json_has("\"seq\":0,") && json_has("\"seq\":1,") && json_has("\"seq\":2,") && count_in(o, "\"seq\":null") == 1,
+        "sync: ended records are numbered 0..2, the live contact is not");
+  CHECK(json_has("\"total\":3,") && json_has("\"next\":3,") && json_has("\"oldest\":0}") && json_has("\"live\":1,"),
+        "sync: log_done says next = total = 3 (live not counted), oldest 0");
+
+  o = log_get(",\"since\":2");
+  CHECK(count_in(o, "\"type\":\"log\"") == 2 && json_has("\"uas\":\"SEQ-2\"") && json_has("\"uas\":\"LIVE\"") &&
+        !json_has("SEQ-1"), "sync: since=2 sends record 2 and the live contact");
+  o = log_get(",\"since\":3");
+  CHECK(count_in(o, "\"type\":\"log\"") == 1 && json_has("\"uas\":\"LIVE\""), "sync: since=next sends only what is live");
+
+  // The live contact ends: the client's cursor (3) picks up its final record.
+  RX_LOCK();
+  for (int i = 0; i < TRK_MAX; i++) if (g_trk_live[i].used) { trk_on_end(&g_trk_live[i]); g_trk_live[i].used = false; }
+  RX_UNLOCK();
+  o = log_get(",\"since\":3");
+  CHECK(count_in(o, "\"type\":\"log\"") == 1 && json_has("\"seq\":3,") && json_has("\"uas\":\"LIVE\"") &&
+        json_has("\"next\":4,"), "sync: once it ends, the next sync gets it with seq 3");
+
+  // after_utc: only records last heard at or after that second.
+  uint32_t cut = log_at(2)->last_utc;
+  o = log_get((",\"after_utc\":" + std::to_string(cut)).c_str());
+  CHECK(!json_has("SEQ-0") && !json_has("SEQ-1") && json_has("SEQ-2") && json_has("\"uas\":\"LIVE\""),
+        "sync: after_utc drops records heard before it");
+
+  // More than the ring holds: oldest moves up with the rotation.
+  for (int i = 0; i < LOG_MAX; i++) { uint8_t m[6] = {2, 0, 0, 0, 0x20, (uint8_t)i}; end_contact(m, nullptr); }
+  o = log_get(",\"since\":0");
+  char want[48]; snprintf(want, sizeof want, "\"oldest\":%u}", (unsigned)(s_log_total - LOG_MAX));
+  CHECK(json_has(want) && count_in(o, "\"type\":\"log\"") == LOG_MAX, "sync: oldest = total - LOG_MAX once the ring has rotated");
+
+  // An explicit flush saves at once (power-off, mode switch).
+  end_contact(M2, "FLUSH");
+  CHECK(s_log_dirty, "flush: a new record is pending");
+  rx_log_flush();
+  memset(s_log, 0, LOG_BYTES); s_log_n = 0; s_log_head = 0; s_log_total = 0;
+  log_load();
+  CHECK(!s_log_dirty && s_log_n == LOG_MAX && !strcmp(log_at(LOG_MAX - 1)->uas, "FLUSH"), "flush: rx_log_flush writes it to NVS");
+
+  // v1 migration: numbers follow history order, not ring slots.
+  {
+    std::vector<LogRecV1> v1(LOG_MAX);
+    memset(v1.data(), 0, sizeof(LogRecV1) * LOG_MAX);
+    const int head = 5, n = 10; const uint32_t total = 100;
+    for (int k = 0; k < n; k++) snprintf(v1[(head - n + k + LOG_MAX) % LOG_MAX].uas, 24, "V1-%d", k);
+    Preferences p; p.begin("orlog", false);
+    p.putUChar("ver", 1); p.putBytes("recs", v1.data(), sizeof(LogRecV1) * LOG_MAX);
+    p.putUChar("head", head); p.putUChar("n", n); p.putULong("total", total); p.end();
+    log_load();
+    bool ok = s_log_n == n && s_log_total == total;
+    for (int k = 0; k < n && ok; k++) {
+      char id[8]; snprintf(id, sizeof id, "V1-%d", k);
+      if (log_at(k)->seq != total - n + (uint32_t)k || strcmp(log_at(k)->uas, id)) ok = false;
+    }
+    CHECK(ok, "log: v1 records migrate with seq = total - n + k, oldest first");
+  }
+  log_clear();
+  s_rx_now += LOG_SAVE_MS + 1;
+  rx_tick(s_rx_now);   // the clear reaches NVS
+}
+
+// ------------------------------------------------ encoder limits, IDs, keys
+
+static void test_odid_extras(void) {
+  OdidTxState st; memset(&st, 0, sizeof st);
+  st.uas_id = "X"; st.proto_ver = 2; st.lat = 37.8; st.lon = -122.4; st.alt_geo_m = 100; st.height_m = 50;
+  uint8_t m[25]; OdidUas u;
+  st.vspeed_ms = 70;
+  odid_build_location(m, &st);
+  memset(&u, 0, sizeof u); odid_decode_msg(m, &u);
+  bool up = fabsf(u.vspeed - 62.0f) < 0.01f;
+  st.vspeed_ms = -70;
+  odid_build_location(m, &st);
+  memset(&u, 0, sizeof u); odid_decode_msg(m, &u);
+  CHECK(up && fabsf(u.vspeed + 62.0f) < 0.01f, "odid: vertical speed beyond 62 m/s is clamped, not wrapped");
+  CHECK((m[20] >> 4) == 0, "odid: baro accuracy unknown while baro altitude is");
+
+  // Wall-clock timestamps once the clock is set.
+  s_tx_test_utc = 1790000000;
+  uint8_t out[240];
+  int n = build_payload(P_AUTH, out, 5000);
+  memset(&u, 0, sizeof u);
+  bool dec = odid_decode_payload(out, n, &u);
+  CHECK(dec && u.has_sys && u.sys_ts == 1790000000u - 1546300800u, "tx: System timestamp is wall-clock seconds since 2019");
+  CHECK(dec && u.auth_ts == 1790000000u - 1546300800u && odid_verify_auth(&u) == ODID_AUTH_TEST_KEY,
+        "tx: ...and so is the signed Authentication timestamp, which still verifies");
+  s_tx_test_utc = 0;
+
+  // Specific Session ID (type 4) is binary: hex, all 20 bytes.
+  memset(m, 0, sizeof m);
+  m[0] = 0x02; m[1] = (4 << 4) | 2;
+  for (int i = 0; i < 20; i++) m[2 + i] = (uint8_t)(i == 3 ? 0 : 0xA0 + i);
+  memset(&u, 0, sizeof u); odid_decode_msg(m, &u);
+  CHECK(strlen(u.uas_id[0]) == 40 && !strncmp(u.uas_id[0], "a0a1a200a4", 10), "odid: session ID decodes to 40 hex digits, NUL and all");
+
+  CHECK(!strcmp(odid_auth_state_name(ODID_AUTH_TEST_KEY), "test_key") && !strcmp(track_auth_badge(ODID_AUTH_TEST_KEY), "TEST") &&
+        strstr(ui_auth_text(ODID_AUTH_TEST_KEY), "TEST KEY") && ui_auth_color(ODID_AUTH_TEST_KEY) == C_MUTED,
+        "auth: the test key has its own neutral name, badge and colour");
+}
+
+// Home survives a reboot; NVS is written on the first fix and after a move
+// of more than 500 m, at most every 10 minutes.
+static void test_home_persist(void) {
+  shim_nvs().erase("orhome/lat"); shim_nvs().erase("orhome/lon");
+  s_home_saved_lat = NAN; s_home_saved_lon = NAN; s_home_saved_recent = false;
+  g_millis = 1000000;
+  rx_set_home(37.80, -122.46, "app");
+  Preferences p; p.begin("orhome", true);
+  CHECK(p.getDouble("lat", 0) == 37.80 && p.getDouble("lon", 0) == -122.46, "home: the first fix is saved");
+  rx_set_home(37.801, -122.46, "gps");                       // ~110 m away
+  CHECK(p.getDouble("lat", 0) == 37.80, "home: a move under 500 m is not written");
+  g_millis += 60000; rx_set_home(37.81, -122.46, "gps");     // ~1.1 km, a minute later
+  CHECK(p.getDouble("lat", 0) == 37.80, "home: a big move within 10 minutes waits");
+  g_millis += 600000; rx_set_home(37.81, -122.46, "gps");
+  CHECK(p.getDouble("lat", 0) == 37.81, "home: a big move after 10 minutes is written");
+  g_home_set = false; g_home_lat = g_home_lon = 0;
+  home_load();
+  CHECK(g_home_set && g_home_lat == 37.81 && g_home_lon == -122.46 && strcmp(g_home_src, "saved") == 0,
+        "home: a reboot restores the saved home, marked saved");
+  rx_set_home(37.811, 179.9999, "gps"); rx_set_home(37.811, -179.9999, "gps");
+  CHECK(g_home_lon == -179.9999, "home: the antimeridian is not a 36,000 km move");
+}
+
 int main(void) {
   test_tracker();
   test_tx();
   test_rx();
   test_sniffer();
   test_json_and_log();
+  test_host_link_and_ble();
+  test_host_input_limits();
+  test_wrap();
+  test_log_sync();
+  test_odid_extras();
+  test_home_persist();
   if (g_fails) printf("%d FAILED\n", g_fails); else printf("all core checks passed\n");
   return g_fails ? 1 : 0;
 }

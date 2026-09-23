@@ -12,6 +12,9 @@
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 
+// From the receiver core (rx_core.h, in the sketch's translation unit).
+void rx_log_flush();
+
 #define W 320
 #define H 170
 #define TOP 21
@@ -93,7 +96,7 @@ static bool   s_cc_ok = false;
 void ui_feed_wifi(uint8_t chan, int8_t rssi) {
   if (!s_spec_on || chan < 1 || chan > N_CH) return;
   s_wsum[chan] += rssi;
-  s_wcnt[chan]++;
+  s_wcnt[chan] += 1;
 }
 void ui_set_wifi_channel(uint8_t chan) { s_dwell = chan; }
 bool ui_spectrum_active() { return s_spec_on; }
@@ -534,6 +537,7 @@ static void draw_tx() {
 }
 
 void tembed_power_off() {
+  rx_log_flush();   // the match log saves every 10 min; don't lose the rest
   s_cv->fillScreen(C_BG);
   bold(W / 2 - 45, H / 2 - 8, C_TEXT, "POWER OFF");
   small(W / 2 - 65, H / 2 + 14, C_MUTED, "Side button to wake");
@@ -549,12 +553,16 @@ void tembed_power_off() {
 
   // Configure wakeups on side key (GPIO 6) and encoder push (GPIO 0)
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_USER_KEY, 0);
-  esp_sleep_enable_ext1_wakeup((1ULL << PIN_USER_KEY) | (1ULL << PIN_ENC_KEY), ESP_EXT1_WAKEUP_ALL_LOW);
+  esp_sleep_enable_ext1_wakeup((1ULL << PIN_USER_KEY) | (1ULL << PIN_ENC_KEY), ESP_EXT1_WAKEUP_ANY_LOW);
 
   esp_deep_sleep_start();
 }
 
 // ---- mode menu (from either mode; hold the knob to open)
+// Rows of MENU_RH: a 9 pt name above a 6 px subtitle, both inside the
+// selection box (y .. y + MENU_RH - 2), clear of its top and bottom edges.
+#define MENU_RH 29
+#define MENU_Y(i) (TOP + 2 + (i) * MENU_RH)
 static void draw_menu() {
   s_cv->fillScreen(C_BG);
   s_cv->fillRect(0, 0, W, TOP, C_BAR);
@@ -562,14 +570,13 @@ static void draw_menu() {
   char bl[24]; snprintf(bl, sizeof(bl), "Brightness  %s", s_bl == 0 ? "100%" : s_bl == 1 ? "43%" : "25%");
   const char* names[5] = { "Receiver", "Test beacon (TX)", bl, "Power Off", "Back" };
   const char* subs[5]  = { "listen for Remote ID", "transmit test signals", "click to cycle", "deep sleep (side btn wakes)", "return to the screen" };
-  const int RH = 28;
   for (int i = 0; i < 5; i++) {
-    int y = TOP + 2 + i * RH;
+    int y = MENU_Y(i);
     bool sel = i == s_menu_sel, cur = i < 2 && i == s_mode;
-    if (sel) { s_cv->fillRoundRect(6, y, W - 12, RH - 2, 5, C_BAR); s_cv->drawRoundRect(6, y, W - 12, RH - 2, 5, C_ACCENT); }
+    if (sel) { s_cv->fillRoundRect(6, y, W - 12, MENU_RH - 1, 5, C_BAR); s_cv->drawRoundRect(6, y, W - 12, MENU_RH - 1, 5, C_ACCENT); }
     bold(18, y + 14, sel ? C_TEXT : C_MUTED, names[i]);
-    small(18, y + 21, C_MUTED, subs[i]);
-    if (cur) small(W - 62, y + 12, C_OK, "current");
+    small(18, y + 19, C_MUTED, subs[i]);
+    if (cur) small(W - 62, y + 8, C_OK, "current");
   }
   draw_bl_toast();
   present();

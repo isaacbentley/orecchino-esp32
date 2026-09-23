@@ -54,6 +54,8 @@ bool periph_gauge_configured();
 bool periph_gps_detected();        // true when valid NMEA sentences received on UART1
 bool periph_gps_fix();
 int  periph_gps_sats();
+/// Height above the WGS-84 ellipsoid from the last GGA fix, NAN without a fix.
+float periph_gps_elev_m();
 
 enum BlMode : uint8_t { BL_AUTO = 0, BL_ON = 1, BL_OFF = 2 };
 
@@ -63,6 +65,9 @@ BlMode  periph_bl_get_mode();
 void    periph_bl_set_duty(uint8_t duty);
 uint8_t periph_bl_get_duty();
 bool    periph_bl_is_active();
+/// Flash the front light `times` times at full brightness (a new traffic
+/// warning), whatever the mode and the time of day; nothing is saved.
+void    periph_bl_pulse(uint8_t times);
 bool    periph_is_after_sundown();
 double  periph_sun_elevation();
 bool    periph_has_utc_time();

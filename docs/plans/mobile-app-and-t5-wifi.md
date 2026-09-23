@@ -1,6 +1,9 @@
 # Plan: Orecchino mobile app (iOS + Android) and T5 Wi-Fi
 
-Status: proposed, not started. Written 2026-09-23 against commit `5f03ffc`.
+Status: largely built (see section 0). Written 2026-09-23 against commit
+`5f03ffc`; section 0 records what was built, where it differs from the
+text below, and what is left. Where the two disagree, the code and section
+0 are right; the rest of the plan is kept as the design it was built from.
 Audience: an engineer or LLM who will build this without the conversation
 that produced it. Everything needed is in this file or in the repository;
 where a fact was not verified, it says so.
@@ -22,7 +25,97 @@ Read first: `README.md` (what every board does), `firmware/common/rx_core.h`
 
 ---
 
+## 0. Status (updated 2026-09-23)
+
+| Milestone | State | Where |
+| --- | --- | --- |
+| M1 BLE link | Built | `host_link.h` (routing, `HostSrc`, feed), `ble_link.h` (NUS + info service, pairing, rings, notify task, fake transport for host tests); `feed` / `feed_status`; `ble_drop`, `ble_rx_drop` in `hb`; T5 passkey screen (`rx_hook_pairing`) |
+| M2 History, incremental | Built, differently | Still the 48-record NVS ring (`match_log.h`), now with a `seq` per record (`LOG_VERSION` 2, v1 converted on load); `log_get` `since` / `after_utc`, `log_done` `next` / `oldest`; no LittleFS log (below) |
+| M3-M4 Phone app | Built | `mobile/` (see `mobile/README.md`, including its follow-ups) |
+| M5 T5 Wi-Fi core | Built | `net_sync.h` (state machine, modes, `wifi_*` commands), `net_fetch.h` (HTTPS jobs on a worker task), `net_parse.h` (streaming parsers, URLs), `rx_hop_hold()` in `rx_core.h`; host tests `tests/net_test.cpp` |
+| M6 T5 Wi-Fi UI | Built | WI-FI section on SYSTEM, networks screen, keyboard, joining/result screens in `ui_epd.cpp`; render scenes in `tests/t5_render_test.cpp` |
+| M7 ADS-B and tiles on the T5 | Built | ADS-B through `net_fetch.h` + `traffic.h` (no separate `adsb.h`); tile fetch in `net_fetch.h` (no `tile_fetch.h`) |
+| M8 App polish and release | Partly | Notifications, Wi-Fi over BLE, accessibility done; store metadata, TestFlight / Play track, export and the history timeline not done |
+| M9 Traffic alerts | Built, on the T5 only among boards | `traffic.h` + `tests/vectors/traffic/` + `tests/traffic_test.cpp`; `TrafficRules.swift`, `traffic_rules.dart`; T5 drawing; Mac app (`TrafficService.swift`, `TrafficNotifier.swift`, `TrafficViews.swift`, menu bar extra) |
+
+The hardware acceptance tests (B1-B4, the M4-M7 and M9 field tests) are
+not recorded in the repository.
+
+**Changed from the plan while building it:**
+
+- **No LittleFS match log** (section 3.4's LittleFS log was not
+  written). The NVS ring of 48 kept its size, gained a `seq`, and is saved
+  at most every 10 minutes (was once a minute) plus at the explicit save
+  points (T5 power-off, mode switch), to spare the flash. The incremental
+  protocol (`since`, `after_utc`, `seq`, `next`, `oldest`) is as planned;
+  live contacts are sent with `"active":true,"seq":null`, and a cursor
+  above `total` means the log was cleared. The home position is saved in
+  NVS too (`orhome`, source `"saved"` until a fresh one arrives).
+- **Fixed, published passkey.** Every board pairs with passkey 123456
+  (DisplayOnly IO capability; the T5 shows it, the others do not need to).
+  It encrypts the link against passers-by, not a determined attacker, and
+  the T5's pairing screen says so. A peer that has not paired within 10 s
+  is dropped. The headless stick does not use Just Works with a 2-minute
+  window, and there is no "Forget phones" item yet.
+- **TFR limits unchanged** (16 polygons x 24 points). Instead of raising
+  them, the Mac (`TFRShape.swift`) and the T5 (`net_poly_fit`) send the 16
+  nearest TFRs, each as a polygon of at most 24 points that *encloses* the
+  real outline (erring outward, never cutting inside).
+- **No ArduinoJson.** The T5 parses the FAA and adsb.lol answers with a
+  streaming splitter (`NetJsonSplit`, one object at a time in a 16 KB PSRAM
+  buffer) and small field readers; SNTP is a plain UDP query.
+- **The FAA WFS bbox is lon0,lat0,lon1,lat1** (section 4.1 fixed): the
+  lat-first order returns an ORA-13200 error page. **adsb.lol's radius is
+  in nautical miles**, verified; the T5 and the Mac ask for 17 NM (31.5 km,
+  just over the rules' 30 km horizon).
+- **TLS memory.** Every HTTPS request first checks the internal heap (at
+  least 40 KB free and an 18 KB block, `NET_TLS_MIN_FREE` /
+  `NET_TLS_MIN_BLOCK`); below that the job fails with "low memory" in
+  words. The `synced` status line reports `heap_int`, `heap_blk` and
+  `heap_tls`.
+- **Wi-Fi mode default is SYNC**, not Off, but nothing joins until a
+  network is saved (the SYSTEM line reads `NOT SET UP, no network saved`).
+  The window scans only when two or more networks are saved. Up to 8 new
+  tiles per automatic window; UPDATE MAP fetches all missing ones.
+  `firmware/common/wifi_secrets.h` (git-ignored; copy
+  `wifi_secrets.example.h`) can supply a development network.
+- **Wi-Fi commands over USB** are refused unless the SYSTEM screen's Wi-Fi
+  setup was opened in the last 5 minutes (`net_serial_setup`), or the
+  build sets `-DNET_SERIAL_PROVISIONING=1`. Refusals are `wifi_err` lines.
+- **Keyboard**: five rows of 84x60 px keys with digits always on top, SHIFT
+  (once for one capital, twice for caps lock) and a `#+=` symbol layer,
+  rather than four rows with a separate 123 layer.
+- **Traffic rules, choices §8 left open** (all documented at the top of
+  `traffic.h` and pinned by the vectors): aircraft reported on the ground
+  (`"alt_baro":"ground"`, wire `"gnd":1`) never raise LOW or CONVERGING;
+  one within 1 km of a drone is raised as a *caution* with the words
+  `, AIRCRAFT ON GROUND`, not a warning; emergencies are still raised.
+  The count shown on every surface (`near_count`) is **airborne** aircraft
+  within 3 km; ground ones are counted separately. If NEAR and CONVERGING
+  both hold, the pair shows NEAR. Hysteresis runs on the wall clock (20 s
+  outside 1.3 km / 200 m), never on evaluation counts.
+- **`traffic` lines** carry a top-level `t` and `age_s`, and each set ends
+  with `traffic_done` (which installs an empty set when no lines came
+  before it). Only boards built with `ORECCHINO_TRAFFIC` take them (the
+  T5, which lists `traffic` in its `caps`); the T-Embed and SenseCAP do
+  not have traffic alerts yet.
+- **Signed with the test key** is its own authentication state, `test_key`
+  (shown `TEST KEY`), not `id_valid`; `-DORECCHINO_TRUST_TEST_KEY` restores
+  the old behaviour for UI testing.
+- **Header position source**: the T5 still shows `APP POS` for a position
+  from either app (or the saved one); `PHONE POS` was not added, and a GPS
+  fix and an app's `set_home` simply overwrite each other (no 2-minute
+  preference for GPS).
+
+**Left to do:** "Forget phones" on each board; traffic on the T-Embed and
+SenseCAP; the phone app's follow-ups (`mobile/README.md`); NVS encryption
+for saved Wi-Fi passwords; the hardware acceptance runs.
+
+---
+
 ## 1. Ground truth about the existing system
+
+(As of `5f03ffc`, before this plan was built; section 0 says what changed.)
 
 These are facts about the code as it stands. Do not re-derive them; do not
 break them.
@@ -141,7 +234,7 @@ the app can recognise a board before subscribing:
 | Device info | `0A1B0002-5E1D-4F0E-9C7B-4F52454343A1` | Read (JSON) |
 
 Device info value (UTF-8 JSON, under 200 bytes):
-`{"fw":"orecchino","ver":"0.6.0","board":"lilygo-t5-epaper-s3-pro","caps":["log","log_since","tfr","wifi","tiles"],"proto":1}`.
+`{"fw":"orecchino","ver":"0.7.0","board":"lilygo-t5-epaper-s3-pro","caps":["log","log_since","tfr","wifi","tiles"],"proto":1}`.
 `caps` lists what this board supports; the app must hide what is absent.
 
 **Framing.** The TX characteristic carries the same byte stream the serial
@@ -204,8 +297,8 @@ for BLE, always on for serial). `hb` is always sent.
 - **Pairing.** LE Secure Connections with bonding. Boards with a screen
   (T5, T-Embed, SenseCAP, AMOLED) use IO capability *DisplayOnly*: the board
   shows a 6-digit passkey full-screen while pairing, the phone asks for it.
-  The headless USB stick uses *Just Works*, but only accepts new bonds for
-  2 minutes after boot. Store up to 4 bonds (NimBLE default store); a
+  *As built:* every board, the headless USB stick included, uses the fixed,
+  published passkey 123456 (a deliberate choice; see §0). Store up to 4 bonds (NimBLE default store); a
   "Forget phones" item goes in each board's settings or menu.
 - Characteristics require an encrypted link (`NIMBLE_PROPERTY::READ_ENC`,
   `WRITE_ENC`, and encrypted notify). Without a bond the phone can see the
@@ -223,12 +316,12 @@ GPS fix is newer than 2 minutes.
 
 ### 3.4 History: bigger and incremental
 
-- New `firmware/common/match_log_fs.h` for boards with LittleFS: append
-  each record as a version-2 `LogRec` (today's 60 bytes plus a `uint32_t seq`,
-  64 bytes; bump `LOG_VERSION` to 2 and convert the NVS ring on first boot) to
-  `/log/records.bin`, capped at 8 MB (131,072 records) by rotating to
-  `/log/records.1`. Keep the NVS ring on boards without LittleFS. Keep all
-  writes on the loop (never the decode task), debounced as today.
+- *(Not built; see section 0.)* The plan was a LittleFS log for boards
+  with LittleFS (T5, T-Embed, AMOLED), 8 MB of version-2 records rotated
+  between two files. What was built instead: a version-2 `LogRec` (the 60
+  bytes plus a `uint32_t seq`, 64 bytes; `LOG_VERSION` 2, the v1 ring
+  converted on load) in the same 48-record NVS ring on every board, with
+  writes kept on the loop (never the decode task) and debounced.
 - `log_get` keeps its meaning (everything held, then live, then `log_done`).
   New: `{"cmd":"log_get","since":<seq>}` returns only records with
   `seq >= since`. `log_done` gains `"next":<seq>` (the value to send as
@@ -259,8 +352,8 @@ GPS fix is newer than 2 minutes.
 4. Passkey screen on each board with a display (a hook
    `rx_hook_pairing(uint32_t passkey, bool show)`), and a "Forget phones"
    menu item.
-5. `match_log_fs.h`, `since`/`after_utc`/`seq`/`next`/`oldest`.
-6. Bump `FW_VERSION` to 0.6.0; update the README "Data format" section and
+5. `seq` in `match_log.h`, `since`/`after_utc`/`next`/`oldest` (built without a LittleFS log; section 0).
+6. Bump `FW_VERSION` (0.7.0 as built); update the README "Data format" section and
    this plan's status.
 
 ---
@@ -272,8 +365,8 @@ GPS fix is newer than 2 minutes.
 | Job | Source | Frequency | Stored as |
 | --- | --- | --- | --- |
 | Clock | SNTP `pool.ntp.org` (fallback `time.google.com`) | each sync | system clock + RTC chip (`periph_set_utc_time_host`) |
-| TFRs | FAA WFS (section 1) with `&bbox=<lat0>,<lon0>,<lat1>,<lon1>,EPSG:4326` around home, 200 km | every 15 min | the core's TFR table (raise limits to 32 polygons x 96 points, in PSRAM) |
-| ADS-B | adsb.lol `v2/point/{lat}/{lon}/25` | every 10 s while the ADS-B layer is on and connected; else each sync | new `adsb.h` table, 64 aircraft max, dropped after 60 s |
+| TFRs | FAA WFS (section 1) with `&bbox=<lon0>,<lat0>,<lon1>,<lat1>,EPSG:4326` (longitude first; verified: lat-first returns an ORA-13200 error page) around home, 200 km | every 15 min | the core's TFR table (built: limits kept at 16 x 24, each TFR fitted as an enclosing polygon; section 0) |
+| ADS-B | adsb.lol `v2/point/{lat}/{lon}/17` (radius in NM, verified) | every 10 s in STAY mode; else each sync window | built: 64 staged in PSRAM by `net_fetch.h`, handed to `traffic_ingest()` (32 kept within 30 km, dropped after 60 s) |
 | Map tiles | CARTO `dark_all` | on demand ("Update map") and weekly | `/tiles/{z}/{x}/{y}.png` via `tile_store.h` |
 
 All HTTPS. Use `WiFiClientSecure` with the Mozilla root bundle compiled in
@@ -288,9 +381,9 @@ both in the PR. If it fails: fetch with the promiscuous sniffer and BLE scan
 paused for the window (they hold buffers), reduce `SSL_IN/OUT` record sizes
 with `mbedtls_ssl_conf_max_frag_len`, and as the last resort let the phone
 fetch and push TFRs and ADS-B over BLE (the app already fetches them). Parse JSON with
-ArduinoJson 7 (add it to the build: `arduino-cli lib install ArduinoJson`,
-document in the README) using a PSRAM allocator, and a filter so only needed
-fields are kept (the FAA feed is 110 KB; the ADS-B answer ~30 KB). Tiles
+ArduinoJson 7 using a PSRAM allocator, and a filter so only needed
+fields are kept (built instead: a streaming splitter in `net_parse.h`, no
+ArduinoJson; section 0) (the FAA feed is 110 KB; the ADS-B answer ~30 KB). Tiles
 stream straight to LittleFS; do not buffer whole files in RAM.
 
 ### 4.2 Sharing the radio: the sync state machine
@@ -320,7 +413,7 @@ Three user-selectable **Wi-Fi modes** (stored in NVS):
   channel for about 1% of the time. ADS-B refreshes only at sync time.
 - **Stay connected.** Associate and stay. Live ADS-B every 10 s. Remote ID
   Wi-Fi reception is then limited to the access point's channel (BLE is
-  unaffected); the header shows `WIFI CH 6 ONLY` (or whichever) so the user
+  unaffected); the footer shows `WI-FI CH 6 ONLY` (or whichever) so the user
   knows. This is the mode for a board on a desk next to its router.
 
 `rx_hop_hold(bool)` is new: it stops the hop timer without setting the
@@ -383,7 +476,8 @@ from the SYSTEM screen (so a USB cable is not a way to read passwords).
 
 ### 4.4 ADS-B on the T5
 
-- `firmware/common/adsb.h`: parse the adsb.lol answer into
+- *(Built as `net_parse.h` + `traffic.h`'s `TrafficAircraft`; no `adsb.h`.)*
+  `firmware/common/adsb.h`: parse the adsb.lol answer into
   `struct Aircraft { uint32_t hex; char flight[9]; char type[5]; float lat, lon;
   int32_t alt_ft; float gs_kt, track; uint16_t squawk; uint8_t emergency; uint32_t seen_ms; }`,
   32 max (the same limit as section 8.1), keeping only those with a
@@ -407,7 +501,7 @@ from the SYSTEM screen (so a USB cable is not a way to read passwords).
 ### 4.5 Map tiles over Wi-Fi
 
 `tile_store.h` already stores and evicts tiles and reports `fs_*` to the Mac
-app. Add `tile_fetch.h`: compute the tile list around home (default ±8 km,
+app. Add `tile_fetch.h` (built inside `net_fetch.h` / `net_parse.h`): compute the tile list around home (default ±8 km,
 zooms 11-15, the same recipe as `TileSync.swift` / `tools/fetch_tiles.py`,
 but centred on the board's position), skip tiles already present, fetch at
 most 4 per second with `User-Agent: orecchino/<ver>`, stream each to a
@@ -431,7 +525,7 @@ beyond this area).
 5. Wi-Fi modes and the header indicator.
 6. Tile fetch; host test for the tile list and the free-space stop.
 7. README: a T5 "Wi-Fi" subsection (modes, what is fetched, the channel
-   trade-off, password storage), ArduinoJson dependency.
+   trade-off, password storage). (Done; no ArduinoJson dependency.)
 
 ---
 
@@ -446,7 +540,9 @@ Native Swift would reuse the Mac app's code on iOS but double the work for
 Android.
 
 Packages (pin exact versions in `pubspec.yaml` at the time of building;
-check each is maintained):
+check each is maintained). As built, the app uses plain `ChangeNotifier`
+state and a custom-painted radar, so `flutter_riverpod`, `flutter_map` and
+`latlong2` are not dependencies yet; add them with the map screen:
 
 | Need | Package |
 | --- | --- |

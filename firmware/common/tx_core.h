@@ -114,6 +114,27 @@ static uint32_t s_tx[P_COUNT] = {0};
 
 // ------------------------------------------------------------ flight model
 
+// ODID timestamps (System, Authentication) count seconds from 2019-01-01
+// 00:00 UTC. Once the wall clock is set (a host's set_time, an RTC) they
+// use it; before that uptime, which a receiver shows as early January 2019
+// -- plainly "clock not set" rather than a plausible wrong date.
+#define ODID_EPOCH_UTC 1546300800UL
+#if !defined(ESP_PLATFORM)
+static uint32_t s_tx_test_utc = 0;   // host tests stand in for time()
+#endif
+static uint32_t tx_wall_utc() {
+#if defined(ESP_PLATFORM)
+  time_t t = time(nullptr);
+  return t > (time_t)(ODID_EPOCH_UTC + 86400) ? (uint32_t)t : 0;
+#else
+  return s_tx_test_utc;
+#endif
+}
+static uint32_t tx_odid_ts(uint32_t now_ms) {
+  uint32_t utc = tx_wall_utc();
+  return utc ? utc - ODID_EPOCH_UTC : now_ms / 1000;
+}
+
 static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
   const TxPath* p = &PATHS[pid];
   double omega = s_speed_ms / ORBIT_M;
@@ -138,7 +159,8 @@ static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
   s->speed_ms  = (float)s_speed_ms;
   s->vspeed_ms = (float)(0.5 * sin(ang * 2));
   s->dir_deg   = (float)fmod(360.0 + 90.0 - ang * 180.0 / M_PI, 360.0);
-  s->ts_s      = (float)fmod(now_ms / 1000.0, 3600.0);
+  uint32_t utc = tx_wall_utc();          // Location time: seconds past the hour
+  s->ts_s      = utc ? (float)(utc % 3600) : (float)fmod(now_ms / 1000.0, 3600.0);
   s->self_desc = p->self_desc;
   s->op_lat    = s_home_lat;
   s->op_lon    = s_home_lon;
@@ -161,12 +183,12 @@ static int build_payload(int pid, uint8_t* out, uint32_t now) {
 
   if (p->format == F_SINGLE) {
     // Rotate through the message types, one per transmission.
-    return odid_build_single(out, &s, now / 1000, s_single_idx[pid]++);
+    return odid_build_single(out, &s, tx_odid_ts(now), s_single_idx[pid]++);
   }
 
-  int n = odid_build_pack(out, &s, now / 1000);
+  int n = odid_build_pack(out, &s, tx_odid_ts(now));
   if (p->with_auth) {
-    uint32_t ts = now / 1000;
+    uint32_t ts = tx_odid_ts(now);
     uint8_t sig[64];
     odid_auth_sign(sig, out + 3, ts);          // out+3 is the Basic ID msg
     if (pid == P_AUTHBAD) sig[0] ^= 0xFF;      // break it on purpose
@@ -530,7 +552,7 @@ static void tx_begin() {
 
   char pub_hex[65];
   const uint8_t* pub = odid_auth_pubkey();
-  for (int i = 0; i < 32; i++) sprintf(pub_hex + i * 2, "%02x", pub[i]);
+  for (int i = 0; i < 32; i++) snprintf(pub_hex + i * 2, 3, "%02x", pub[i]);
   pub_hex[64] = 0;
 
   Serial.printf("{\"type\":\"tx_boot\",\"fw\":\"%s\",\"ver\":\"%s\","
@@ -597,16 +619,16 @@ static void tx_tick(uint32_t now) {
 // ------------------------------------------------------------------- API
 // Everything a board UI needs to drive the beacon without knowing how a
 // frame is built.
-static int         tx_path_count() { return P_COUNT; }
-static const char* tx_path_id(int i) { return PATHS[i].uas_id; }
-static const char* tx_path_desc(int i) { return PATHS[i].self_desc; }
-static bool        tx_enabled(int i) { return s_enabled[i]; }
+static inline int         tx_path_count() { return P_COUNT; }
+static inline const char* tx_path_id(int i) { return PATHS[i].uas_id; }
+static inline const char* tx_path_desc(int i) { return PATHS[i].self_desc; }
+static inline bool        tx_enabled(int i) { return s_enabled[i]; }
 // Switching a BLE path off must also silence its advertising set: the
 // scheduler merely stops refreshing it, and NimBLE keeps repeating the last
 // payload. Set 0 is BLE5's own; set 1 is shared, so it only goes quiet when
 // it is carrying the path just switched off, or when neither coded nor
 // legacy wants it any more.
-static void        tx_set_enabled(int i, bool on) {
+static inline void        tx_set_enabled(int i, bool on) {
   s_enabled[i] = on;
   if (on || !s_adv) return;
   if (i == P_BLE5 && s_inst_path[0] >= 0) {
@@ -618,9 +640,9 @@ static void        tx_set_enabled(int i, bool on) {
     s_inst_path[1] = -1;
   }
 }
-static uint32_t    tx_count(int i) { return s_tx[i]; }
-static bool        tx_running() { return s_running; }
-static void        tx_set_running(bool on) {
+static inline uint32_t    tx_count(int i) { return s_tx[i]; }
+static inline bool        tx_running() { return s_running; }
+static inline void        tx_set_running(bool on) {
   s_running = on;
   if (!on && s_adv) {      // pause clears every set, like the serial `stop`
     s_adv->stop();
@@ -628,10 +650,10 @@ static void        tx_set_running(bool on) {
     s_inst_path[1] = -1;
   }
 }
-static bool        tx_emergency() { return s_emergency; }
-static void        tx_set_emergency(bool on) { s_emergency = on; }
+static inline bool        tx_emergency() { return s_emergency; }
+static inline void        tx_set_emergency(bool on) { s_emergency = on; }
 /// Carrier label for a path: "Wi-Fi", "NAN", "BLE5", "BLE LR", "BLE4".
-static const char* tx_path_carrier(int i) {
+static inline const char* tx_path_carrier(int i) {
   switch (PATHS[i].carrier) {
     case C_BEACON: return "Wi-Fi"; case C_NAN: return "NAN"; case C_BLE_EXT: return "BLE5";
     case C_BLE_CODED: return "BLE LR"; default: return "BLE4";

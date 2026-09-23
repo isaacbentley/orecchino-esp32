@@ -86,6 +86,7 @@ void IRAM_ATTR prepare_context_for_next_frame(RenderContext_t* ctx) {
     ctx->lut_build_func(ctx->conversion_lut, phases, ctx->current_frame);
 
     ctx->lines_prepared = 0;
+    ctx->frame_started = 0;
     ctx->lines_consumed = 0;
 }
 

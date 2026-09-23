@@ -22,6 +22,10 @@ struct ContentView: View {
                     Label("TFR", systemImage: "exclamationmark.triangle")
                 }
                 .help("Show FAA Temporary Flight Restrictions")
+                Toggle(isOn: $model.showTraffic) {
+                    Label("Traffic", systemImage: "airplane")
+                }
+                .help("Show ADS-B traffic contacts and separation alerts")
                 Toggle(isOn: $model.followAll) {
                     Label("Follow", systemImage: "scope")
                 }
@@ -145,19 +149,46 @@ struct SidebarView: View {
     var body: some View {
         @Bindable var model = model
         // Native list selection: arrow keys walk the list, clicks select,
-        // and the selection pill takes each drone's identity color.
-        List(selection: $model.selection) {
+        // and the selection pill takes each drone's identity color. One
+        // selection over drones and aircraft (SidebarItem), so an aircraft's
+        // address never becomes the drone selection.
+        let alerts = model.showTraffic ? model.traffic.result.alerts : []
+        List(selection: $model.sidebarSelection) {
+            // Traffic alerts in the rules' words, above the drones (§8.5).
+            if !alerts.isEmpty {
+                Section("Traffic alerts — \(alerts.count)") {
+                    ForEach(alerts) { al in
+                        TrafficAlertRow(alert: al)
+                            .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+                            .listRowBackground(Color.clear)
+                            .selectionDisabled()
+                    }
+                }
+            }
+
             Section(model.droneCountHeader) {
                 ForEach(model.trackList) { t in
                     DroneRow(track: t)
-                        .tag(t.id)
+                        .tag(SidebarItem.drone(t.id))
                         .listItemTint(t.color)
+                }
+            }
+
+            if model.showTraffic && !model.traffic.aircraft.isEmpty {
+                Section("ADS-B aircraft — \(model.traffic.aircraft.count)") {
+                    ForEach(model.traffic.aircraft) { tc in
+                        TrafficRow(aircraft: tc, alert: model.traffic.alert(forHex: tc.hex))
+                            .tag(SidebarItem.traffic(tc.hex))
+                    }
                 }
             }
         }
         .listStyle(.sidebar)
         .overlay {
-            if model.trackList.isEmpty { ReceiverEmptyState() }
+            if model.trackList.isEmpty && alerts.isEmpty
+                && (!model.showTraffic || model.traffic.aircraft.isEmpty) {
+                ReceiverEmptyState()
+            }
         }
     }
 }
@@ -391,6 +422,8 @@ struct AuthBadge: View {
         case "invalid":     ("ID✗", Theme.danger)
         case "partial":     ("ID…", Theme.muted)
         case "unknown_key": ("ID?", Theme.warn)
+        // Signed with the public test key: says so, neutrally, never as ✓.
+        case "test_key":    ("TEST KEY", Theme.muted)
         default:            ("", Theme.muted)
         }
         if !text.isEmpty {
@@ -399,7 +432,8 @@ struct AuthBadge: View {
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .background(color.opacity(0.22), in: Capsule())
                 .foregroundStyle(color)
-                .help("Authentication: \(state)")
+                .help("Authentication: \(RidNames.authLabel(state) ?? state)")
+                .accessibilityLabel("Authentication: \(RidNames.authLabel(state) ?? state)")
         }
     }
 }
@@ -550,12 +584,16 @@ struct MapPane: View {
         guard let sel = model.selectedTFR else { return nil }
         return model.tfr.zones.first(where: { $0.id == sel })
     }
+    private var trafficCard: TrafficAircraft? {
+        guard let sel = model.selectedTraffic else { return nil }
+        return model.traffic.aircraft.first(where: { $0.id == sel })
+    }
     /// Parts of the pane covered by the banner, the strip and whichever
-    /// card is up (the model keeps the two cards mutually exclusive).
+    /// card is up (the model keeps the cards mutually exclusive).
     private var insets: MapFit.Insets {
         var i = MapFit.Insets(top: model.demoMode ? Self.bannerHeight : 0,
                               bottom: Self.stripHeight)
-        if droneCard != nil {
+        if droneCard != nil || trafficCard != nil {
             i.left = Self.cardWidth + 24
         } else if tfrCard != nil {
             i.right = Self.tfrCardWidth + 24
@@ -623,6 +661,39 @@ struct MapPane: View {
                             }
                         }
                     }
+                    if model.showTraffic {
+                        // Before the drones, so a drone is drawn above an aircraft.
+                        ForEach(model.traffic.aircraft) { tc in
+                            if let p = trafficProjection(tc) {
+                                MapPolyline(coordinates: [tc.coordinate, p])
+                                    .stroke(trafficColor(model.traffic.alert(forHex: tc.hex)?.level).opacity(0.8),
+                                            style: StrokeStyle(lineWidth: 1.5, dash: [4, 6]))
+                            }
+                        }
+                        // One bridge per drone-aircraft pair alert, with that pair's numbers.
+                        ForEach(model.traffic.result.alerts.filter { $0.kind.isPair }) { al in
+                            if let dc = model.track(trafficId: al.droneId)?.coordinate,
+                               let ac = model.traffic.aircraft.first(where: { $0.hex == al.hex }) {
+                                MapPolyline(coordinates: [dc, ac.coordinate])
+                                    .stroke(trafficColor(al.level).opacity(0.35),
+                                            style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                                let mid = CLLocationCoordinate2D(latitude: (dc.latitude + ac.lat) / 2,
+                                                                 longitude: (dc.longitude + ac.lon) / 2)
+                                Annotation("", coordinate: mid, anchor: .center) {
+                                    SeparationBridge(alert: al)
+                                }
+                            }
+                        }
+                        ForEach(model.traffic.aircraft) { tc in
+                            Annotation("", coordinate: tc.coordinate, anchor: .top) {
+                                TrafficMarker(aircraft: tc,
+                                              alert: model.traffic.alert(forHex: tc.hex),
+                                              selected: model.selectedTraffic == tc.id)
+                                    .offset(y: -18)
+                                    .onTapGesture { model.selectedTraffic = tc.id }
+                            }
+                        }
+                    }
                     ForEach(orderedTracks) { t in
                         if let c = t.coordinate {
                             if t.trail.count > 1 {
@@ -674,6 +745,18 @@ struct MapPane: View {
                     model.followAll = false  // focusing one drone ends group-follow
                     focus(on: c, size: geo.size)
                 }
+                .onChange(of: model.selectedTraffic) { _, sel in
+                    guard let sel, let c = model.traffic.aircraft.first(where: { $0.id == sel })?.coordinate else { return }
+                    model.followAll = false
+                    focus(on: c, size: geo.size)
+                }
+                .onChange(of: model.mapFocus) { _, f in
+                    // "Show" on a traffic alert: the drone and the aircraft.
+                    guard let f, geo.size.width > 0 else { return }
+                    let content = MapFit.bounds(of: f.coords, margin: 1.6, minMeters: 2500)
+                    let rect = MapFit.rect(content: content, frame: geo.size, insets: insets)
+                    withAnimation(.easeInOut(duration: 0.6)) { camera.wrappedValue = .rect(rect) }
+                }
                 .onChange(of: model.followAll) { _, on in
                     if on { refit(force: true, size: geo.size) }
                 }
@@ -692,6 +775,10 @@ struct MapPane: View {
                                     maxHeight: min(460, max(240, geo.size.height * 0.6)))
                         .padding(12)
                         .padding(.bottom, 26)
+                } else if let tc = trafficCard {
+                    TrafficCard(aircraft: tc, alert: model.traffic.alert(forHex: tc.hex))
+                        .padding(12)
+                        .padding(.bottom, 26)
                 }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -703,6 +790,12 @@ struct MapPane: View {
             }
             .overlay(alignment: .bottom) {
                 StatusStrip()
+            }
+            .overlay(alignment: .top) {
+                if model.showTraffic {
+                    TrafficStatusPill()
+                        .padding(.top, 8)
+                }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 if model.demoMode {
@@ -813,6 +906,13 @@ struct DroneMarker: View {
             }
         }
         .shadow(radius: 3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Drone \(track.title)"
+                            + (track.isDemo ? ", simulated" : "")
+                            + (emergency ? ", emergency reported" : "")
+                            + (invalid ? ", ID signature invalid" : "")
+                            + (stale ? ", not heard for over a minute" : ""))
+        .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -865,8 +965,19 @@ struct DroneDetailCard: View {
 
     var body: some View {
         let age = model.age(of: track)
-        // Header (+ alert strip) stays put; everything else scrolls.
+        let tid = AppModel.trafficId(trackKey: track.id)
+        let trafficAlerts = model.showTraffic
+            ? model.traffic.result.alerts.filter { $0.kind.isPair && $0.droneId == tid } : []
+        let nearest: NearestTraffic? = {
+            guard model.showTraffic, let c = track.coordinate else { return nil }
+            return NearestTraffic.find(lat: c.latitude, lon: c.longitude, altGeoM: track.altGeo,
+                                       speedMps: track.speed, headingDeg: track.heading,
+                                       aircraft: model.traffic.aircraft,
+                                       nowMs: TrafficRules.nowMs(model.now))
+        }()
+        // Header (+ alert strips) stays put; everything else scrolls.
         let chrome: CGFloat = 24 + 22 + 8 + (track.isAlerting ? 52 : 0)
+            + CGFloat(trafficAlerts.count) * 46
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle().fill(track.color).frame(width: 9, height: 9)
@@ -891,6 +1002,10 @@ struct DroneDetailCard: View {
                 .buttonStyle(.plain)
                 .help("Close")
             }
+            // Traffic alerts in the rules' words, above the drone's own (§8.5).
+            ForEach(trafficAlerts) { al in
+                TrafficAlertRow(alert: al)
+            }
             if track.isAlerting {
                 AlertStrip(alerts: track.alerts.filter { $0 != .simulated })
             }
@@ -898,6 +1013,19 @@ struct DroneDetailCard: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 10) {
                     VitalsGrid(track: track, age: age, range: model.range(to: track))
+
+                    if model.showTraffic {
+                        KVSection(title: "Nearest traffic") {
+                            KVRow(name: "ADS-B", value: nearest?.text
+                                    ?? (track.coordinate == nil ? "needs the drone's position"
+                                        : model.traffic.result.summary),
+                                  ink: trafficAlerts.first.map { trafficColor($0.level) },
+                                  help: "Nearest aircraft reported by ADS-B: distance from the drone, "
+                                      + "height above (+) or below (−) it on the same (WGS-84) "
+                                      + "reference, and whether it is closing. Not every aircraft "
+                                      + "broadcasts ADS-B.")
+                        }
+                    }
 
                     KVSection(title: "Identity") {
                         KVRow(name: "UAS ID", value: track.uasId)
@@ -914,7 +1042,8 @@ struct DroneDetailCard: View {
                         KVRow(name: "ID type", value: track.idType.map { RidNames.idType($0) })
                         KVRow(name: "Auth", value: RidNames.authLabel(track.authState),
                               ink: track.authState == "invalid" ? Theme.danger
-                                 : track.authState == "id_valid" ? Theme.ok : nil,
+                                 : track.authState == "id_valid" ? Theme.ok
+                                 : track.authState == "test_key" ? Theme.muted : nil,
                               help: "Signed Authentication messages. id_valid means the "
                                   + "drone's ID was signed by a trusted key — the "
                                   + "position is not signed.")
@@ -1247,6 +1376,12 @@ struct StatusStrip: View {
     private var deviceHelp: String {
         var parts: [String] = [model.receiverHealth.explanation]
         if let f = model.stats.firmware { parts.append("firmware \(f)") }
+        if let b = model.stats.board { parts.append(b) }
+        if let d = model.stats.bleDrop { parts.append("BLE lines dropped \(d)") }
+        if let d = model.stats.bleRxDrop { parts.append("BLE commands dropped \(d)") }
+        if let k = model.stats.rxStack { parts.append("decode stack \(k) B free at least") }
+        parts.append(model.receiverTakesTraffic ? "takes ADS-B traffic from this Mac"
+                                                : "does not take ADS-B traffic lines")
         if model.stats.uptimeMs > 0 {
             parts.append("up \(fmtAge(Double(model.stats.uptimeMs) / 1000))")
         }
@@ -1264,7 +1399,13 @@ struct StatusStrip: View {
             }
             .help(deviceHelp)
             divider
-            Seg { Text("wifi \(model.stats.wifiFrames.formatted())") }
+            Seg {
+                Text("wifi \(model.stats.wifiFrames.formatted())")
+                if model.stats.bootWifi == false {
+                    Text("off").foregroundStyle(Theme.warn)
+                        .help("The receiver's Wi-Fi sniffer did not start")
+                }
+            }
             divider
             Seg {
                 Text("ble \(model.stats.bleAdvs.formatted())")
@@ -1283,6 +1424,15 @@ struct StatusStrip: View {
             if let tl = model.tileSync.phase.label {
                 divider
                 Seg { Text(tl).foregroundStyle(Theme.accent) }
+            }
+            if let lp = model.location.problem {
+                divider
+                Seg {
+                    Image(systemName: "location.slash")
+                    Text(lp)
+                }
+                .foregroundStyle(Theme.warn)
+                .help(model.location.problemHelp)
             }
             divider
             Seg {

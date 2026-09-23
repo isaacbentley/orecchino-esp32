@@ -18,9 +18,9 @@
 
 void rx_hook_wifi_frame(uint8_t chan, int8_t rssi) { ui_feed_wifi(chan, rssi); }
 bool rx_hook_paused() { return ui_spectrum_active(); }
-bool rx_hook_host_line(const char* cmd, char*, uint32_t) {
+bool rx_hook_host_line(const char* cmd, char*, uint32_t, HostSrc src) {
   if (strncmp(cmd, "fs_", 3) != 0) return false;
-  Serial.print("{\"type\":\"fs_err\",\"msg\":\"no tile store on this board\"}\n");
+  host_print_to(src, "{\"type\":\"fs_err\",\"msg\":\"no tile store on this board\"}\n");
   return true;   // no map here: decline the sync instead of letting it time out
 }
 void rx_hook_track(Track*, bool, bool) {}

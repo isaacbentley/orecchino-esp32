@@ -1,0 +1,108 @@
+{
+ "name": "outside",
+ "description": "Nothing raised: 1.05 km away; 170 m above; next to a drone that is not live; a 31 s old position; a closest approach 80+ s away. Absence is reported only as no ADS-B traffic reported within 3 km, with the data age.",
+ "worked_example": [
+  "UAL123 1050 m N of D9A03 (vert +50): beyond 1000 m -> no NEAR; flying away -> no CPA.",
+  "N12345 600 m S at 320 m: vert +170 > 150 -> nothing. N9 200 m from DJI-1, which is not live -> nothing. N10 424 m away but 31 s old (not fresh) -> nothing.",
+  "SKW9 5.2 km N heading S at 120 kt while D9A03 flies E at 5 m/s: t_cpa = 5200*61.73/(61.73^2+5^2) = 83.7 s > 60 -> nothing.",
+  "No fresh aircraft within 3 km of the observer (4 km S): 'no ADS-B traffic reported within 3 km, data 4 s old' - never 'clear' or 'no traffic'."
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": 20
+ },
+ "drones": [
+  {
+   "id": "1581F20000D9A03",
+   "lat": 37.810873,
+   "lon": -122.4194,
+   "alt_geo_m": 150,
+   "speed_mps": 5,
+   "heading_deg": 90,
+   "live": true
+  },
+  {
+   "id": "DJI-1",
+   "lat": 37.810873,
+   "lon": -122.453541,
+   "alt_geo_m": 100,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": false
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 4,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.820316,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 4
+    },
+    {
+     "hex": "b2c3d4",
+     "cs": "N12345",
+     "ty": "C172",
+     "lat": 37.805477,
+     "lon": -122.4194,
+     "altg_m": 320,
+     "gs_kt": 90,
+     "trk": 180,
+     "age_s": 4
+    },
+    {
+     "hex": "c3d4e5",
+     "cs": "N9",
+     "ty": "C172",
+     "lat": 37.810873,
+     "lon": -122.451264,
+     "altg_m": 100,
+     "gs_kt": 80,
+     "trk": 90,
+     "age_s": 4
+    },
+    {
+     "hex": "d4e5f6",
+     "cs": "N10",
+     "ty": "C172",
+     "lat": 37.813571,
+     "lon": -122.422815,
+     "altg_m": 150,
+     "gs_kt": 80,
+     "trk": 0,
+     "age_s": 31
+    },
+    {
+     "hex": "e5f6a7",
+     "cs": "SKW9",
+     "ty": "CRJ9",
+     "lat": 37.857638,
+     "lon": -122.4194,
+     "altg_m": 150,
+     "gs_kt": 120,
+     "trk": 180,
+     "age_s": 4
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "none",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 5,
+    "summary": "no ADS-B traffic reported within 3 km, data 4 s old",
+    "alerts": []
+   }
+  }
+ ]
+}

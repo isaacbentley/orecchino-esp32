@@ -43,11 +43,14 @@ struct Track {
   bool     has_pos;
   double   lat, lon;
   float    height;      // m, NAN when unknown; see height_ref
+  float    alt_geo;     // m above the WGS-84 ellipsoid (ODID geodetic altitude), NAN
+                        // when unknown: what traffic.h compares with ADS-B alt_geom
   uint8_t  height_ref;  // ODID height type: 0 above takeoff, 1 above ground
   float    speed;       // m/s, NAN when unknown
   float    heading;     // deg true, NAN when unknown
   // Authentication verification, mirroring OdidAuthState:
-  // 0 none, 1 partial, 2 unknown key, 3 ID signature valid, 4 invalid.
+  // 0 none, 1 partial, 2 unknown key, 3 ID signature valid, 4 invalid,
+  // 5 signed with the published test key (proves nothing about the ID).
   uint8_t  auth_state;
   OdidAuthAssembly auth_asm;
   bool     in_tfr;      // position inside a pushed TFR polygon
@@ -72,8 +75,15 @@ struct Track {
 // g_tracks is what screens read. On the device the radio core decodes on
 // its own task into a private live table (g_trk_live) and copies it into
 // g_tracks from the loop, so a screen never sees a half-written contact;
-// on the host tests both names are the same table.
-extern Track g_tracks[TRK_MAX];
+// on the host tests both names are the same table. On the device both are
+// allocated at start-up (PSRAM when fitted, see ext_ram.h), so size them
+// with TRK_TABLE_BYTES, never sizeof(g_tracks).
+#if defined(ESP_PLATFORM)
+extern Track* g_tracks;          // TRK_MAX entries
+#else
+extern Track g_tracks[TRK_MAX];  // the host harnesses define it as an array
+#endif
+#define TRK_TABLE_BYTES (sizeof(Track) * TRK_MAX)
 extern Track* g_trk_live;
 /// A contact is about to leave the table (expired or evicted): the match
 /// log's chance to record it. Defined in rx_core.h.
@@ -119,6 +129,7 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
     t->used = true;
     t->first_ms = now;
     t->height = NAN;
+    t->alt_geo = NAN;
     t->speed = NAN;
     t->heading = NAN;
     t->max_height = NAN;
@@ -162,12 +173,15 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
   return t;
 }
 
-/// Drop contacts unheard for TRK_EXPIRE_MS. Returns how many went.
+/// Drop contacts unheard for TRK_EXPIRE_MS. Returns how many went. The
+/// difference is signed: the decode task stamps last_ms with a millis()
+/// newer than the loop's `now`, and unsigned it would wrap and expire the
+/// contact that was just refreshed.
 static inline int tracker_expire(uint32_t now) {
   int n = 0;
   for (int i = 0; i < TRK_MAX; i++) {
     Track* t = &g_trk_live[i];
-    if (t->used && now - t->last_ms > TRK_EXPIRE_MS) {
+    if (t->used && (int32_t)(now - t->last_ms) > (int32_t)TRK_EXPIRE_MS) {
       trk_on_end(t);
       t->used = false;
       n++;
@@ -193,6 +207,7 @@ static inline const char* track_auth_badge(uint8_t st) {
     case 4:  return "ID BAD";   // signature invalid: a security event
     case 1:  return "ID..";     // pages still arriving
     case 2:  return "ID?";      // signed, key not trusted
+    case 5:  return "TEST";     // signed with the public test key: not an identity
     default: return "";
   }
 }

@@ -127,10 +127,12 @@ static inline void odid_decode_msg(const uint8_t* m, OdidUas* u) {
       u->has_basic[slot] = true;
       u->id_type[slot] = m[1] >> 4;
       u->ua_type[slot] = m[1] & 0x0F;
-      if (u->id_type[slot] == 3) {  // UTM UUID: binary, hex-encode
+      // UTM UUID (3) and Specific Session ID (4) are binary, not text:
+      // hex-encode all 20 bytes rather than let a NUL cut them short.
+      if (u->id_type[slot] == 3 || u->id_type[slot] == 4) {
         char* o = u->uas_id[slot];
         for (int i = 0; i < 20; i++) {
-          sprintf(o, "%02x", m[2 + i]);
+          snprintf(o, 3, "%02x", m[2 + i]);
           o += 2;
         }
       } else {

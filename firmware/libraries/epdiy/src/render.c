@@ -166,6 +166,7 @@ enum EpdDrawError IRAM_ATTR epd_draw_base(
     render_context.lut_lookup_func = lut_functions.lookup_func;
 
     render_context.lines_prepared = 0;
+    render_context.frame_started = 0;
     render_context.lines_consumed = 0;
     render_context.lines_total = rounded_display_height();
     render_context.current_frame = 0;
@@ -285,6 +286,17 @@ void epd_renderer_init(enum EpdInitOptions options, const EpdInitConfig* config)
         rounded_display_height(), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL
     );
 
+    // Orecchino patch: the feeders busy-wait (vTaskDelay(0)) for a whole
+    // refresh, 0.5-1.5 s. At configMAX_PRIORITIES - 1 the one on core 0
+    // starved the Wi-Fi task (23), the BT controller (23), esp_timer (22,
+    // the channel hop) and the NimBLE host (21). Below all of them they
+    // still preempt everything of the application's. Preempted, a feeder
+    // holds no line (lcd_calculate_frame in output_lcd/render_lcd.c claims
+    // and commits each line with its core's scheduler suspended), so the
+    // other feeder carries on and the 32-line queue rides out the bursts.
+#ifndef EPD_FEED_TASK_PRIORITY
+#define EPD_FEED_TASK_PRIORITY 19
+#endif
     int queue_len = 32;
     if (options & EPD_FEED_QUEUE_32) {
         queue_len = 32;
@@ -318,7 +330,7 @@ void epd_renderer_init(enum EpdInitOptions options, const EpdInitConfig* config)
             "epd_prep",
             1 << 12,
             (void*)i,
-            configMAX_PRIORITIES - 1,
+            EPD_FEED_TASK_PRIORITY,
             &render_context.feed_tasks[i],
             i
         ));

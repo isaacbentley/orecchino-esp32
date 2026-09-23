@@ -170,6 +170,17 @@ void epd_push_pixels_lcd(RenderContext_t* ctx, short time, int color) {
 }
 
 #define int_min(a, b) (((a) < (b)) ? (a) : (b))
+
+// Orecchino patch: start the LCD frame exactly once per frame, from
+// whichever feeder gets there first (see lcd_calculate_frame).
+static void IRAM_ATTR lcd_start_frame_once(RenderContext_t* ctx) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&ctx->frame_started, &expected, 1)) {
+        epd_lcd_line_source_cb((line_cb_func_t)&retrieve_line_isr, ctx);
+        epd_lcd_start_frame();
+    }
+}
+
 __attribute__((optimize("O3"))) void IRAM_ATTR
 lcd_calculate_frame(RenderContext_t* ctx, int thread_id) {
     assert(ctx->lut_lookup_func != NULL);
@@ -179,10 +190,12 @@ lcd_calculate_frame(RenderContext_t* ctx, int thread_id) {
     int l = 0;
 
     // if there is an error, start the frame but don't feed data.
+    // Orecchino patch: once per frame here too -- a feeder that starts late
+    // (preempted at priority 19) finds the other's frame running and an
+    // underrun already flagged, and must not restart it.
     if (ctx->error) {
         memset(ctx->line_threads, 0, ctx->lines_total);
-        epd_lcd_line_source_cb((line_cb_func_t)&retrieve_line_isr, ctx);
-        epd_lcd_start_frame();
+        lcd_start_frame_once(ctx);
         ESP_LOGW("epd_lcd", "draw frame draw initiated, but an error flag is set: %X", ctx->error);
         return;
     }
@@ -200,61 +213,61 @@ lcd_calculate_frame(RenderContext_t* ctx, int thread_id) {
     // index of the line that triggers the frame output when processed
     int trigger_line = int_min(63, max_y - min_y);
 
-    while (l = atomic_fetch_add(&ctx->lines_prepared, 1), l < ctx->lines_total) {
-        ctx->line_threads[l] = thread_id;
-
-        // queue is sufficiently filled to fill both bounce buffers, frame
-        // can begin
-        if (l - min_y == trigger_line) {
-            epd_lcd_line_source_cb((line_cb_func_t)&retrieve_line_isr, ctx);
-            epd_lcd_start_frame();
-        }
-
-        if (l < min_y || l >= max_y
-            || (ctx->drawn_lines != NULL && !ctx->drawn_lines[l - area.y])) {
-            uint8_t* buf = NULL;
-            while (buf == NULL) {
-                // break in case of errors
-                if (ctx->error & EPD_DRAW_EMPTY_LINE_QUEUE) {
-                    lq_reset(lq);
-                    return;
-                };
-
-                buf = lq_current(lq);
-                if (buf == NULL)
-                    vTaskDelay(0);
-            }
-            memset(buf, 0x00, lq->element_size);
-            lq_commit(lq);
-            continue;
-        }
-
-        uint32_t* lp = (uint32_t*)input_line;
-        const uint8_t* ptr = ptr_start + bytes_per_line * (l - min_y);
-
-        Cache_Start_DCache_Preload((uint32_t)ptr, ctx->display_width, 0);
-
-        lp = (uint32_t*)ptr;
-
+    // Orecchino patch: never hold a line across a preemption. Upstream took
+    // the next line number first and then spun (vTaskDelay(0)) until its
+    // own queue had room. The output ISR consumes lines strictly in order,
+    // so while one feeder sat on a line it could not commit -- the one on
+    // core 0 preempted by Wi-Fi (23), the BT controller (23), esp_timer (22)
+    // or NimBLE (21) now that it runs at EPD_FEED_TASK_PRIORITY 19 -- the
+    // ISR reached that line with ~1 ms of queue behind it and flagged
+    // "line buffer underrun", ending the refresh with the panel half driven.
+    // Now a feeder first waits for room in its queue, then takes a line
+    // number and computes and commits it with this core's scheduler
+    // suspended (one line: a few us; interrupts still run). A preempted
+    // feeder therefore holds nothing: the other one takes the following
+    // lines, and the radio tasks wait at most one line's lookup.
+    //
+    // The frame starts once the trigger line is committed -- or as soon as a
+    // feeder finds its queue full first (it can hold more than the trigger
+    // line's share when the other feeder is preempted): only the running
+    // frame drains the queues, so waiting for the trigger line then would
+    // wait forever.
+    while (true) {
         uint8_t* buf = NULL;
-        while (buf == NULL) {
+        while ((buf = lq_current(lq)) == NULL) {
             // break in case of errors
             if (ctx->error & EPD_DRAW_EMPTY_LINE_QUEUE) {
                 lq_reset(lq);
                 return;
-            };
-
-            buf = lq_current(lq);
-            if (buf == NULL)
-                vTaskDelay(0);
+            }
+            lcd_start_frame_once(ctx);
+            vTaskDelay(0);
         }
 
-        ctx->lut_lookup_func(lp, buf, ctx->conversion_lut, ctx->display_width);
+        vTaskSuspendAll();
+        l = atomic_fetch_add(&ctx->lines_prepared, 1);
+        if (l >= ctx->lines_total) {
+            xTaskResumeAll();
+            break;
+        }
+        ctx->line_threads[l] = thread_id;
 
-        // apply the line mask
-        epd_apply_line_mask_VE(buf, ctx->line_mask, ctx->display_width / 4);
-
+        if (l < min_y || l >= max_y
+            || (ctx->drawn_lines != NULL && !ctx->drawn_lines[l - area.y])) {
+            memset(buf, 0x00, lq->element_size);
+        } else {
+            const uint8_t* ptr = ptr_start + bytes_per_line * (l - min_y);
+            Cache_Start_DCache_Preload((uint32_t)ptr, ctx->display_width, 0);
+            ctx->lut_lookup_func((uint32_t*)ptr, buf, ctx->conversion_lut, ctx->display_width);
+            // apply the line mask
+            epd_apply_line_mask_VE(buf, ctx->line_mask, ctx->display_width / 4);
+        }
         lq_commit(lq);
+        xTaskResumeAll();
+
+        // queue is sufficiently filled to fill both bounce buffers, frame
+        // can begin (after the trigger line is committed, not merely taken)
+        if (l - min_y == trigger_line) lcd_start_frame_once(ctx);
     }
 }
 

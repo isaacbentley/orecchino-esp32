@@ -724,8 +724,9 @@ void IRAM_ATTR epd_lcd_start_frame() {
 
     // Orecchino patch: apply the frame's CKV high time before CKV starts.
     // Safe to rewrite the RMT item here: this runs once the feeder tasks
-    // have queued 64 lines, milliseconds after the previous frame's last
-    // CKV cycle, and start_ckv_cycles() below resets and restarts it.
+    // have queued the frame's first lines, milliseconds after the previous
+    // frame's last CKV cycle, and start_ckv_cycles() below resets and
+    // restarts it.
     int ckv_high = lcd.ckv_high_next;
     int ckv_high_max = lcd.line_length_us * 10 - 10;
     if (ckv_high > ckv_high_max) ckv_high = ckv_high_max;

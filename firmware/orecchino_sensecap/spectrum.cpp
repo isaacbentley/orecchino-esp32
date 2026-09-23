@@ -18,6 +18,7 @@
 #include <math.h>
 #include "sx1262_sweep.h"
 
+#undef RGB565   // Arduino_GFX has one too, without the uint16_t cast
 #define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 static const uint16_t C_BG    = RGB565(0x07, 0x09, 0x0E);
 static const uint16_t C_TEXT  = RGB565(0xE2, 0xE8, 0xF0);
@@ -126,7 +127,7 @@ bool spectrum_active() { return s_on; }
 void spectrum_feed_wifi(uint8_t chan, int8_t rssi) {
   if (!s_on || chan < 1 || chan > N_CH) return;
   s_wsum[chan] += rssi;
-  s_wcnt[chan]++;
+  s_wcnt[chan] += 1;
 }
 
 void spectrum_set_wifi_channel(uint8_t chan) { s_dwell_ch = chan; }

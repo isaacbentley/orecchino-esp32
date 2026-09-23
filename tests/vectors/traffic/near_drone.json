@@ -1,0 +1,97 @@
+{
+ "name": "near_drone",
+ "description": "WARNING NEAR: fresh aircraft within 1 km and 150 m of a live drone; 1.1 km and 350 m above do not count.",
+ "worked_example": [
+  "Drone D9A03 at alt_geo 150 m; UAL123 is 480 m E and 640 m N of it at alt_geom 240 m.",
+  "horiz = sqrt(480^2 + 640^2) = 800.0 m <= 1000; vert = 240 - 150 = +90.0 m, |90| <= 150 -> TRAFFIC NEAR DRONE D9A03 (bearing 36.9 deg from the drone).",
+  "N12345: 1100 m W -> beyond 1000 m, nothing. SKW55: 700 m S but alt 500 -> vert +350 > 150, nothing.",
+  "Observer 3.5 km S of the drone: SKW55 is 2.8 km from it (near_count 1) but 500 m is not below 20 + 460 = 480 m, so no LOW."
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": 20
+ },
+ "drones": [
+  {
+   "id": "1581F20000D9A03",
+   "lat": 37.806376,
+   "lon": -122.4194,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 4,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.812132,
+     "lon": -122.413936,
+     "altg_m": 240,
+     "altb_ft": 700,
+     "gs_kt": 100,
+     "trk": 37,
+     "vr_fpm": -640,
+     "sq": "1200",
+     "age_s": 3
+    },
+    {
+     "hex": "b2c3d4",
+     "cs": "N12345",
+     "ty": "C172",
+     "lat": 37.806376,
+     "lon": -122.431921,
+     "altg_m": 200,
+     "gs_kt": 90,
+     "trk": 270,
+     "age_s": 5
+    },
+    {
+     "hex": "c3d4e5",
+     "cs": "SKW55",
+     "ty": "E75L",
+     "lat": 37.800081,
+     "lon": -122.4194,
+     "altg_m": 500,
+     "gs_kt": 150,
+     "trk": 180,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "near_count": 1,
+    "ground_count": 0,
+    "aircraft_count": 3,
+    "summary": "1 airborne aircraft within 3 km, data 4 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 800.0385597120052,
+      "vert_m": 90.0,
+      "bearing_deg": 36.8690442105677,
+      "cpa_s": null,
+      "age_s": 3.0
+     }
+    ]
+   }
+  }
+ ]
+}

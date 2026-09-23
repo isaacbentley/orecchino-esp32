@@ -1,0 +1,357 @@
+{
+ "name": "emergency",
+ "description": "ADVISORY: squawk 7700 / 7600 / 7500 or the emergency flag within 30 km; not at 35 km, not with a 35 s old position. Without an observer position the distance is from the nearest drone.",
+ "worked_example": [
+  "UAL123 squawks 7700 5.00 km away -> EMERGENCY UAL123; abc124 squawks 7600 with no callsign -> RADIO FAILURE ABC124; N500X 7500 at 25 km -> HIJACK N500X; MEDIC1 squawks 1200 but sets the emergency flag -> EMERGENCY MEDIC1.",
+  "FAR1 7700 at 35 km: beyond 30 km -> nothing. OLD1 7700 at 2 km but its position is 35 s old (not fresh) -> nothing.",
+  "Step 2 (observer position unknown): distances are from drone D9A03, 10 km N of the old observer; FAR1 is 25 km from it and is raised; N500X is now 35 km away, so its advisory is held (it clears after 20 s beyond 30 km)."
+ ],
+ "drones": [],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 5,
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "aircraft": [
+    {
+     "hex": "abc123",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.954764,
+     "lon": -122.305484,
+     "altg_m": 3000,
+     "gs_kt": 250,
+     "trk": 90,
+     "sq": "7700",
+     "age_s": 5
+    },
+    {
+     "hex": "abc124",
+     "cs": "",
+     "ty": "C172",
+     "lat": 37.7749,
+     "lon": -122.476289,
+     "altg_m": 3000,
+     "gs_kt": 100,
+     "trk": 90,
+     "sq": "7600",
+     "age_s": 5
+    },
+    {
+     "hex": "abc125",
+     "cs": "N500X",
+     "ty": "LJ35",
+     "lat": 37.55007,
+     "lon": -122.4194,
+     "altg_m": 3000,
+     "gs_kt": 300,
+     "trk": 90,
+     "sq": "7500",
+     "age_s": 5
+    },
+    {
+     "hex": "abc126",
+     "cs": "MEDIC1",
+     "ty": "EC35",
+     "lat": 37.7749,
+     "lon": -122.248734,
+     "altg_m": 3000,
+     "gs_kt": 120,
+     "trk": 90,
+     "sq": "1200",
+     "em": 1,
+     "age_s": 5
+    },
+    {
+     "hex": "abc127",
+     "cs": "FAR1",
+     "ty": "B738",
+     "lat": 38.089663,
+     "lon": -122.4194,
+     "altg_m": 3000,
+     "gs_kt": 250,
+     "trk": 90,
+     "sq": "7700",
+     "age_s": 5
+    },
+    {
+     "hex": "abc128",
+     "cs": "OLD1",
+     "ty": "B738",
+     "lat": 37.7749,
+     "lon": -122.396645,
+     "altg_m": 5000,
+     "gs_kt": 250,
+     "trk": 90,
+     "sq": "7700",
+     "age_s": 35
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "advisory",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 6,
+    "summary": "no ADS-B traffic reported within 3 km, data 5 s old",
+    "alerts": [
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc124",
+      "text": "RADIO FAILURE ABC124",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 5000.035430670389,
+      "vert_m": null,
+      "bearing_deg": 270.0,
+      "cpa_s": null,
+      "age_s": 5.0
+     },
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc126",
+      "text": "EMERGENCY MEDIC1",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 15000.018400935247,
+      "vert_m": null,
+      "bearing_deg": 90.0,
+      "cpa_s": null,
+      "age_s": 5.0
+     },
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc123",
+      "text": "EMERGENCY UAL123",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 22360.651646917668,
+      "vert_m": null,
+      "bearing_deg": 26.565111655557846,
+      "cpa_s": null,
+      "age_s": 5.0
+     },
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc125",
+      "text": "HIJACK N500X",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 24999.95535749662,
+      "vert_m": null,
+      "bearing_deg": 180.0,
+      "cpa_s": null,
+      "age_s": 5.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 1,
+   "data_age_s": 5,
+   "observer": {
+    "lat": null,
+    "lon": null,
+    "elev_m": null
+   },
+   "drones": [
+    {
+     "id": "1581F20000D9A03",
+     "lat": 37.864832,
+     "lon": -122.4194,
+     "alt_geo_m": 150,
+     "speed_mps": 0,
+     "heading_deg": 0,
+     "live": true
+    }
+   ],
+   "aircraft": [
+    {
+     "hex": "abc123",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.954764,
+     "lon": -122.305484,
+     "altg_m": 3000,
+     "gs_kt": 250,
+     "trk": 90,
+     "sq": "7700",
+     "age_s": 5
+    },
+    {
+     "hex": "abc124",
+     "cs": "",
+     "ty": "C172",
+     "lat": 37.7749,
+     "lon": -122.476289,
+     "altg_m": 3000,
+     "gs_kt": 100,
+     "trk": 90,
+     "sq": "7600",
+     "age_s": 5
+    },
+    {
+     "hex": "abc125",
+     "cs": "N500X",
+     "ty": "LJ35",
+     "lat": 37.55007,
+     "lon": -122.4194,
+     "altg_m": 3000,
+     "gs_kt": 300,
+     "trk": 90,
+     "sq": "7500",
+     "age_s": 5
+    },
+    {
+     "hex": "abc126",
+     "cs": "MEDIC1",
+     "ty": "EC35",
+     "lat": 37.7749,
+     "lon": -122.248734,
+     "altg_m": 3000,
+     "gs_kt": 120,
+     "trk": 90,
+     "sq": "1200",
+     "em": 1,
+     "age_s": 5
+    },
+    {
+     "hex": "abc127",
+     "cs": "FAR1",
+     "ty": "B738",
+     "lat": 38.089663,
+     "lon": -122.4194,
+     "altg_m": 3000,
+     "gs_kt": 250,
+     "trk": 90,
+     "sq": "7700",
+     "age_s": 5
+    },
+    {
+     "hex": "abc128",
+     "cs": "OLD1",
+     "ty": "B738",
+     "lat": 37.7749,
+     "lon": -122.396645,
+     "altg_m": 5000,
+     "gs_kt": 250,
+     "trk": 90,
+     "sq": "7700",
+     "age_s": 35
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "advisory",
+    "near_count": 0,
+    "ground_count": 0,
+    "aircraft_count": 6,
+    "summary": "no ADS-B traffic reported within 3 km, data 5 s old",
+    "alerts": [
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc124",
+      "text": "RADIO FAILURE ABC124",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 11178.979393272868,
+      "vert_m": null,
+      "bearing_deg": 206.55130661067267,
+      "cpa_s": null,
+      "age_s": 5.0
+     },
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc123",
+      "text": "EMERGENCY UAL123",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 14137.81287415153,
+      "vert_m": null,
+      "bearing_deg": 44.98258105253704,
+      "cpa_s": null,
+      "age_s": 5.0
+     },
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc126",
+      "text": "EMERGENCY MEDIC1",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 18020.16775891654,
+      "vert_m": null,
+      "bearing_deg": 123.7060863072675,
+      "cpa_s": null,
+      "age_s": 5.0
+     },
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc127",
+      "text": "EMERGENCY FAR1",
+      "held": false,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 25000.066552422984,
+      "vert_m": null,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 5.0
+     },
+     {
+      "level": "advisory",
+      "kind": "emergency",
+      "drone": "",
+      "hex": "abc125",
+      "text": "HIJACK N500X",
+      "held": true,
+      "height_unknown": false,
+      "approx": false,
+      "on_ground": false,
+      "horiz_m": 34999.937500494794,
+      "vert_m": null,
+      "bearing_deg": 180.0,
+      "cpa_s": null,
+      "age_s": 5.0
+     }
+    ]
+   }
+  }
+ ]
+}

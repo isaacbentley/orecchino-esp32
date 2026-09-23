@@ -36,7 +36,7 @@ struct DeviceLogEntry: Identifiable, Equatable {
 
     init?(_ m: RidMessage) {
         guard m.type == "log", let mac = m.mac else { return nil }
-        let i = m.i ?? -1
+        let i = m.seq ?? m.i ?? -1
         index = i >= 0 ? i : nil
         active = m.active ?? false
         uasId = m.uas ?? ""
@@ -60,6 +60,15 @@ struct DeviceLogEntry: Identifiable, Equatable {
 }
 
 /// Reads and clears the receiver's match log over the serial link.
+///
+/// Incremental sync (rx_core.h emit_log): an ended contact's record has a
+/// sequence number `seq` that never changes; a live contact comes with
+/// "active":true and no number, every time, until it ends. log_done's `next`
+/// is stored and sent back as {"cmd":"log_get","since":next}, so only new
+/// records cross the link; live contacts are replaced on every read. A
+/// cursor above the receiver's `total` means its log was cleared (or this is
+/// another receiver): the store is dropped and the read restarts from
+/// `oldest`. A cursor below `oldest` means records rotated out unseen.
 @MainActor
 @Observable
 final class DeviceLog {
@@ -74,19 +83,40 @@ final class DeviceLog {
     var clockSet = true
     /// Records the receiver has ever written, including ones since overwritten.
     var totalEver = 0
+    /// Ended records that rotated out of the receiver's ring before this app
+    /// read them (oldest minus the cursor, when positive).
+    var missed = 0
     var isPresented = false
 
+    /// The `since` for the next read; nil reads everything.
+    @ObservationIgnored private(set) var cursor: Int?
+    @ObservationIgnored private var sentSince: Int?
+    @ObservationIgnored private var ended: [Int: DeviceLogEntry] = [:]
+    @ObservationIgnored private var restarted = false
     @ObservationIgnored private var pending: [DeviceLogEntry] = []
     @ObservationIgnored private var timeout: Task<Void, Never>?
+    /// Where commands go; the app's serial link unless a test replaces it.
+    @ObservationIgnored var send: (String) -> Void = { AppModel.shared.serial.send($0) }
+    @ObservationIgnored var isConnected: () -> Bool = { AppModel.shared.serialStatus.isConnected }
+
+    nonisolated static func getCommand(since: Int?) -> String {
+        since.map { #"{"cmd":"log_get","since":\#($0)}"# } ?? #"{"cmd":"log_get"}"#
+    }
 
     func fetch() {
-        guard AppModel.shared.serialStatus.isConnected else {
+        guard isConnected() else {
             phase = .failed("no receiver connected")
             return
         }
+        restarted = false
+        request(since: cursor)
+    }
+
+    private func request(since: Int?) {
         pending = []
         phase = .fetching
-        AppModel.shared.serial.send(#"{"cmd":"log_get"}"#)
+        sentSince = since
+        send(Self.getCommand(since: since))
         armTimeout()
     }
 
@@ -99,9 +129,15 @@ final class DeviceLog {
         phase = .failed("receiver disconnected while reading")
     }
 
+    /// Another port (maybe another receiver): the cursor means nothing there.
+    /// What is shown stays until the next read replaces it.
+    func forgetCursor() {
+        cursor = nil
+    }
+
     func clear() {
-        guard AppModel.shared.serialStatus.isConnected else { return }
-        AppModel.shared.serial.send(#"{"cmd":"log_clear"}"#)
+        guard isConnected() else { return }
+        send(#"{"cmd":"log_clear"}"#)
     }
 
     /// Routed from AppModel.ingest for log / log_done / log_cleared.
@@ -114,14 +150,35 @@ final class DeviceLog {
         case "log_done":
             guard phase == .fetching else { return }
             timeout?.cancel()
+            let total = m.total ?? m.next
+            if let since = sentSince, let t = total, since > t, !restarted {
+                // Cleared (or a different receiver): start again from oldest.
+                restarted = true
+                ended = [:]
+                cursor = nil
+                missed = m.oldest ?? 0
+                request(since: m.oldest ?? 0)
+                return
+            }
+            if let since = sentSince {
+                missed += max(0, (m.oldest ?? since) - since)
+            } else {
+                ended = [:]                        // a full read replaces the store
+                missed = m.oldest ?? 0
+            }
+            for e in pending where !e.active { if let i = e.index { ended[i] = e } }
+            cursor = m.next ?? m.total
             // Live contacts first, then ended ones newest first.
             entries = pending.filter(\.active)
-                + pending.filter { !$0.active }.sorted { ($0.index ?? 0) > ($1.index ?? 0) }
+                + ended.values.sorted { ($0.index ?? 0) > ($1.index ?? 0) }
             clockSet = m.clock ?? true
-            totalEver = m.total ?? entries.count
+            totalEver = total ?? entries.count
             phase = .done
         case "log_cleared":
             entries.removeAll { !$0.active }
+            ended = [:]
+            cursor = 0
+            missed = 0
             totalEver = 0
         default:
             break
@@ -139,15 +196,21 @@ final class DeviceLog {
 
     nonisolated static func csv(_ rows: [DeviceLogEntry]) -> String {
         let iso = ISO8601DateFormatter()
-        func q(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+        // Text from the receiver is quoted, and a leading = + - @ tab or CR
+        // gets a ' so a spreadsheet shows it rather than runs it as a formula.
+        func q(_ s: String) -> String {
+            var t = s
+            if let c = t.first, "=+-@\t\r".contains(c) { t = "'" + t }
+            return "\"" + t.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
         var out = "status,uas_id,mac,sources,first_utc,last_utc,duration_s,lat,lon,max_height_m,peak_rssi,auth,tfr,emergency,messages\n"
         for e in rows {
             let cols: [String] = [
-                e.active ? "live" : "ended", q(e.uasId), e.mac, q(e.sourceText),
+                e.active ? "live" : "ended", q(e.uasId), q(e.mac), q(e.sourceText),
                 e.first.map { iso.string(from: $0) } ?? "", e.last.map { iso.string(from: $0) } ?? "",
                 String(Int(e.duration)),
                 e.lat.map { String(format: "%.5f", $0) } ?? "", e.lon.map { String(format: "%.5f", $0) } ?? "",
-                e.maxHeight.map(String.init) ?? "", String(e.peakRssi), e.authState,
+                e.maxHeight.map(String.init) ?? "", String(e.peakRssi), q(e.authState),
                 e.inTFR ? "yes" : "no", e.emergency ? "yes" : "no", String(e.messages),
             ]
             out += cols.joined(separator: ",") + "\n"
@@ -261,7 +324,7 @@ struct DeviceLogView: View {
         case .fetching: return "Reading…"
         default:
             var s = "\(ended) ended, \(live) live"
-            if log.totalEver > ended { s += " · \(log.totalEver - ended) older records overwritten" }
+            if log.missed > 0 { s += " · \(log.missed) older records overwritten before they were read" }
             return s
         }
     }
