@@ -538,6 +538,15 @@ skipped without it. App tests cover the serial format, checksums, tile
 math, identity conflicts between tracks, tile-sync state, and reading,
 ordering and exporting the match log.
 
+## Plans
+
+- [`docs/plans/mobile-app-and-t5-wifi.md`](docs/plans/mobile-app-and-t5-wifi.md):
+  an iOS and Android app that pairs with the receivers over Bluetooth LE
+  (live contacts, the history, the phone's position and time), and Wi-Fi on
+  the T5 for TFRs, ADS-B and map tiles, joined from its own screen; and
+  ADS-B traffic alerts (manned aircraft near a detected drone) on the T5,
+  the phone and the Mac. Not started; written to be built from.
+
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE). Third-party components are
