@@ -232,10 +232,21 @@ struct SeparationBridge: View {
         .foregroundStyle(.white)
         .fixedSize()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel((alert.droneId.isEmpty ? "Distance" : "Separation from drone \(TrafficRules.droneLabel(alert.droneId))")
-                            + " to \(alert.callsign.isEmpty ? alert.hex.uppercased() : alert.callsign): "
-                            + "\(trafficKm(alert.horizM))"
-                            + (alert.kind.isPair ? ", " + (alert.vertM.map { "vertical \(trafficVert($0))" } ?? "height unknown") : ""))
+        .accessibilityLabel(bridgeLabel)
+    }
+
+    /// Spelled out in typed steps: one long `+` chain made the Swift type
+    /// checker give up on CI's compiler.
+    private var bridgeLabel: String {
+        let from: String = alert.droneId.isEmpty
+            ? "Distance" : "Separation from drone \(TrafficRules.droneLabel(alert.droneId))"
+        let to: String = alert.callsign.isEmpty ? alert.hex.uppercased() : alert.callsign
+        var label: String = "\(from) to \(to): \(trafficKm(alert.horizM))"
+        if alert.kind.isPair {
+            let vertical: String = alert.vertM.map { "vertical \(trafficVert($0))" } ?? "height unknown"
+            label += ", " + vertical
+        }
+        return label
     }
 }
 
