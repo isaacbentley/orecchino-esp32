@@ -535,15 +535,17 @@ beyond this area).
 ### 5.1 Technology
 
 **Flutter** (Dart 3), one codebase for iOS and Android. Reasons: one UI to
-design once; mature BLE (`flutter_blue_plus`), maps (`flutter_map` with the
-same CARTO tiles), local database (`drift` on SQLite), state (`riverpod`).
+design once; mature BLE (`flutter_blue_plus`), maps (`flutter_map`; as
+built, Esri World Dark Gray Canvas tiles, since CARTO now needs a key),
+local database (`drift` on SQLite), state (`riverpod`).
 Native Swift would reuse the Mac app's code on iOS but double the work for
 Android.
 
 Packages (pin exact versions in `pubspec.yaml` at the time of building;
 check each is maintained). As built, the app uses plain `ChangeNotifier`
-state and a custom-painted radar, so `flutter_riverpod`, `flutter_map` and
-`latlong2` are not dependencies yet; add them with the map screen:
+state and a custom-painted radar, so `flutter_riverpod` is not a
+dependency; `flutter_map` 8.3.2 and `latlong2` 0.10.1 came with the Live
+screen's Map mode:
 
 | Need | Package |
 | --- | --- |
@@ -554,7 +556,7 @@ state and a custom-painted radar, so `flutter_riverpod`, `flutter_map` and
 | Location | `geolocator` |
 | Heading (compass) | `flutter_compass` or `sensors_plus` magnetometer + accelerometer |
 | Haptics | `flutter/services.dart` `HapticFeedback` |
-| Background (Android) | `flutter_foreground_task` |
+| Background (Android) | as built: a native Kotlin foreground service on the app's one cached engine (§5.5), not `flutter_foreground_task` (it runs a second engine) |
 | Notifications | `flutter_local_notifications` |
 | HTTP (TFRs, ADS-B on the phone) | `http` |
 
@@ -603,12 +605,8 @@ is unknown, never zero), exactly as `RidMessage.swift` does; port its tests.
 `log_get since=<last_sync_seq>`; upsert records; on `log_done` store
 `next` as `last_sync_seq`; if `oldest > last_sync_seq`, record a gap
 ("some history rotated out on the detector before this phone synced").
-Resume after disconnect from the stored cursor. Background: iOS allows BLE
-work in the background only with `bluetooth-central` and state restoration;
-sync when the app is opened or when iOS wakes it for a known peripheral;
-do not promise continuous background operation on iOS. Android: optional
-foreground service ("Orecchino connected to 1 detector") while live view is
-enabled.
+Resume after disconnect from the stored cursor. Background behaviour and
+power, as built, are in §5.5.
 
 **Simulated detector** for tests and for building without hardware: a Dart
 class implementing the transport interface that plays a scripted stream
@@ -628,7 +626,11 @@ Design tokens (dark-first, from `app/Sources/Orecchino/Theme.swift`):
 ground `#07090E`, text `#E2E8F0`, muted `#8A99AD`, accent `#35D0BA`,
 danger `#E05A5A`, amber `#E0A83A`, ok `#5ECB7A`; a light theme derived for
 daylight use with the same roles. Type: a condensed sans for numbers
-(tabular figures), a plain sans for text.
+(tabular figures), a plain sans for text. As built there are two looks
+(Detectors > Settings > Theme, `mobile/lib/ui/theme/look.dart`): **Sky**
+(the default: night-sky palette, frosted glass over a living aurora, a 3D
+sky) and **Flat** (the design mockups' dark palette and IBM Plex type,
+flat panels, a top-down radar, no animation); see `mobile/README.md`.
 
 **Navigation:** a bottom bar with four places: **Live**, **Find**,
 **History**, **Detectors**. Settings from Detectors.
@@ -687,9 +689,61 @@ colour alone.
   `BLUETOOTH_CONNECT`, `ACCESS_FINE_LOCATION` (for the phone's own position,
   and for scanning on API < 31), `FOREGROUND_SERVICE` +
   `FOREGROUND_SERVICE_CONNECTED_DEVICE` (API 34+), `POST_NOTIFICATIONS`.
+  As built, Android also declares `FOREGROUND_SERVICE_LOCATION` and the
+  companion-device permissions (`REQUEST_COMPANION_RUN_IN_BACKGROUND`,
+  `REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND`,
+  `REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE`); never `dataSync`.
 - A privacy statement: the app stores drone and operator positions on the
   phone only; nothing is uploaded. TFR and ADS-B requests go to the FAA and
   adsb.lol with the phone's approximate area.
+
+### 5.5 Power and background (as built)
+
+**Power modes** (Detectors > Settings > Power; one table,
+`mobile/lib/core/power/power_policy.dart`, keyed on the mode, whether the
+app is in front, and the visible tab):
+
+| | Full | Balanced (default) | Saver |
+|---|---|---|---|
+| Animation | 30 frames/s, each glass panel its own blur | aurora 24 frames/s at 1/4 resolution, grouped blur | still sky, tint instead of blur |
+| Phone BLE scan, in front | low latency | low latency on Live/Find, else balanced | balanced on Live/Find only |
+| Phone BLE scan, background (Android) | balanced | low power (balanced for 2 min after a drone) | off |
+| Wi-Fi beacons / NAN (Android) | 30 s / on | 60 s in front, 2 min behind / Live and Find only | off |
+| ADS-B | every 10 s | 10 s with a live drone or a traffic detector, else 60 s | 30 s with a live drone only |
+| Detector feed | on | on: a background digest needs the firmware; the feed stays on until the detector supports it | on (same) |
+| Location | high | high on Live/Find, else medium (50 m) | medium; last fix in the background |
+| Compass | 15/s on Live/Find | 10/s on Live/Find | Find only |
+
+In every mode ambient motion runs on one shared 24–30 Hz timer (never the
+display's vsync) and stops under Reduce Motion, in the background and
+under Map mode; the compass has its own throttled listenable (10/s, 2°) so
+turning the phone repaints only the sky and Find's pointer; the app
+notifies its screens once a second; ADS-B needs a position and backs off
+after failures (10 s doubling to 5 minutes). An idle Live screen asks for at
+most 30 frames a second in Balanced (a regression test holds it there).
+
+**Android:** "Watch in the background" (off by default) runs a native
+foreground service (`OrecchinoWatchService.kt`; types connectedDevice, plus
+location when granted) that keeps the app's one cached Flutter engine
+(`OrecchinoApplication.kt`) alive with the app closed, so the detector link,
+the phone's receiver (at its background duty), the rules and the alerts
+carry on. Its notification: "Orecchino watching · 2 drones · conflict watch
+on · T5 connected", with Open, Pause 1 h (alerts muted, the phone's receiver
+and position resting) and Stop (until the app is opened). It starts only
+while the app is on screen. After pairing, the app associates the detector
+through CompanionDeviceManager; Android then lets it run and start its
+service in the background for that detector, and on Android 12+ wakes it
+when the detector comes into range. Reconnecting to an associated detector
+is a pending connect (`autoConnect`), not a scan loop; without the
+association the old 15 s connect retried 5–60 s apart remains.
+
+**iOS:** `bluetooth-central` plus Core Bluetooth state restoration and a
+pending connect (no timeout) to the detector: in the background the iPhone
+stays connected to the detector and alerts; the phone's own Remote ID
+receiver works only while the app is open (iOS delivers no Remote ID
+adverts to a background scan); without a detector there are no background
+alerts; swiped away, the app stops until it is opened. The Settings screen
+says exactly this.
 
 ---
 
@@ -898,6 +952,13 @@ Heights are compared like with like, and never as though they were:
   A haptic pattern distinct from drone alerts (three short pulses).
 - **Find:** a Traffic mode that points the big arrow at the aircraft
   instead of a drone.
+- **As built, power and background:** the phone asks adsb.lol every 10 s
+  only while a drone is live or a detector takes traffic (otherwise every
+  60 s; Saver: 30 s with drones only; none without a position; backoff to
+  5 minutes after failures, never sooner than the usual interval). With the app closed, alerts continue on
+  Android while "Watch in the background" runs (its notification carries
+  the conflict-watch state), and on iOS while the detector link keeps the
+  app awake; ADS-B then runs only as often as those wakes allow (§5.5).
 
 ### 8.5 On the Mac app
 

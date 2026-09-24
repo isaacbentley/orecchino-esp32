@@ -12,10 +12,35 @@
 // Range and bearing are from the observer (the phone), and only when the
 // observer's position is known: there is no stand-in position.
 //
+// Fusion: the phone's own receiver ("phone-*" sources) and every detector
+// feed the same tracker, so one drone is one contact whoever heard it (by
+// UAS ID, then MAC; iOS gives a peripheral UUID instead of a MAC, so the
+// UAS ID is what joins them). The freshest Location wins; each sensor
+// (the phone's path, or a detector and its transport) keeps its own last
+// heard, RSSI and PHY ([Contact.heardBy]). A phone never overwrites a
+// detector's signature verdict with its own "unverified" (it does not
+// check signatures).
+//
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import '../geo.dart';
 import '../protocol/messages.dart';
+
+/// One sensor's view of a contact: the phone's path ("phone-ble4"), or a
+/// detector ([detector] its name) and its transport ("ble", "wifi", "nan").
+class SensorHeard {
+  final String src;
+  final String? detector; // null: this phone
+  int lastMs;
+  int? rssi;
+  String? phy;
+  int msgs = 0;
+
+  SensorHeard(this.src, this.detector, this.lastMs);
+
+  bool get isPhone => detector == null;
+  String get key => detector == null ? src : '$detector|$src';
+}
 
 class Contact {
   final String key;
@@ -38,6 +63,33 @@ class Contact {
   String? selfDesc;
   bool emergency = false;
   String? authState;
+
+  /// Who heard it: one entry per sensor ([SensorHeard.key]).
+  final Map<String, SensorHeard> heardBy = {};
+
+  /// The phone's own receiver heard it at least once.
+  bool get heardByPhone => heardBy.values.any((h) => h.isPhone);
+
+  // Everything else the rid lines carry, for the details view. Each
+  // message kind replaces what it carries (an "unknown" stays unknown).
+  List<RidBasicId> basicIds = const [];
+  RidLocation? loc; // the last Location message
+  RidSystem? system; // the last System message
+  int? opIdType;
+  int? selfDescType;
+  RidAuth? auth;
+  int? peakRssi;
+  int msgCount = 0;
+  final Map<String, String?> phyBySource = {}; // 'ble' -> 'coded', 'wifi' -> null
+  int? channel;
+  int? proto;
+  String? fmt;
+  String? ssid;
+  bool? ssidIdMatch;
+
+  /// A detector's TFR verdict (null: it has none to give), and the TFR.
+  bool? inTfr;
+  String? tfrId;
 
   // Range from the observer, and its rate of change.
   double? rangeM;
@@ -93,8 +145,10 @@ class ContactTracker {
   }
 
   /// Ingest one rid line at [nowMs]; [observer] is the phone's position
-  /// (null when unknown). Returns the contact it updated.
-  Contact? ingest(RidMessage msg, int nowMs, ObserverFix? observer) {
+  /// (null when unknown); [detector] names the detector that relayed it
+  /// (null for the phone's own frames, whose "src" is "phone-*"). Returns
+  /// the contact it updated.
+  Contact? ingest(RidMessage msg, int nowMs, ObserverFix? observer, {String? detector}) {
     final uas = msg.primaryUasId;
     final mac = msg.mac;
     if ((uas == null || uas.isEmpty) && mac.isEmpty) return null;
@@ -103,10 +157,18 @@ class ContactTracker {
       key = uas;
       // A contact first heard by MAC only: fold it into the ID's contact.
       final prior = _macIndex[mac];
-      if (prior != null && prior != key && _contacts.containsKey(prior) && !_contacts.containsKey(key)) {
-        final c = _contacts.remove(prior)!;
-        final merged = Contact(key, c.firstSeenMs).._copyFrom(c);
-        _contacts[key] = merged;
+      final existing = _contacts[key];
+      final p = prior == null || prior == key ? null : _contacts[prior];
+      // When another sensor already heard the ID (the phone's MAC is an
+      // iOS peripheral UUID, a detector's the real one), a MAC-only
+      // contact joins it rather than staying behind as a second drone.
+      if (p != null && (existing == null || p.uasId == null)) {
+        _contacts.remove(prior);
+        if (existing == null) {
+          _contacts[key] = Contact(key, p.firstSeenMs).._copyFrom(p);
+        } else {
+          existing._absorb(p);
+        }
         _macIndex.updateAll((_, v) => v == prior ? key : v);
       }
     } else {
@@ -120,7 +182,35 @@ class ContactTracker {
     if (uas != null && uas.isNotEmpty) c.uasId = uas;
     c.sources.add(msg.src);
     c.lastSeenMs = nowMs;
-    if (msg.rssi != null) c.rssi = msg.rssi;
+    c.msgCount++;
+    final phone = msg.src.startsWith('phone-');
+    final sensor = SensorHeard(msg.src, phone ? null : (detector ?? 'Detector'), nowMs);
+    final h = c.heardBy.putIfAbsent(sensor.key, () => sensor)
+      ..lastMs = nowMs
+      ..msgs += 1;
+    if (msg.rssi != null) h.rssi = msg.rssi;
+    if (msg.phy != null) h.phy = msg.phy;
+    if (msg.rssi != null) {
+      c.rssi = msg.rssi;
+      if (c.peakRssi == null || msg.rssi! > c.peakRssi!) c.peakRssi = msg.rssi;
+    }
+    c.phyBySource[msg.src] = msg.phy ?? c.phyBySource[msg.src];
+    if (msg.channel != null) c.channel = msg.channel;
+    if (msg.proto != null) c.proto = msg.proto;
+    if (msg.fmt != null) c.fmt = msg.fmt;
+    if (msg.ssid != null) {
+      c.ssid = msg.ssid;
+      c.ssidIdMatch = msg.ssidIdMatch;
+    }
+    // Basic IDs by ID type: a drone may send two (a serial and a session
+    // ID), not always in the same message.
+    for (final b in msg.basicId) {
+      if (b.uasId.isEmpty) continue;
+      c.basicIds = [for (final o in c.basicIds) if (o.idType != b.idType) o, b]
+        ..sort((x, y) => x.idType.compareTo(y.idType));
+    }
+    if (msg.loc != null) c.loc = msg.loc;
+    if (msg.system != null) c.system = msg.system;
 
     final l = msg.loc;
     if (l != null) {
@@ -143,9 +233,30 @@ class ContactTracker {
       c.opLon = s.operatorLon;
     }
     final op = msg.operatorId;
-    if (op != null && op.opId.isNotEmpty) c.operatorId = op.opId;
-    if (msg.selfId != null && msg.selfId!.text.isNotEmpty) c.selfDesc = msg.selfId!.text;
-    if (msg.auth != null) c.authState = msg.auth!.state;
+    if (op != null && op.opId.isNotEmpty) {
+      c.operatorId = op.opId;
+      c.opIdType = op.opIdType;
+    }
+    if (msg.selfId != null && msg.selfId!.text.isNotEmpty) {
+      c.selfDesc = msg.selfId!.text;
+      c.selfDescType = msg.selfId!.descType;
+    }
+    if (msg.auth != null) {
+      // The phone does not check signatures: its "unverified" (or anything
+      // it says) never replaces a detector's verdict.
+      const verdicts = {AuthState.idValid, AuthState.invalid, AuthState.unknownKey, AuthState.testKey};
+      final keep = phone && verdicts.contains(c.authState);
+      if (!keep) {
+        c.authState = msg.auth!.state;
+        c.auth = msg.auth;
+      }
+    }
+    // The TFR verdict comes from a detector with TFRs loaded; a line
+    // without one (the phone, a detector without TFRs) leaves it be.
+    if (msg.inTfr != null) {
+      c.inTfr = msg.inTfr;
+      c.tfrId = msg.inTfr! ? msg.tfrId : null;
+    }
     _range(c, nowMs, observer);
     return c;
   }
@@ -219,5 +330,41 @@ extension on Contact {
     selfDesc = o.selfDesc;
     emergency = o.emergency;
     authState = o.authState;
+    basicIds = o.basicIds;
+    loc = o.loc;
+    system = o.system;
+    opIdType = o.opIdType;
+    selfDescType = o.selfDescType;
+    auth = o.auth;
+    peakRssi = o.peakRssi;
+    msgCount = o.msgCount;
+    phyBySource.addAll(o.phyBySource);
+    channel = o.channel;
+    proto = o.proto;
+    fmt = o.fmt;
+    ssid = o.ssid;
+    ssidIdMatch = o.ssidIdMatch;
+    inTfr = o.inTfr;
+    tfrId = o.tfrId;
+    heardBy.addAll(o.heardBy);
+  }
+
+  /// Fold a MAC-only contact [o] into this one (same drone, heard by
+  /// another sensor): its MACs, sensors and counts. This contact's own
+  /// values (position, heights, IDs) stay; the next Location replaces them.
+  void _absorb(Contact o) {
+    macs.addAll(o.macs);
+    sources.addAll(o.sources);
+    if (o.firstSeenMs < firstSeenMs) firstSeenMs = o.firstSeenMs;
+    if (o.lastSeenMs > lastSeenMs) lastSeenMs = o.lastSeenMs;
+    msgCount += o.msgCount;
+    if (o.peakRssi != null && (peakRssi == null || o.peakRssi! > peakRssi!)) peakRssi = o.peakRssi;
+    for (final e in o.phyBySource.entries) {
+      phyBySource.putIfAbsent(e.key, () => e.value);
+    }
+    for (final h in o.heardBy.values) {
+      final mine = heardBy[h.key];
+      if (mine == null || h.lastMs > mine.lastMs) heardBy[h.key] = h;
+    }
   }
 }

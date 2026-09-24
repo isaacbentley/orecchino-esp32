@@ -90,11 +90,37 @@ class FakeTransport implements BleTransport {
   Future<void> startScan({Duration timeout = const Duration(seconds: 10)}) async {}
   @override
   Future<void> stopScan() async {}
+  /// Pending connects (the detector comes into range later): off unless
+  /// a test turns it on; [arrive] completes a waiting one.
   @override
-  Future<BlePeer> connect(String id, {Duration timeout = const Duration(seconds: 15)}) async {
+  bool pendingConnect = false;
+  final List<bool> pendingAsked = [];
+  final Map<String, Completer<void>> waiting = {};
+  final List<String> cancelled = [];
+
+  @override
+  Future<BlePeer> connect(String id, {Duration timeout = const Duration(seconds: 15), bool pending = false}) async {
     connects++;
+    pendingAsked.add(pending);
     if (connectError != null) throw connectError!;
+    if (pending && !peers.containsKey(id)) {
+      final w = waiting[id] = Completer<void>();
+      await w.future;
+    }
     return peers[id]!;
+  }
+
+  /// The detector [id] comes into range: a pending connect completes.
+  void arrive(String id, FakePeer peer) {
+    peers[id] = peer;
+    waiting.remove(id)?.complete();
+  }
+
+  @override
+  Future<void> cancelConnect(String id) async {
+    cancelled.add(id);
+    final w = waiting.remove(id);
+    if (w != null) w.completeError(StateError('cancelled'));
   }
 
   @override

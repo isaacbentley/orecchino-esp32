@@ -4,57 +4,62 @@
 // cockpit convention (aqua for our own sensor's drones, starlight white for
 // manned aircraft, amber caution, red warning). Every text colour is at
 // least 4.5:1 on every surface, on glass, and on the brightest colour the
-// living background can draw (test/accessibility_test.dart checks it).
+// living background can draw (test/accessibility_test.dart checks it, for
+// both looks). The values live in look.dart, one set per look.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'package:flutter/painting.dart';
 
 import '../../core/traffic/traffic_rules.dart';
+import 'look.dart';
 
 abstract final class OrecchinoColors {
+  // Every colour comes from the active look (look.dart): Sky or Flat.
+  static Palette get _p => Look.p;
+
   // Surfaces, darkest first.
-  static const Color void0 = Color(0xFF04060C); // app background, deep space
-  static const Color night = Color(0xFF0A1020); // surface
-  static const Color raised = Color(0xFF121B30); // cards, dialogs, sheets
-  static const Color line = Color(0xFF24314D); // hairlines (not text)
-  static const Color lineBright = Color(0xFF3A4A6B); // focus rings, ring labels' rules
+  static Color get void0 => _p.void0; // app background
+  static Color get night => _p.night; // surface
+  static Color get raised => _p.raised; // cards, dialogs, sheets
+  static Color get line => _p.line; // hairlines (not text)
+  static Color get lineBright => _p.lineBright; // focus rings, ring labels' rules
 
-  // Glass: night at 62% over whatever is behind, plus a white veil that is
-  // 8% at the top edge (the brightest part; the contrast test uses it) and
-  // 3% at the bottom.
-  static const Color glassTint = Color(0x9E0A1020); // night @ 0.62
-  static const Color glassVeil = Color(0x14FFFFFF); // white @ 0.08
-  static const Color glassVeilLow = Color(0x08FFFFFF); // white @ 0.03
-  static const Color glassEdge = Color(0x24FFFFFF); // top-light hairline
+  // Glass (Sky): night at 62% over whatever is behind, plus a white veil
+  // that is 8% at the top edge (the brightest part; the contrast test uses
+  // it) and 3% at the bottom. Flat: an opaque panel with a 1 px rule.
+  static Color get glassTint => _p.glassTint;
+  static Color get glassVeil => _p.glassVeil;
+  static Color get glassVeilLow => _p.glassVeilLow;
+  static Color get glassEdge => _p.glassEdge;
 
-  /// A level colour washed into glass (alerts, selections): at most this.
-  static const double washAlpha = 0.12;
-  static const Color glassEdgeLow = Color(0x0AFFFFFF);
+  /// A level colour washed into glass (alerts, selections): at most this
+  /// (Flat: the banner's tint, stronger, as the mockups' alert banners).
+  static double get washAlpha => _p.flat ? 0.2 : 0.12;
 
   // Text.
-  static const Color ink = Color(0xFFEEF3FF); // starlight
-  static const Color inkMuted = Color(0xFFA7B4CC);
-  static const Color inkSubtle = Color(0xFF98A6BF);
+  static Color get ink => _p.ink;
+  static Color get inkMuted => _p.inkMuted;
+  static Color get inkSubtle => _p.inkSubtle;
 
   // Symbols and states.
-  static const Color aqua = Color(0xFF4BE3C8); // drones, our accent
-  static const Color aircraft = Color(0xFFD6E4FF); // manned aircraft (outlined)
-  static const Color caution = Color(0xFFFFB84D);
-  static const Color warning = Color(0xFFFF8585);
-  static const Color advisory = Color(0xFF7CB8FF);
-  static const Color ok = Color(0xFF7EE0A5);
+  static Color get aqua => _p.aqua; // drones, our accent
+  static Color get aircraft => _p.aircraft; // manned aircraft (outlined)
+  static Color get caution => _p.caution;
+  static Color get warning => _p.warning;
+  static Color get advisory => _p.advisory;
+  static Color get ok => _p.ok;
 
   /// Living-background palettes: deep, mid, highlight. The shader only mixes
   /// between these, so the highlight is the brightest it ever draws.
-  static const List<Color> auroraCalm = [Color(0xFF060B1A), Color(0xFF1C2152), Color(0xFF123646)];
-  static const List<Color> auroraCaution = [Color(0xFF0B0910), Color(0xFF2C1E14), Color(0xFF4A3212)];
-  static const List<Color> auroraWarning = [Color(0xFF0D070C), Color(0xFF3A1020), Color(0xFF4E161E)];
+  static List<Color> get auroraCalm => _p.auroraCalm;
+  static List<Color> get auroraCaution => _p.auroraCaution;
+  static List<Color> get auroraWarning => _p.auroraWarning;
 
   /// The brightest a star in the living background adds to the sky
   /// (shaders/aurora.frag: vec3(0.32, 0.34, 0.38)); text drawn straight
-  /// onto the sky may land on one.
-  static const Color starPeak = Color(0xFF525761);
+  /// onto the sky may land on one. None in Flat.
+  static Color get starPeak => _p.starPeak;
 
   /// Text drawn straight onto a canvas sits on a halo of deep space at this
   /// opacity (lib/ui/canvas_text.dart), so a star behind it cannot wash it out.
@@ -89,11 +94,10 @@ abstract final class OrecchinoColors {
   /// averages colours that are already in the palette).
   static Color glassOver(Color behind) => Color.alphaBlend(glassVeil, Color.alphaBlend(glassTint, behind));
 
-  static Color level(TrafficLevel? level, {Color none = inkMuted}) => switch (level ?? TrafficLevel.none) {
+  static Color level(TrafficLevel? level, {Color? none}) => switch (level ?? TrafficLevel.none) {
         TrafficLevel.warning => warning,
         TrafficLevel.caution => caution,
-        TrafficLevel.advisory => advisory,
-        TrafficLevel.none => none,
+        TrafficLevel.none => none ?? inkMuted,
       };
 
   static List<Color> aurora(TrafficLevel level) => switch (level) {

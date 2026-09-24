@@ -58,7 +58,14 @@ class Detections extends Table {
   RealColumn get maxH => real().nullable()();
   IntColumn get peakRssi => integer().nullable()();
   TextColumn get authState => text().withDefault(const Constant('none'))();
-  BoolColumn get tfr => boolean()();
+  BoolColumn get tfr => boolean()(); // inside a TFR at some point
+  // Schema 3 (firmware 0.7+): inside it at the end (live: now), which TFR,
+  // and the EU classification; null from older firmware and the phone.
+  BoolColumn get inTfr => boolean().nullable()();
+  TextColumn get tfrId => text().nullable()();
+  IntColumn get classType => integer().nullable()();
+  IntColumn get catEu => integer().nullable()();
+  IntColumn get classEu => integer().nullable()();
   BoolColumn get emerg => boolean()();
   IntColumn get msgs => integer()();
 
@@ -97,7 +104,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.memory() : super(NativeDatabase.memory());
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -113,7 +120,16 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(detectors, detectors.historyGap);
             await m.addColumn(detectors, detectors.logEpoch);
             await m.createTable(settings);
+            await m.createTable(livePoints); // new in schema 2 (IF NOT EXISTS)
             await customStatement('UPDATE detectors SET last_sync_seq = 0, oldest_seq = NULL');
+          }
+          if (from >= 2 && from < 3) {
+            // A new table in schema 2 above already has these.
+            await m.addColumn(detections, detections.inTfr);
+            await m.addColumn(detections, detections.tfrId);
+            await m.addColumn(detections, detections.classType);
+            await m.addColumn(detections, detections.catEu);
+            await m.addColumn(detections, detections.classEu);
           }
         },
       );
@@ -122,7 +138,12 @@ class AppDatabase extends _$AppDatabase {
     return LazyDatabase(() async {
       final dbFolder = await getApplicationDocumentsDirectory();
       final file = File(p.join(dbFolder.path, 'orecchino.sqlite'));
-      return NativeDatabase.createInBackground(file);
+      // WAL: the History screen's reads never wait on the sync's and the
+      // phone's writes, and a write is one append, not a journal copy.
+      return NativeDatabase.createInBackground(file, setup: (db) {
+        db.execute('PRAGMA journal_mode=WAL');
+        db.execute('PRAGMA synchronous=NORMAL');
+      });
     });
   }
 
@@ -175,18 +196,23 @@ class AppDatabase extends _$AppDatabase {
     });
   }
 
+  /// Records, newest first: from [afterUtc] on, at most [limit] (the
+  /// History screen asks for its ribbon's week, bounded, so a write does
+  /// not re-read the whole table).
   Stream<List<DetectionEntry>> watchDetections({
     String? detectorId,
     int? afterUtc,
+    int? limit,
   }) {
     var query = select(detections);
     if (detectorId != null) {
       query = query..where((t) => t.detectorId.equals(detectorId));
     }
     if (afterUtc != null) {
-      query = query..where((t) => t.lastUtc.isBiggerOrEqualValue(afterUtc));
+      query = query..where((t) => t.lastUtc.isBiggerOrEqualValue(afterUtc) | t.active.equals(true));
     }
     query = query..orderBy([(t) => OrderingTerm.desc(t.lastUtc)]);
+    if (limit != null) query = query..limit(limit);
     return query.watch();
   }
 
@@ -197,6 +223,29 @@ class AppDatabase extends _$AppDatabase {
     }
     query = query..orderBy([(t) => OrderingTerm.desc(t.lastUtc)]);
     return query.get();
+  }
+
+  /// Delete every history record on this phone (all detectors) and the
+  /// live track points; detectors, their pins and cursors, and the settings
+  /// stay. Returns the records deleted.
+  Future<int> clearLocalHistory() => transaction(() async {
+        final n = await delete(detections).go();
+        await delete(livePoints).go();
+        return n;
+      });
+
+  /// The detector's own log was cleared: its seqs start again, so start a
+  /// new log epoch (new seqs never overwrite this phone's older records)
+  /// and sync from the beginning of the new log.
+  Future<void> resetDetectorLog(String detectorId) async {
+    final d = await getDetector(detectorId);
+    if (d == null) return;
+    await (update(detectors)..where((t) => t.id.equals(detectorId))).write(DetectorsCompanion(
+      logEpoch: Value(d.logEpoch + 1),
+      lastSyncSeq: const Value(0),
+      oldestSeq: const Value(null),
+      historyGap: const Value(false),
+    ));
   }
 
   // --- Settings (key/value) ---

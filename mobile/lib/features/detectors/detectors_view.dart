@@ -12,9 +12,14 @@ import 'package:flutter/material.dart';
 import '../../app/app_controller.dart';
 import '../../core/ble/ble_service.dart';
 import '../../core/ble/simulated_detector.dart';
+import '../../core/native_rx/native_rx_service.dart';
+import '../../core/power/power_policy.dart';
+import '../../core/traffic/adsb_source.dart';
 import '../../data/db.dart';
 import '../../ui/glass.dart';
 import '../../ui/theme/theme.dart';
+import '../history/clear_history_sheet.dart';
+import '../live/live_map.dart' show MapTileSource;
 import 'wifi_setup_sheet.dart';
 
 IconData _capIcon(String cap) => switch (cap) {
@@ -38,6 +43,7 @@ class _DetectorsViewState extends State<DetectorsView> {
   late final Stream<List<DetectorEntry>> _detectors = widget.app.db.watchAllDetectors();
 
   AppController get app => widget.app;
+  double? _radiusKm; // while the radius slider is dragged
 
   @override
   Widget build(BuildContext context) {
@@ -49,106 +55,384 @@ class _DetectorsViewState extends State<DetectorsView> {
         builder: (context, snap) {
           final pinned = (snap.data ?? const <DetectorEntry>[]).where((d) => d.bonded).toList();
           final connected = app.detectorReady ? 1 : 0;
-          return ListView(
-            // Readable width on tablets and phones on their side, clear of the
-            // notch / Dynamic Island on either side.
-            padding: EdgeInsets.fromLTRB(
-              mq.padding.left + math.max(16.0, (mq.size.width - mq.padding.horizontal - 720) / 2),
-              mq.padding.top + 12,
-              mq.padding.right + math.max(16.0, (mq.size.width - mq.padding.horizontal - 720) / 2),
-              mq.padding.bottom + 24,
-            ),
-            children: [
-              const Text('LINK', style: OrecchinoType.eyebrow),
-              const SizedBox(height: 2),
-              Semantics(header: true, child: const Text('Detectors', style: OrecchinoType.title)),
-              const SizedBox(height: 2),
-              Text(
-                app.isSimulated
-                    ? 'Demo detector on'
-                    : '${pinned.length} paired · ${connected == 1 ? 'connected' : 'not connected'}',
-                style: OrecchinoType.label,
+          return MediaQuery.removePadding(
+            // The list is already clear of the side insets: a ListTile must not add them again.
+            context: context,
+            removeLeft: true,
+            removeRight: true,
+            child: ListView(
+              // Readable width on tablets and phones on their side, clear of the
+              // notch / Dynamic Island on either side.
+              padding: EdgeInsets.fromLTRB(
+                mq.padding.left + math.max(16.0, (mq.size.width - mq.padding.horizontal - 720) / 2),
+                mq.padding.top + 12,
+                mq.padding.right + math.max(16.0, (mq.size.width - mq.padding.horizontal - 720) / 2),
+                mq.padding.bottom + 24,
               ),
-              const SizedBox(height: 16),
-              if (app.isSimulated) ...[
-                _simCard(context),
-              ] else ...[
-                for (final d in pinned) _detectorCard(context, d),
-                const SizedBox(height: 8),
-                _pairSection(context, pinned),
-              ],
-              const SizedBox(height: 18),
-              const Eyebrow('Settings'),
-              Glass(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                child: Column(children: [
-                  _toggle(
-                      'ADS-B traffic from adsb.lol',
-                      'Sends your approximate area (about 1 km) every 10 s while the app is open',
-                      'adsb',
-                      app.settings.adsb),
-                  _divider(),
-                  _toggle('Notifications', 'Traffic near drones, emergencies, invalid ID signatures', 'notifications',
-                      app.settings.notifications),
-                  _divider(),
-                  _toggle('Haptics', 'Three short pulses for traffic, one for drone alerts', 'haptics',
-                      app.settings.haptics),
-                  _divider(),
-                  _toggle('Spoken traffic callouts', 'Uses the system voice', 'spoken', app.settings.spoken),
-                  _divider(),
+              children: [
+                Text('LINK', style: OrecchinoType.eyebrow),
+                const SizedBox(height: 2),
+                Semantics(header: true, child: Text('Detectors', style: OrecchinoType.title)),
+                const SizedBox(height: 2),
+                Text(
+                  app.isSimulated
+                      ? 'Demo detector on'
+                      : '${pinned.length} paired · ${connected == 1 ? 'connected' : 'not connected'}',
+                  style: OrecchinoType.label,
+                ),
+                const SizedBox(height: 16),
+                if (app.isSimulated) ...[
+                  _simCard(context),
+                ] else ...[
+                  for (final d in pinned) _detectorCard(context, d),
+                  const SizedBox(height: 8),
+                  _pairSection(context, pinned),
+                ],
+                const SizedBox(height: 18),
+                const Eyebrow('Settings'),
+                Glass(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                  child: Column(children: [
+                    _phoneRx(),
+                    _divider(),
+                    _power(),
+                    _divider(),
+                    _theme(),
+                    _divider(),
+                    _background(),
+                    _divider(),
+                    _toggle(
+                        'ADS-B conflict watch (adsb.lol)',
+                        'Aircraft near your drones, and low aircraft. Sends an approximate area (about 1 km) '
+                            'every 10 s while drones are about or a detector takes traffic, otherwise every '
+                            'minute; none without your position',
+                        'adsb',
+                        app.settings.adsb),
+                    if (app.settings.adsb) _radius(),
+                    _divider(),
+                    _mapTiles(context),
+                    _divider(),
+                    _toggle('Notifications', 'Traffic near drones, low traffic, emergencies, invalid ID signatures',
+                        'notifications', app.settings.notifications),
+                    _divider(),
+                    _toggle('Haptics', 'Three short pulses for traffic, one for drone alerts', 'haptics',
+                        app.settings.haptics),
+                    _divider(),
+                    _toggle('Spoken traffic callouts', 'Uses the system voice', 'spoken', app.settings.spoken),
+                    _divider(),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      child: Row(children: [
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text('Mute alerts for 10 minutes', style: OrecchinoType.bodyStrong),
+                            const SizedBox(height: 2),
+                            Text(
+                              app.policy.isMuted(app.nowMs())
+                                  ? 'Muted: alerts still show on screen'
+                                  : 'Notifications, sound and haptics',
+                              style: OrecchinoType.caption,
+                            ),
+                          ]),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(onPressed: app.muteAlerts, child: const Text('Mute')),
+                      ]),
+                    ),
+                    _divider(),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('Demo detector (SIMULATED)', style: OrecchinoType.bodyStrong),
+                      subtitle: Text(
+                          'Made-up drones, and aircraft that come near them, for trying the app '
+                          'without hardware',
+                          style: OrecchinoType.caption),
+                      value: app.isSimulated,
+                      onChanged: app.setDemo,
+                    ),
+                  ]),
+                ),
+                const SizedBox(height: 12),
+                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    child: Row(children: [
-                      Expanded(
-                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          const Text('Mute alerts for 10 minutes', style: OrecchinoType.bodyStrong),
-                          const SizedBox(height: 2),
-                          Text(
-                            app.policy.isMuted(app.nowMs())
-                                ? 'Muted: alerts still show on screen'
-                                : 'Notifications, sound and haptics',
-                            style: OrecchinoType.caption,
-                          ),
-                        ]),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton(onPressed: app.muteAlerts, child: const Text('Mute')),
-                    ]),
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Icon(Icons.lock_outline_rounded, size: 16, color: OrecchinoColors.inkSubtle),
                   ),
-                  _divider(),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Demo detector (SIMULATED)', style: OrecchinoType.bodyStrong),
-                    subtitle: const Text('Made-up drones and aircraft, for trying the app without hardware',
-                        style: OrecchinoType.caption),
-                    value: app.isSimulated,
-                    onChanged: app.setDemo,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Drone and operator positions stay on this phone; nothing is uploaded. ADS-B requests go to '
+                      'adsb.lol with your approximate area.',
+                      style: OrecchinoType.caption,
+                    ),
                   ),
                 ]),
-              ),
-              const SizedBox(height: 12),
-              const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Padding(
-                  padding: EdgeInsets.only(top: 1),
-                  child: Icon(Icons.lock_outline_rounded, size: 16, color: OrecchinoColors.inkSubtle),
-                ),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Drone and operator positions stay on this phone; nothing is uploaded. ADS-B requests go to '
-                    'adsb.lol with your approximate area.',
-                    style: OrecchinoType.caption,
-                  ),
-                ),
-              ]),
-            ],
+              ],
+            ),
           );
         },
       ),
     );
   }
 
-  Widget _divider() => const Divider(height: 1, color: OrecchinoColors.line);
+  Widget _divider() => Divider(height: 1, color: OrecchinoColors.line);
+
+  static String powerWords(PowerMode m) => switch (m) {
+        PowerMode.full => 'The smoothest sky and the fastest scans on every screen; ADS-B every 10 s. '
+            'Uses the most battery.',
+        PowerMode.balanced => 'Scans hardest on Live and Find, lighter elsewhere and in the background; a '
+            'slower sky; ADS-B every 10 s while drones are about, otherwise every minute.',
+        PowerMode.saver => 'A still sky without blur. This phone listens only on Live and Find, never in the '
+            'background, and not on Wi-Fi; ADS-B only while drones are about. A detector still alerts.',
+      };
+
+  /// Sky / Flat.
+  Widget _theme() {
+    final look = app.settings.look;
+    final saverHint = app.settings.powerMode == PowerMode.saver && look == AppLook.sky;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Theme', style: OrecchinoType.bodyStrong),
+        const SizedBox(height: 8),
+        GlassSegmented<AppLook>(
+          options: [for (final l in AppLook.values) (l, l.label, '${l.label} theme')],
+          value: look,
+          onChanged: app.setLook,
+        ),
+        const SizedBox(height: 6),
+        Text(
+          look == AppLook.sky
+              ? 'The night sky: a living aurora behind frosted glass, and a 3D sky of the drones.'
+              : 'Flat panels and a top-down radar, as in the design mockups; nothing moves that '
+                  'does not need to.',
+          style: OrecchinoType.caption,
+        ),
+        if (saverHint)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text('With Saver, Flat is the natural choice: no aurora or blur to draw.',
+                style: OrecchinoType.caption.copyWith(color: OrecchinoColors.aqua)),
+          ),
+      ]),
+    );
+  }
+
+  /// Full / Balanced / Saver.
+  Widget _power() {
+    final mode = app.settings.powerMode;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Power', style: OrecchinoType.bodyStrong),
+        const SizedBox(height: 8),
+        GlassSegmented<PowerMode>(
+          options: [for (final m in PowerMode.values) (m, m.label, '${m.label} power mode')],
+          value: mode,
+          onChanged: app.setPowerMode,
+        ),
+        const SizedBox(height: 6),
+        Text(powerWords(mode), style: OrecchinoType.caption),
+      ]),
+    );
+  }
+
+  /// What happens with the app in the background: Android's "Watch in the
+  /// background" service, or on iPhone what iOS allows, in plain words.
+  Widget _background() {
+    final w = app.watch;
+    if (w != null && w.supported) {
+      final err = w.error;
+      return SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: Text('Watch in the background', style: OrecchinoType.bodyStrong),
+        subtitle: Text(
+          app.settings.watchInBackground
+              ? (app.watchRunning
+                  ? 'On: ${app.watchText()}. The notification has Open, Pause 1 h and Stop.'
+                  : (err != null ? 'Could not start: $err' : 'On: starts when the app is open'))
+              : 'Keeps the detector link, this phone\'s receiver and the alerts running with the app closed, '
+                  'with a notification saying so. Off: they stop soon after you leave the app.',
+          style: OrecchinoType.caption,
+        ),
+        value: app.settings.watchInBackground,
+        onChanged: app.setWatchInBackground,
+      );
+    }
+    final ios = app.nativeRx?.isIOS ?? Theme.of(context).platform == TargetPlatform.iOS;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('In the background', style: OrecchinoType.bodyStrong),
+        const SizedBox(height: 2),
+        Text(
+          ios
+              ? 'In the background your iPhone stays connected to your detector and alerts you. This iPhone\'s '
+                  'own receiver works only while Orecchino is open. Without a detector there are no background '
+                  'alerts. If you swipe Orecchino away, it stops until you open it again.'
+              : 'Watching stops soon after you leave the app.',
+          style: OrecchinoType.caption,
+        ),
+      ]),
+    );
+  }
+
+  /// "Use this phone as a detector", and what this phone can hear.
+  Widget _phoneRx() {
+    final rx = app.nativeRx;
+    final caps = rx?.capabilities;
+    String yn(CapState s) => switch (s) { CapState.yes => 'yes', CapState.no => 'no', CapState.unknown => 'unknown' };
+    final lines = <String>[
+      if (rx == null) 'Not available on this device',
+      if (caps != null && rx!.isIOS) 'Bluetooth 4 only, while the app is open',
+      if (caps != null && !rx!.isIOS) ...[
+        'Bluetooth 4: ${yn(caps.ble4)} · Bluetooth 5: ${yn(caps.ble5Extended)} · long range: ${yn(caps.codedPhy)}',
+        'Wi-Fi NAN: ${yn(caps.nan)}${caps.nanReason == null ? '' : ' (${caps.nanReason})'}',
+        'Wi-Fi beacons: ${caps.beacon == CapState.yes ? 'slow (every ${caps.beaconIntervalS ?? 30} s)' : yn(caps.beacon)}'
+            '${caps.beaconReason == null ? '' : ' (${caps.beaconReason})'}',
+      ],
+      if (rx != null && rx.running && rx.pathStates.isNotEmpty)
+        'Now: ${[for (final e in rx.pathStates.entries) '${e.key} ${e.value}'].join(', ')}',
+    ];
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: Text('Use this phone as a detector', style: OrecchinoType.bodyStrong),
+        subtitle: Text('Hears Remote ID itself, alongside any detector; its drones go into History as '
+            '"This phone"', style: OrecchinoType.caption),
+        value: rx != null && app.settings.phoneRx,
+        onChanged: rx == null ? null : app.setPhoneRx,
+      ),
+      if (lines.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Semantics(
+            label: 'This phone can hear: ${lines.join('. ')}',
+            excludeSemantics: true,
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 1),
+                child: Icon(Icons.smartphone_rounded, size: 16, color: OrecchinoColors.aqua),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  for (final l in lines) Text(l, style: OrecchinoType.caption),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+    ]);
+  }
+
+  /// Where the Live map's tiles come from: Esri's dark canvas (no key), or
+  /// a template of the person's own with its key and attribution.
+  Widget _mapTiles(BuildContext context) {
+    final custom = app.settings.mapUrl.isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Map tiles', style: OrecchinoType.bodyStrong),
+            const SizedBox(height: 2),
+            Text(
+              custom
+                  ? 'Your own: ${Uri.tryParse(app.settings.mapUrl)?.host ?? app.settings.mapUrl}'
+                  : 'Esri World Dark Gray Canvas (no key). CARTO Dark Matter now needs an API key: '
+                      'add its template with your key here.',
+              style: OrecchinoType.caption,
+            ),
+          ]),
+        ),
+        const SizedBox(width: 8),
+        OutlinedButton(onPressed: () => _editMapTiles(context), child: const Text('Change')),
+      ]),
+    );
+  }
+
+  Future<void> _editMapTiles(BuildContext context) async {
+    final url = TextEditingController(text: app.settings.mapUrl);
+    final attrib = TextEditingController(text: app.settings.mapAttribution);
+    String? error;
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, set) => AlertDialog(
+          title: const Text('Map tiles'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                controller: url,
+                autocorrect: false,
+                keyboardType: TextInputType.url,
+                decoration: InputDecoration(
+                  labelText: 'Tile URL template (https, {z} {x} {y})',
+                  hintText: 'https://…/{z}/{x}/{y}.png?api_key=…',
+                  errorText: error,
+                ),
+              ),
+              TextField(
+                controller: attrib,
+                decoration: const InputDecoration(labelText: 'Attribution shown on the map'),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, 'default'), child: const Text('USE DEFAULT')),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL')),
+            TextButton(
+              onPressed: () {
+                if (!MapTileSource.validTemplate(url.text.trim())) {
+                  set(() => error = 'Needs https:// and {z}, {x} and {y}');
+                  return;
+                }
+                Navigator.pop(ctx, 'save');
+              },
+              child: const Text('SAVE'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == 'default') await app.setMapTiles('', '');
+    if (result == 'save') await app.setMapTiles(url.text, attrib.text);
+    url.dispose();
+    attrib.dispose();
+  }
+
+  /// The ADS-B query radius, 5-30 km around the phone.
+  Widget _radius() {
+    final km = _radiusKm ?? app.settings.adsbRadiusKm.toDouble();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text('ADS-B radius', style: OrecchinoType.bodyStrong)),
+          Text('${km.round()} km', style: OrecchinoType.bodyStrong.copyWith(color: OrecchinoColors.aqua)),
+        ]),
+        Slider(
+          value: km,
+          min: AdsbArea.minKm.toDouble(),
+          max: AdsbArea.maxKm.toDouble(),
+          divisions: AdsbArea.maxKm - AdsbArea.minKm,
+          label: '${km.round()} km',
+          semanticFormatterCallback: (v) => 'ADS-B radius ${v.round()} kilometres',
+          onChanged: (v) => setState(() => _radiusKm = v),
+          onChangeEnd: (v) {
+            setState(() => _radiusKm = null);
+            app.setAdsbRadiusKm(v.round());
+          },
+        ),
+        Text(
+          'Around the phone. A live drone more than 3 km away widens it so each drone has 9 km, up to 30 km. '
+          'Aircraft outside it are dropped.',
+          style: OrecchinoType.caption,
+        ),
+      ]),
+    );
+  }
 
   Widget _toggle(String title, String subtitle, String key, bool value) => SwitchListTile(
         contentPadding: EdgeInsets.zero,
@@ -235,10 +519,16 @@ class _DetectorsViewState extends State<DetectorsView> {
             onPressed: app.syncNow, icon: const Icon(Icons.sync_rounded, size: 18), label: const Text('Sync')),
         if (SimulatedDetector.info.has('wifi'))
           OutlinedButton.icon(
-            onPressed: () => WifiSetupSheet.show(context, app.link),
+            onPressed: () => WifiSetupSheet.show(context, app.link, mapPlan: app.mapPlan),
             icon: const Icon(Icons.wifi_rounded, size: 18),
             label: const Text('Wi-Fi'),
           ),
+        OutlinedButton.icon(
+          onPressed: () => ClearHistorySheet.show(context, app),
+          icon: const Icon(Icons.delete_sweep_rounded, size: 18),
+          label: const Text('Clear history…'),
+          style: OutlinedButton.styleFrom(foregroundColor: OrecchinoColors.warning),
+        ),
       ],
     );
   }
@@ -283,6 +573,9 @@ class _DetectorsViewState extends State<DetectorsView> {
     if (ready) {
       state = 'Connected';
       stateColor = OrecchinoColors.ok;
+    } else if (ble.waitingFor == d.id) {
+      // A pending connect: no scanning, Bluetooth connects when it is near.
+      state = 'Waiting for it to come in range';
     } else if (isThis) {
       state = switch (ble.state) {
         BleLinkState.connecting => 'Connecting…',
@@ -331,10 +624,16 @@ class _DetectorsViewState extends State<DetectorsView> {
           ),
           if (caps.contains('wifi'))
             OutlinedButton.icon(
-              onPressed: () => WifiSetupSheet.show(context, app.link),
+              onPressed: () => WifiSetupSheet.show(context, app.link, mapPlan: app.mapPlan),
               icon: const Icon(Icons.wifi_rounded, size: 18),
               label: const Text('Wi-Fi'),
             ),
+          OutlinedButton.icon(
+            onPressed: () => ClearHistorySheet.show(context, app),
+            icon: const Icon(Icons.delete_sweep_rounded, size: 18),
+            label: const Text('Clear history…'),
+            style: OutlinedButton.styleFrom(foregroundColor: OrecchinoColors.warning),
+          ),
           TextButton(onPressed: app.disconnect, child: const Text('Disconnect')),
         ] else
           FilledButton(
@@ -385,7 +684,7 @@ class _DetectorsViewState extends State<DetectorsView> {
       Glass(
         padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          const Text(
+          Text(
             'Turn the detector on and keep it close. When you tap Pair, the detector shows a 6-digit passkey '
             '(Orecchino detectors use 123456) and the phone asks for it: type it within 10 seconds, or the detector '
             'hangs up. After that the app reconnects by itself and gives the detector the time and your position.',
@@ -431,7 +730,7 @@ class _DetectorsViewState extends State<DetectorsView> {
                   border: Border.all(color: OrecchinoColors.line),
                 ),
                 child: Row(children: [
-                  const BreathingDot(color: OrecchinoColors.aqua, size: 9),
+                  BreathingDot(color: OrecchinoColors.aqua, size: 9),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -449,8 +748,8 @@ class _DetectorsViewState extends State<DetectorsView> {
               ),
             ),
           if (!scanning && hits.isEmpty && ble.scanHits.isNotEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 8),
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
               child: Text('Only detectors already paired are in range', style: OrecchinoType.label),
             ),
         ]),

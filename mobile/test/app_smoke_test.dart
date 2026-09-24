@@ -44,16 +44,18 @@ void main() {
     await tester.pumpWidget(OrecchinoMobileApp(app: app));
     await tester.pump();
 
-    expect(app.tracker.length, 2);
+    expect(app.tracker.length, 3);
     expect(find.text('SIMULATED detector and position'), findsOneWidget);
-    expect(find.text('CONTACTS (3)'), findsOneWidget);
-    // Pull up the contacts sheet: the demo aircraft has a card.
-    await tester.tap(find.bySemanticsLabel(RegExp(r'^Contacts sheet')));
+    expect(find.text('DRONES (3)'), findsOneWidget);
+    // The conflict watch runs on the demo's ADS-B set.
+    expect(find.bySemanticsLabel(RegExp(r'^conflict watch on, ')), findsOneWidget);
+    // Pull up the drones sheet: drones only (the demo aircraft shows only
+    // while an alert names it; test/demo_traffic_test.dart covers that).
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^Drones sheet')));
     for (var i = 0; i < 8; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }
     expect(find.textContaining('D9A11'), findsWidgets); // drone 1's label
-    expect(find.textContaining('N123SIM'), findsWidgets); // the demo aircraft
 
     // The sky, north up without a compass, with the demo's marks.
     expect(find.bySemanticsLabel(RegExp(r'^Sky view, 3D, north up, 3.0 km range, \d marks')), findsOneWidget);

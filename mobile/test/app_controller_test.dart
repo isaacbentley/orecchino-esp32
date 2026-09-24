@@ -8,9 +8,12 @@ import 'dart:convert';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:orecchino_mobile/app/app_controller.dart';
 import 'package:orecchino_mobile/core/ble/ble_service.dart';
 import 'package:orecchino_mobile/core/location/location_service.dart';
+import 'package:orecchino_mobile/core/traffic/adsb_source.dart';
 import 'package:orecchino_mobile/data/db.dart';
 
 import 'support/fakes.dart';
@@ -29,13 +32,21 @@ class FakeLocation extends LocationService {
 void main() {
   late FakeTransport t;
   late AppController app;
+  late List<Uri> adsbGets;
 
   setUp(() async {
     t = FakeTransport();
+    // Never the real adsb.lol: a ready detector fetches ADS-B at once.
+    adsbGets = [];
+    final adsbClient = MockClient((req) async {
+      adsbGets.add(req.url);
+      return http.Response('{"ac":[]}', 200);
+    });
     app = AppController(
       db: AppDatabase(NativeDatabase.memory()),
       ble: BleService(transport: t, pairTimeout: const Duration(seconds: 2)),
       location: FakeLocation(const PhoneLocation(lat: 37.8039, lon: -122.464, accuracyM: 5, timeMs: 0)),
+      adsb: AdsbSource(client: adsbClient),
       startTimers: false,
     );
     await app.start();
@@ -138,6 +149,15 @@ void main() {
     expect(app.detectorReady, isFalse);
     expect(app.ble.error, contains('not the lilygo-t5-epaper-s3-pro'));
     expect(impostor.writes, isEmpty);
+  });
+
+  test('a ready detector fetches ADS-B at once, 10 km (6 NM) around the phone', () async {
+    t.peers['A'] = FakePeer('A');
+    expect(adsbGets, isEmpty);
+    expect(await app.pair('A', 'Orecchino'), isTrue);
+    await settle();
+    expect(adsbGets, hasLength(1));
+    expect(adsbGets.single.path, '/v2/point/37.80/-122.46/6');
   });
 
   test('forget unpins: no automatic connection afterwards', () async {

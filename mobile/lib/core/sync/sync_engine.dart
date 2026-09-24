@@ -14,6 +14,8 @@
 // - A cursor above `total`: the board's log was cleared. The log epoch is
 //   bumped (so the new seqs never overwrite older history) and the sync
 //   asks again from `oldest`, once.
+// Ended records are written in batches (up to [batchSize] at a time, and
+// the rest before log_done is acted on), not one write per record.
 // Messages are handled strictly in order: [handleMessage] queues behind the
 // previous one, and returns when this one is stored.
 //
@@ -70,8 +72,15 @@ class SyncEngine {
   int _received = 0;
   int _failed = 0;
   final List<DetectionsCompanion> _active = [];
+  final List<DetectionsCompanion> _ended = []; // received, not yet written
+
+  /// Ended records written per database batch.
+  static const batchSize = 64;
   Timer? _watchdog;
-  Future<void> _queue = Future.value();
+  /// The previous message's handling; null before the first. (Not a
+  /// pre-made completed future: its callbacks would be scheduled in the
+  /// zone it was made in, not the one the messages arrive in.)
+  Future<void>? _queue;
   SyncProgress _last = SyncProgress.idle;
 
   final _progress = StreamController<SyncProgress>.broadcast();
@@ -106,6 +115,7 @@ class SyncEngine {
     _cleared = false;
     _restarted = false;
     _active.clear();
+    _ended.clear();
     final d = await db.getDetector(detectorId);
     _cursor = d?.lastSyncSeq ?? 0;
     _epoch = d?.logEpoch ?? 0;
@@ -136,6 +146,7 @@ class SyncEngine {
   }
 
   void _finish({String? error}) {
+    _ended.clear(); // an abandoned sync asks for these again
     _watchdog?.cancel();
     _watchdog = null;
     _isSyncing = false;
@@ -144,7 +155,8 @@ class SyncEngine {
 
   /// Queue [msg] behind the previous message; completes when it is stored.
   Future<void> handleMessage(HostMessage msg) {
-    final f = _queue.then((_) => _handle(msg));
+    final prev = _queue;
+    final f = prev == null ? _handle(msg) : prev.then((_) => _handle(msg));
     _queue = f.catchError((_) {});
     return f;
   }
@@ -157,12 +169,9 @@ class SyncEngine {
       final ended = msg.seq != null && !msg.active;
       final row = _row(id, msg, ended);
       if (ended) {
-        try {
-          await db.insertDetections([row]);
-          _received++;
-        } catch (_) {
-          _failed++;
-        }
+        _ended.add(row);
+        _received++;
+        if (_ended.length >= batchSize) await _flush();
       } else {
         _active.add(row);
       }
@@ -190,12 +199,31 @@ class SyncEngine {
         maxH: Value(m.maxHeightM),
         peakRssi: Value(m.peakRssi),
         authState: Value(m.authState),
-        tfr: Value(m.inTfr),
+        tfr: Value(m.tfrEver),
+        inTfr: Value(m.inTfrNow),
+        tfrId: Value(m.tfrId),
+        classType: Value(m.classType),
+        catEu: Value(m.catEu),
+        classEu: Value(m.classEu),
         emerg: Value(m.emergency),
         msgs: Value(m.msgCount),
       );
 
+  /// Write the ended records received so far, in one batch.
+  Future<void> _flush() async {
+    if (_ended.isEmpty) return;
+    final rows = List.of(_ended);
+    _ended.clear();
+    try {
+      await db.insertDetections(rows);
+    } catch (_) {
+      _received -= rows.length;
+      _failed += rows.length;
+    }
+  }
+
   Future<void> _done(String id, LogDoneMessage m) async {
+    await _flush();
     final total = m.total ?? m.nextSeq;
     final next = m.nextSeq ?? total;
     final oldest = m.oldestSeq;

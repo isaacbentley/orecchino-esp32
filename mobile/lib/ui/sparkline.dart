@@ -12,10 +12,12 @@ import 'theme/theme.dart';
 
 class Sparkline extends StatelessWidget {
   final List<double> values;
-  final Color color;
+  final Color? _color;
   final double height;
 
-  const Sparkline({super.key, required this.values, this.color = OrecchinoColors.aqua, this.height = 28});
+  Color get color => _color ?? OrecchinoColors.aqua;
+
+  const Sparkline({super.key, required this.values, Color? color, this.height = 28}) : _color = color;
 
   @override
   Widget build(BuildContext context) {

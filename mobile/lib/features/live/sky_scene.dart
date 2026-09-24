@@ -4,7 +4,11 @@
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
+import '../../core/geo.dart';
+import '../../core/traffic/traffic_rules.dart';
 
 import '../../ui/traffic_widgets.dart';
 import 'live_items.dart';
@@ -56,7 +60,7 @@ class SkyScene extends StatelessWidget {
   final String? selectedId;
   final double? headingDeg;
   final bool showFacing;
-  final ValueNotifier<double>? clock;
+  final ValueListenable<double>? clock;
   final String semanticLabel;
   final ValueChanged<String> onSelect;
 
@@ -78,10 +82,15 @@ class SkyScene extends StatelessWidget {
   Widget build(BuildContext context) {
     final scaler = MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.3);
     final tops = <String, Offset>{};
+    final beyond = <String>{};
     for (final m in marks) {
-      final p = camera.project(m.distanceM, m.bearingDeg, heightM: m.heightM);
-      if (p != null) tops[m.id] = p.offset;
+      final p = camera.place(m.distanceM, m.bearingDeg, heightM: m.isOperator ? 0 : m.heightM);
+      if (p == null) continue;
+      tops[m.id] = p.point.offset;
+      if (p.beyond) beyond.add(m.id);
     }
+    final you = camera.groundAt(0, 0);
+    if (you != null) tops[SkyBridge.you] = you.offset;
     final badges = _badgeSpots(tops, scaler);
     return Stack(
       clipBehavior: Clip.none,
@@ -104,6 +113,10 @@ class SkyScene extends StatelessWidget {
                     showFacing: showFacing,
                     textScaler: scaler,
                     reserved: [for (final (_, r) in badges) r],
+                    // Left and right: the notch and, on a phone on its side,
+                    // the tab rail (main.dart puts it in the padding).
+                    labelInsets: EdgeInsets.only(
+                        left: MediaQuery.paddingOf(context).left, right: MediaQuery.paddingOf(context).right),
                   ),
                 ),
               ),
@@ -149,7 +162,10 @@ class SkyScene extends StatelessWidget {
               child: Semantics(
                 button: true,
                 selected: selectedId == m.id,
-                label: items[m.id]!.semantics(headingDeg: headingDeg),
+                label: beyond.contains(m.id)
+                    ? '${items[m.id]!.semantics(headingDeg: headingDeg)}, beyond ${Geo.rangeText(camera.rangeM)}, '
+                        '${Geo.rangeText(m.distanceM)} ${TrafficRules.compass8(m.bearingDeg)}, shown on the edge'
+                    : items[m.id]!.semantics(headingDeg: headingDeg),
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => onSelect(m.id),

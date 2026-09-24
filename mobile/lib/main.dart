@@ -1,11 +1,17 @@
 // main.dart — Root entry point for Orecchino mobile application
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:async';
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'app/app_controller.dart';
 import 'core/alerts/notifier.dart';
+import 'core/power/power_policy.dart';
 import 'core/traffic/traffic_rules.dart';
 import 'data/db.dart';
 import 'features/detectors/detectors_view.dart';
@@ -13,15 +19,27 @@ import 'features/find/find_view.dart';
 import 'features/history/history_view.dart';
 import 'features/live/contact_sheet.dart';
 import 'features/live/live_view.dart';
+import 'ui/ambient_clock.dart';
+import 'ui/glass.dart';
 import 'ui/glass_nav_bar.dart';
 import 'ui/living_background.dart';
 import 'ui/theme/theme.dart';
+import 'ui/traffic_widgets.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  final app = AppController(db: AppDatabase(), alerts: SystemAlertSink());
-  app.start();
-  runApp(OrecchinoMobileApp(app: app));
+  // iOS: opt into Core Bluetooth state restoration before anything else
+  // touches Bluetooth, so a connection (or a pending connect) to the
+  // detector survives iOS ending the app in the background, and iOS
+  // relaunches it when the detector connects.
+  if (!kIsWeb && Platform.isIOS) unawaited(FlutterBluePlus.setOptions(restoreState: true));
+  final db = AppDatabase();
+  final app = AppController.platform(db: db, alerts: SystemAlertSink());
+  // The look first, so a Flat app never flashes the Sky while it starts.
+  db.getSetting('look').then((v) => Look.apply(AppLook.parse(v)), onError: (Object _) {}).whenComplete(() {
+    app.start();
+    runApp(OrecchinoMobileApp(app: app));
+  });
 }
 
 class OrecchinoMobileApp extends StatelessWidget {
@@ -38,8 +56,20 @@ class OrecchinoMobileApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       debugShowCheckedModeBanner: false,
       // Follow the system text size (Dynamic Type / font scale) up to 2x;
-      // every screen scrolls or wraps rather than clipping.
-      builder: (context, child) => MediaQuery.withClampedTextScaling(maxScaleFactor: 2.0, child: child!),
+      // every screen scrolls or wraps rather than clipping. The power
+      // policy sets how the glass frosts and whether ambient motion runs,
+      // for every route (sheets and dialogs too).
+      builder: (context, child) => ValueListenableBuilder<PowerPolicy>(
+        valueListenable: app.power,
+        builder: (context, p, _) => GlassScope(
+          mode: p.glass,
+          // Flat has no ambient motion at all (no sweep, pulses or glows).
+          child: AmbientMotion(
+            enabled: p.ambientHz > 0 && !Look.flat,
+            child: MediaQuery.withClampedTextScaling(maxScaleFactor: 2.0, child: child!),
+          ),
+        ),
+      ),
       home: MainShell(app: app),
     );
   }
@@ -57,14 +87,24 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   int _tabIndex = 0;
 
-  // Tickers (the sky, the sweep, the lights) stop while the app is in the
-  // background; the engine stops drawing frames then too, this makes it
-  // explicit and covers the moment the app is hidden but not yet paused.
+  // The app in the foreground or not: tickers stop (TickerMode), the
+  // ambient clock pauses, and the app's power policy follows (the compass,
+  // location, the phone's scan, ADS-B). "inactive" (a system sheet over the
+  // app, the app switcher) still counts as in front.
   bool _foreground = true;
+  bool? _reduced;
   late final AppLifecycleListener _life = AppLifecycleListener(onStateChange: (s) {
     final fg = s == AppLifecycleState.resumed || s == AppLifecycleState.inactive;
+    AmbientClock.instance.paused = !fg;
+    widget.app.setVisibility(foreground: fg);
     if (fg != _foreground && mounted) setState(() => _foreground = fg);
   });
+
+  // The shell rebuilds only when what it shows changes (the scene level
+  // and the Live badge), not on every update of the app: each screen
+  // listens for itself.
+  TrafficLevel _level = TrafficLevel.none;
+  String? _alertText;
 
   static const _items = [
     GlassNavItem(Icons.radar_outlined, Icons.radar_rounded, 'Live'),
@@ -78,16 +118,89 @@ class _MainShellState extends State<MainShell> {
     super.initState();
     // A notification's Show opens the Live sky on that pair.
     widget.app.showRequest.addListener(_onShow);
+    widget.app.notice.addListener(_onNotice);
+    widget.app.addListener(_onApp);
+    widget.app.power.addListener(_onPower);
     _life; // start listening
+    _onApp();
+    _onPower();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final r = Motion.reduced(context);
+    if (r != _reduced) {
+      _reduced = r;
+      // Not during the build: the policy's listeners rebuild the app.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.app.setVisibility(reduceMotion: r);
+      });
+    }
+  }
+
+  PowerPolicy? _power;
+
+  /// The policy changed: the ambient rate, and (for the shell) the glass
+  /// grouping and the aurora's scale.
+  void _onPower() {
+    final p = widget.app.powerPolicy;
+    if (p.ambientHz > 0) AmbientClock.instance.hz = p.ambientHz;
+    final old = _power;
+    _power = p;
+    if (old != null && mounted && (old.glass != p.glass || old.auroraScale != p.auroraScale)) setState(() {});
+  }
+
+  /// The scene level and the badge's words; a rebuild only when they change.
+  void _onApp() {
+    final app = widget.app;
+    final items = buildLiveItems(app);
+    final level = sceneLevel(items, app.traffic.result.highest);
+    // The badge on Live speaks the alert's own words, its action first.
+    final alertText = app.traffic.result.alerts.isNotEmpty
+        ? trafficAction(app.traffic.result.alerts.first)
+        : items.where((c) => !c.stale && c.alertWords.isNotEmpty).map((c) => c.alertWords.join(', ')).firstOrNull;
+    if (level == _level && alertText == _alertText) return;
+    if (!mounted) return;
+    setState(() {
+      _level = level;
+      _alertText = alertText;
+    });
+  }
+
+  void _selectTab(int i) {
+    setState(() => _tabIndex = i);
+    widget.app.setVisibility(tab: AppTab.values[i]);
+  }
+
+  /// A short notice from the app ("History cleared on T5"): a floating
+  /// glass bar, read out by the screen reader.
+  void _onNotice() {
+    final text = widget.app.notice.value;
+    if (text == null || !mounted) return;
+    widget.app.notice.value = null;
+    ScaffoldMessenger.maybeOf(context)
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(text, style: OrecchinoType.bodyStrong),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: OrecchinoColors.raised,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16), side: BorderSide(color: OrecchinoColors.lineBright)),
+        duration: const Duration(seconds: 4),
+      ));
   }
 
   void _onShow() {
-    if (widget.app.showRequest.value != null && _tabIndex != 0) setState(() => _tabIndex = 0);
+    if (widget.app.showRequest.value != null && _tabIndex != 0) _selectTab(0);
   }
 
   @override
   void dispose() {
     widget.app.showRequest.removeListener(_onShow);
+    widget.app.notice.removeListener(_onNotice);
+    widget.app.removeListener(_onApp);
+    widget.app.power.removeListener(_onPower);
     _life.dispose();
     super.dispose();
   }
@@ -97,21 +210,21 @@ class _MainShellState extends State<MainShell> {
     final app = widget.app;
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light,
-      child: ListenableBuilder(
-        listenable: app,
-        builder: (context, _) {
-          final items = buildLiveItems(app);
-          final level = sceneLevel(items, app.traffic.result.highest);
-          final Widget screen = switch (_tabIndex) {
-            0 => LiveView(app: app),
-            1 => FindView(app: app),
-            2 => HistoryView(db: app.db, app: app),
-            _ => DetectorsView(app: app),
-          };
-          // The badge on Live speaks the alert's own words.
-          final alertText = app.traffic.result.alerts.isNotEmpty
-              ? app.traffic.result.alerts.first.text
-              : items.where((c) => !c.stale && c.alertWords.isNotEmpty).map((c) => c.alertWords.join(', ')).firstOrNull;
+      child: Builder(
+        builder: (context) {
+          final level = _level;
+          final alertText = _alertText;
+          // Each screen rebuilds with the app's updates (once a second, and
+          // on real changes); the shell around it does not.
+          final Widget screen = ListenableBuilder(
+            listenable: app,
+            builder: (context, _) => switch (_tabIndex) {
+              0 => LiveView(app: app),
+              1 => FindView(app: app),
+              2 => HistoryView(db: app.db, app: app),
+              _ => DetectorsView(app: app),
+            },
+          );
           final badges = {if (level >= TrafficLevel.caution && alertText != null && _tabIndex != 0) 0: alertText};
           final mq = MediaQuery.of(context);
           // A phone on its side: the tabs move to a rail on the left.
@@ -134,13 +247,15 @@ class _MainShellState extends State<MainShell> {
             // Screens keep clear of the rail as they do of the notch.
             body = MediaQuery(data: mq.copyWith(padding: mq.padding.copyWith(left: railInset)), child: body);
           }
+          // Balanced: the screen's glass panels share one backdrop read.
+          if (app.powerPolicy.glass == GlassMode.grouped) body = BackdropGroup(child: body);
           return TickerMode(
             enabled: _foreground,
             child: Scaffold(
               backgroundColor: OrecchinoColors.void0,
               extendBody: true,
               body: Stack(children: [
-                Positioned.fill(child: LivingBackground(level: level)),
+                Positioned.fill(child: LivingBackground(level: level, renderScale: app.powerPolicy.auroraScale)),
                 Positioned.fill(child: body),
                 // A scrim under the status bar: content scrolls away beneath it.
                 Positioned(
@@ -172,7 +287,7 @@ class _MainShellState extends State<MainShell> {
                       child: GlassNavRail(
                         items: _items,
                         index: _tabIndex,
-                        onTap: (i) => setState(() => _tabIndex = i),
+                        onTap: _selectTab,
                         badges: badges,
                       ),
                     ),
@@ -183,7 +298,7 @@ class _MainShellState extends State<MainShell> {
                   : GlassNavBar(
                       items: _items,
                       index: _tabIndex,
-                      onTap: (i) => setState(() => _tabIndex = i),
+                      onTap: _selectTab,
                       badges: badges,
                     ),
             ),

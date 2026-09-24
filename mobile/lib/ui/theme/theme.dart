@@ -6,19 +6,25 @@
 import 'package:flutter/material.dart';
 
 import 'colors.dart';
+import 'look.dart';
 import 'typography.dart';
 
 export 'colors.dart';
+export 'look.dart';
 export 'motion.dart';
 export 'typography.dart';
 
 abstract final class OrecchinoTheme {
-  static const double radius = 22; // glass panels
-  static const double radiusSmall = 14; // chips, buttons
+  static double get radius => Look.p.radius; // panels
+  static double get radiusSmall => Look.p.radiusSmall; // chips, buttons
+
+  /// Pills (tags, chips, the status chips): round in Sky, the mockups'
+  /// small radius in Flat. (The bridge's badge stays a pill in both.)
+  static double get pill => Look.flat ? Look.p.radiusSmall : 999;
   static const double minTarget = 44; // pt: every tap target
 
   static ThemeData get dark {
-    const scheme = ColorScheme.dark(
+    final scheme = ColorScheme.dark(
       primary: OrecchinoColors.aqua,
       onPrimary: OrecchinoColors.void0,
       secondary: OrecchinoColors.aircraft,
@@ -34,7 +40,7 @@ abstract final class OrecchinoTheme {
     );
     final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(radiusSmall));
     const minSize = Size(minTarget, minTarget);
-    const buttonText = TextStyle(fontFamily: OrecchinoType.text, fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 0.3);
+    final buttonText = TextStyle(fontFamily: OrecchinoType.text, fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 0.3);
     return ThemeData(
       useMaterial3: true,
       brightness: Brightness.dark,
@@ -45,7 +51,7 @@ abstract final class OrecchinoTheme {
       fontFamily: OrecchinoType.text,
       splashFactory: InkRipple.splashFactory,
       materialTapTargetSize: MaterialTapTargetSize.padded,
-      textTheme: const TextTheme(
+      textTheme: TextTheme(
         displayLarge: OrecchinoType.hero,
         headlineMedium: OrecchinoType.title,
         titleLarge: OrecchinoType.heading,
@@ -57,7 +63,7 @@ abstract final class OrecchinoTheme {
         labelMedium: OrecchinoType.label,
         labelSmall: OrecchinoType.eyebrow,
       ),
-      iconTheme: const IconThemeData(color: OrecchinoColors.inkMuted, size: 22),
+      iconTheme: IconThemeData(color: OrecchinoColors.inkMuted, size: 22),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           backgroundColor: OrecchinoColors.aqua,
@@ -75,7 +81,7 @@ abstract final class OrecchinoTheme {
           foregroundColor: OrecchinoColors.ink,
           backgroundColor: const Color(0x0DFFFFFF),
           disabledForegroundColor: OrecchinoColors.inkSubtle,
-          side: const BorderSide(color: OrecchinoColors.lineBright),
+          side: BorderSide(color: OrecchinoColors.lineBright),
           minimumSize: minSize,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           shape: shape,
@@ -104,8 +110,10 @@ abstract final class OrecchinoTheme {
       chipTheme: ChipThemeData(
         backgroundColor: const Color(0x0DFFFFFF),
         selectedColor: OrecchinoColors.aqua.withValues(alpha: 0.18),
-        side: const BorderSide(color: OrecchinoColors.lineBright),
-        shape: const StadiumBorder(side: BorderSide.none),
+        side: BorderSide(color: OrecchinoColors.lineBright),
+        shape: Look.flat
+            ? RoundedRectangleBorder(borderRadius: BorderRadius.circular(Look.p.radiusSmall))
+            : const StadiumBorder(side: BorderSide.none),
         labelStyle: OrecchinoType.label.copyWith(color: OrecchinoColors.ink),
         secondaryLabelStyle: OrecchinoType.label.copyWith(color: OrecchinoColors.aqua),
         checkmarkColor: OrecchinoColors.aqua,
@@ -119,22 +127,22 @@ abstract final class OrecchinoTheme {
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(radiusSmall),
-          borderSide: const BorderSide(color: OrecchinoColors.line),
+          borderSide: BorderSide(color: OrecchinoColors.line),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(radiusSmall),
-          borderSide: const BorderSide(color: OrecchinoColors.line),
+          borderSide: BorderSide(color: OrecchinoColors.line),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(radiusSmall),
-          borderSide: const BorderSide(color: OrecchinoColors.aqua, width: 1.5),
+          borderSide: BorderSide(color: OrecchinoColors.aqua, width: 1.5),
         ),
       ),
       dialogTheme: DialogThemeData(
         backgroundColor: OrecchinoColors.raised,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(radius),
-          side: const BorderSide(color: OrecchinoColors.line),
+          side: BorderSide(color: OrecchinoColors.line),
         ),
         titleTextStyle: OrecchinoType.heading,
         contentTextStyle: OrecchinoType.body.copyWith(color: OrecchinoColors.inkMuted),
@@ -151,11 +159,11 @@ abstract final class OrecchinoTheme {
         contentTextStyle: OrecchinoType.body,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(radiusSmall),
-          side: const BorderSide(color: OrecchinoColors.line),
+          side: BorderSide(color: OrecchinoColors.line),
         ),
       ),
-      progressIndicatorTheme: const ProgressIndicatorThemeData(color: OrecchinoColors.aqua),
-      listTileTheme: const ListTileThemeData(
+      progressIndicatorTheme: ProgressIndicatorThemeData(color: OrecchinoColors.aqua),
+      listTileTheme: ListTileThemeData(
         iconColor: OrecchinoColors.inkMuted,
         textColor: OrecchinoColors.ink,
         minVerticalPadding: 10,

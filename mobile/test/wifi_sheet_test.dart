@@ -1,6 +1,7 @@
 // wifi_sheet_test.dart — the T5 Wi-Fi sheet: one listener for its life
 // (none after a swipe-dismiss), no duplicate networks on rebuilds or
-// repeated lines, and every state visible.
+// repeated lines, every state visible (including "Wi-Fi paused: phone
+// connected"), and the board's ADS-B radius and map area (wifi_config).
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -172,5 +173,69 @@ void main() {
     link.line({'type': 'wifi_scan_done', 'n': 0});
     await tester.pumpAndSettle();
     expect(find.text('Connected to Home'), findsOneWidget);
+  });
+
+  testWidgets('paused by the phone: said, then gone when the board resumes', (tester) async {
+    final link = FakeLink();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: WifiSetupSheet(link: link))));
+    link.line({'type': 'wifi_status', 'state': 'idle', 'mode': 'sync', 'paused': 'phone', 'saved': <String>[]});
+    await tester.pump();
+    expect(find.text('Wi-Fi paused: phone connected'), findsOneWidget);
+    link.line({'type': 'net', 'state': 'resumed'});
+    await tester.pump();
+    expect(find.text('Wi-Fi paused: phone connected'), findsNothing);
+    link.line({'type': 'net', 'state': 'paused', 'reason': 'phone'});
+    await tester.pump();
+    expect(find.text('Wi-Fi paused: phone connected'), findsOneWidget);
+  });
+
+  testWidgets('board data: ADS-B radius and map area with the storage plan, sent as wifi_config', (tester) async {
+    final link = FakeLink();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: WifiSetupSheet(link: link))));
+    // An older board without the fields: no settings shown.
+    link.line({'type': 'wifi_status', 'state': 'idle', 'mode': 'sync', 'saved': <String>[]});
+    link.line({'type': 'wifi_scan_done', 'n': 0});
+    await tester.pump();
+    expect(find.text('ADS-B radius'), findsNothing);
+
+    link.line({
+      'type': 'wifi_status',
+      'state': 'idle',
+      'mode': 'sync',
+      'adsb_km': 10,
+      'tile_km': 3,
+      'tile_max_km': 14.75,
+      'saved': <String>[]
+    });
+    link.line({'type': 'net', 'state': 'synced', 'map': 'Map: 3 km z12-15; 0.8 MB of 11.9 MB', 'tile_max_km': 14.75});
+    await tester.pump();
+    await tester.scrollUntilVisible(find.text('Map area'), 100);
+    expect(find.text('ADS-B radius'), findsOneWidget);
+    expect(find.text('10 km'), findsOneWidget);
+    expect(find.text('3 km'), findsOneWidget);
+    expect(find.text('Map: 3 km z12-15; 0.8 MB of 11.9 MB'), findsOneWidget);
+    // The map slider stops at what the flash holds (14 km).
+    final sliders = tester.widgetList<Slider>(find.byType(Slider)).toList();
+    expect(sliders[0].min, 5);
+    expect(sliders[0].max, 30);
+    expect(sliders[1].min, 1);
+    expect(sliders[1].max, 14);
+    // Drag the ADS-B radius to the far end: one wifi_config when released.
+    await tester.drag(find.byType(Slider).first, const Offset(600, 0));
+    await tester.pump();
+    expect(link.sent.last, {'cmd': 'wifi_config', 'adsb_km': 30});
+    expect(link.sent.where((c) => c['cmd'] == 'wifi_config'), hasLength(1));
+    // The board's answer wins.
+    link.line({
+      'type': 'wifi_status',
+      'state': 'idle',
+      'mode': 'sync',
+      'adsb_km': 30,
+      'tile_km': 3,
+      'tile_max_km': 14.75,
+      'saved': <String>[]
+    });
+    await tester.pump();
+    expect(find.text('30 km'), findsOneWidget);
   });
 }

@@ -31,6 +31,13 @@ package's `LICENSE` in the pub cache. All are GPL-compatible.
 | [flutter_tts](https://pub.dev/packages/flutter_tts) | 4.2.5 | MIT | Optional spoken traffic callout |
 | [http](https://pub.dev/packages/http) | 1.6.0 | BSD-3-Clause | adsb.lol requests |
 | [path_provider](https://pub.dev/packages/path_provider), [path](https://pub.dev/packages/path) | 2.1.6, 1.9.1 | BSD-3-Clause | Database location |
+| [flutter_map](https://pub.dev/packages/flutter_map) | 8.3.2 | BSD-3-Clause | Live screen's Map mode |
+| [latlong2](https://pub.dev/packages/latlong2) | 0.10.1 | Apache-2.0 | Coordinates for flutter_map |
+| [dart_earcut](https://pub.dev/packages/dart_earcut), [dart_polylabel2](https://pub.dev/packages/dart_polylabel2) | 1.2.0, 1.0.0 | MIT, BSD-3-Clause | Pulled in by flutter_map (polygons) |
+| [proj4dart](https://pub.dev/packages/proj4dart), [mgrs_dart](https://pub.dev/packages/mgrs_dart), [wkt_parser](https://pub.dev/packages/wkt_parser) | 3.0.0, 3.0.0, 2.0.0 | MIT | Pulled in by flutter_map / latlong2 (projections) |
+| [unicode](https://pub.dev/packages/unicode), [simple_sparse_list](https://pub.dev/packages/simple_sparse_list) | 1.1.9, 0.1.4 | BSD-3-Clause | Pulled in by latlong2 |
+| [archive](https://pub.dev/packages/archive), [posix](https://pub.dev/packages/posix) | 4.3.0, 6.5.2 | MIT | Pulled in by flutter_map's tile cache |
+| [intl](https://pub.dev/packages/intl) | 0.20.3 | BSD-3-Clause | Pulled in by latlong2 and flutter_map |
 
 The remaining transitive packages in the lock file are the Dart team's
 BSD-3-Clause utilities and a few MIT, BSD-2-Clause and Apache-2.0 ones
@@ -49,6 +56,14 @@ bundling them in an app of any license:
 | [Space Grotesk](https://github.com/floriankarsten/space-grotesk) (variable) | Display type and large numbers | 2020 The Space Grotesk Project Authors |
 | [Inter](https://github.com/rsms/inter) (variable) | Text | 2020 The Inter Project Authors |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) (variable) | UAS IDs, MACs, hex | 2020 The JetBrains Mono Project Authors |
+| [IBM Plex Sans Condensed](https://github.com/IBM/plex) 2.0.0 (Regular, SemiBold, Bold) | Flat theme: display type | 2017 IBM Corp., Reserved Font Name "Plex" |
+| [IBM Plex Sans](https://github.com/IBM/plex) 1.1.0 (Regular, Medium, SemiBold, Bold) | Flat theme: text | 2017 IBM Corp., Reserved Font Name "Plex" |
+| [IBM Plex Mono](https://github.com/IBM/plex) 2.5.0 (Regular, Medium, SemiBold, Bold) | Flat theme: identifiers, section heads | 2017 IBM Corp., Reserved Font Name "Plex" |
+
+The IBM Plex files are the unmodified TTFs from the official
+[IBM/plex](https://github.com/IBM/plex/releases) release zips
+(`@ibm/plex-sans-condensed@2.0.0`, `@ibm/plex-sans@1.1.0`,
+`@ibm/plex-mono@2.5.0`), only the weights the Flat theme uses.
 
 The app icon and launch artwork (`mobile/branding/`) are original to this
 project.
@@ -176,6 +191,14 @@ contributors); they are used only as test input.
   redistribution or heavier use, generate tiles from OSM data or self-host
   (e.g. Protomaps/OpenMapTiles) instead. The host test's tile fixture
   (`tests/vectors/tiles/`) is synthetic, not map imagery.
+- **Phone app map tiles** (`mobile/`, the Live screen's Map mode): fetched
+  live from Esri's World Dark Gray Canvas base and reference layers
+  (server.arcgisonline.com, no key), cached on the phone (at most 50 MB),
+  never prefetched or redistributed; the attribution "Esri, HERE, Garmin,
+  © OpenStreetMap contributors" (map data ODbL) is always on screen, and
+  use is subject to Esri's terms of use as above. The person can set their
+  own tile template and attribution instead (Detectors > Settings > Map
+  tiles).
 - **FAA TFR polygons** (macOS app, and the T5 over Wi-Fi) are fetched
   live from tfr.faa.gov (US-government data, public domain).
 - **ADS-B aircraft** (macOS app, phone app, and the T5 over Wi-Fi) are

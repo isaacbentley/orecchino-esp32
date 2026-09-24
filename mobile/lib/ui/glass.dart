@@ -4,6 +4,16 @@
 // Glass is a backdrop blur, a night tint, a top-lit veil and a hairline edge;
 // text on it keeps 4.5:1 over the brightest background (colors.dart).
 //
+// How the blur is made follows the power mode ([GlassScope]): each panel
+// its own blur (Full), panels on one screen sharing one backdrop read
+// (Balanced: `BackdropFilter.grouped` under the screen's `BackdropGroup`),
+// or no blur at all, a denser tint instead (Saver).
+//
+// In the Flat look (look.dart) every one of these is the mockups' flat
+// component instead: an opaque panel with a 1 px rule and at most an 8 px
+// radius, a level shown as a dark banner of its colour, no blur, no glow,
+// and a connection light that is a still dot.
+//
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:math' as math;
@@ -11,12 +21,32 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../core/power/power_policy.dart';
 import 'theme/theme.dart';
 
+/// How [Glass] frosts, for the widgets below: see the file comment.
+class GlassScope extends InheritedWidget {
+  final GlassMode mode;
+
+  const GlassScope({super.key, required this.mode, required super.child});
+
+  static GlassMode of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<GlassScope>()?.mode ?? GlassMode.grouped;
+
+  @override
+  bool updateShouldNotify(GlassScope old) => old.mode != mode;
+}
+
 class Glass extends StatelessWidget {
+  /// Saver's tint: night at 0.8 instead of 0.62 (no blur softens the sky).
+  static const Color _denseTint = Color(0xCC0A1020);
+
   final Widget child;
-  final BorderRadius borderRadius;
+  final BorderRadius? _radius;
   final EdgeInsetsGeometry padding;
+
+  /// The panel's corners: the look's panel radius unless given.
+  BorderRadius get borderRadius => _radius ?? BorderRadius.circular(OrecchinoTheme.radius);
 
   /// An optional colour wash (a traffic level), mixed into the tint.
   final Color? wash;
@@ -27,26 +57,65 @@ class Glass extends StatelessWidget {
   const Glass({
     super.key,
     required this.child,
-    this.borderRadius = const BorderRadius.all(Radius.circular(OrecchinoTheme.radius)),
+    BorderRadius? borderRadius,
     this.padding = EdgeInsets.zero,
     this.wash,
     this.edge,
     this.blur = 22,
     this.shadows,
-  });
+  }) : _radius = borderRadius;
+
+  /// Flat: a level or selection colour as the mockups' dark banner
+  /// (#3A1414 for their red).
+  static Color flatWash(Color w) =>
+      Color.from(alpha: 1, red: w.r * 0.25, green: w.g * 0.19, blue: w.b * 0.19);
+
+  /// Flat corners: never rounder than the look's panel radius.
+  static BorderRadius flatRadius(BorderRadius r) {
+    final max = OrecchinoTheme.radius;
+    Radius c(Radius x) => x.x > max ? Radius.circular(max) : x;
+    return BorderRadius.only(
+        topLeft: c(r.topLeft), topRight: c(r.topRight), bottomLeft: c(r.bottomLeft), bottomRight: c(r.bottomRight));
+  }
+
+  Widget _flat() {
+    final r = flatRadius(borderRadius);
+    final w = wash;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: w == null ? OrecchinoColors.night : flatWash(w),
+        borderRadius: r,
+        border: Border.all(color: edge ?? (w == null ? OrecchinoColors.line : w.withValues(alpha: 0.55))),
+      ),
+      child: ClipRRect(
+        borderRadius: r,
+        child: Material(type: MaterialType.transparency, child: Padding(padding: padding, child: child)),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (Look.flat) return _flat();
     final w = wash;
-    final top = Color.alphaBlend(OrecchinoColors.glassVeil, OrecchinoColors.glassTint);
-    final bottom = Color.alphaBlend(OrecchinoColors.glassVeilLow, OrecchinoColors.glassTint);
+    final mode = GlassScope.of(context);
+    // Without a blur the tint is denser, so text keeps its contrast over
+    // the sharp sky behind it.
+    final tint = mode == GlassMode.tint ? Glass._denseTint : OrecchinoColors.glassTint;
+    final top = Color.alphaBlend(OrecchinoColors.glassVeil, tint);
+    final bottom = Color.alphaBlend(OrecchinoColors.glassVeilLow, tint);
+    final filter = ui.ImageFilter.blur(sigmaX: blur, sigmaY: blur);
+    Widget frost(Widget child) => switch (mode) {
+          GlassMode.live => BackdropFilter(filter: filter, child: child),
+          GlassMode.grouped => BackdropFilter.grouped(filter: filter, child: child),
+          GlassMode.tint => child,
+        };
     return DecoratedBox(
       decoration: BoxDecoration(borderRadius: borderRadius, boxShadow: shadows),
       child: ClipRRect(
         borderRadius: borderRadius,
-        child: BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          child: DecoratedBox(
+        child: frost(
+          DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: borderRadius,
               gradient: LinearGradient(
@@ -96,14 +165,16 @@ class GlassButton extends StatelessWidget {
       label: semanticLabel,
       excludeSemantics: true,
       child: Glass(
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(OrecchinoTheme.pill),
         wash: wash ?? (selected ? OrecchinoColors.aqua : null),
         edge: selected ? OrecchinoColors.aqua.withValues(alpha: 0.55) : null,
         child: Material(
           type: MaterialType.transparency,
           child: InkWell(
             onTap: onTap,
-            customBorder: const StadiumBorder(),
+            customBorder: Look.flat
+                ? RoundedRectangleBorder(borderRadius: BorderRadius.circular(OrecchinoTheme.radiusSmall))
+                : const StadiumBorder(),
             child: ConstrainedBox(
               constraints: const BoxConstraints(minWidth: OrecchinoTheme.minTarget, minHeight: OrecchinoTheme.minTarget),
               child: Padding(padding: padding, child: Center(widthFactor: 1, heightFactor: 1, child: child)),
@@ -147,8 +218,10 @@ class GlassSegmented<T> extends StatelessWidget {
                   constraints: const BoxConstraints(minWidth: OrecchinoTheme.minTarget, minHeight: OrecchinoTheme.minTarget),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                   decoration: BoxDecoration(
-                    color: v == value ? OrecchinoColors.aqua.withValues(alpha: 0.18) : Colors.transparent,
-                    borderRadius: BorderRadius.circular(999),
+                    color: v == value
+                        ? (Look.flat ? OrecchinoColors.raised : OrecchinoColors.aqua.withValues(alpha: 0.18))
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(Look.flat ? OrecchinoTheme.radiusSmall - 2 : 999),
                     border: Border.all(color: v == value ? OrecchinoColors.aqua.withValues(alpha: 0.6) : Colors.transparent),
                   ),
                   child: Text(
@@ -170,11 +243,13 @@ class GlassSegmented<T> extends StatelessWidget {
 /// A small outlined tag: a source, a capability, a status word.
 class Tag extends StatelessWidget {
   final String text;
-  final Color color;
+  final Color? _color;
   final bool filled;
   final IconData? icon;
 
-  const Tag(this.text, {super.key, this.color = OrecchinoColors.inkMuted, this.filled = false, this.icon});
+  Color get color => _color ?? OrecchinoColors.inkMuted;
+
+  const Tag(this.text, {super.key, Color? color, this.filled = false, this.icon}) : _color = color;
 
   @override
   Widget build(BuildContext context) {
@@ -182,7 +257,7 @@ class Tag extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
         color: filled ? color : color.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(OrecchinoTheme.pill),
         border: Border.all(color: color.withValues(alpha: filled ? 1 : 0.45)),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -222,7 +297,7 @@ class Eyebrow extends StatelessWidget {
             child: Semantics(header: true, child: Text(text.toUpperCase(), style: OrecchinoType.eyebrow)),
           ),
           const SizedBox(width: 10),
-          const Expanded(child: Divider(height: 1, color: OrecchinoColors.line)),
+          Expanded(child: Divider(height: 1, color: OrecchinoColors.line)),
           if (trailing != null) ...[const SizedBox(width: 8), trailing!],
         ]),
       ),
@@ -256,10 +331,12 @@ class MetricGrid extends StatelessWidget {
 /// Four bars; [level] 0..4 lit.
 class SignalBars extends StatelessWidget {
   final int level;
-  final Color color;
+  final Color? _color;
   final double height;
 
-  const SignalBars({super.key, required this.level, this.color = OrecchinoColors.aqua, this.height = 14});
+  Color get color => _color ?? OrecchinoColors.aqua;
+
+  const SignalBars({super.key, required this.level, Color? color, this.height = 14}) : _color = color;
 
   /// Bars for a BLE / Wi-Fi RSSI: >= -55 four, -65 three, -75 two, else one.
   static int fromRssi(int? rssi) =>
@@ -329,7 +406,8 @@ class _BreathingDotState extends State<BreathingDot> with SingleTickerProviderSt
   /// three times when it becomes active, then rests as a steady glow, so an
   /// idle screen is not animating for nothing. Reduce motion: still.
   void _sync() {
-    final reduced = Motion.reduced(context);
+    // Flat: a still dot, as the mockups' "● receiving".
+    final reduced = Motion.reduced(context) || Look.flat;
     final changed = widget.active != _wasActive || widget.busy != _wasBusy;
     _wasActive = widget.active;
     _wasBusy = widget.busy;
@@ -359,23 +437,37 @@ class _BreathingDotState extends State<BreathingDot> with SingleTickerProviderSt
   Widget build(BuildContext context) {
     return SizedBox.square(
       dimension: widget.size * 2.2,
-      child: AnimatedBuilder(
-        animation: _c,
-        builder: (context, _) => CustomPaint(painter: _BreathPainter(widget.color, _c.value, widget.active)),
-      ),
+      // Its own layer: while it breathes, only the light repaints (not the
+      // list it sits in), and without a rebuild.
+      child: RepaintBoundary(child: CustomPaint(painter: _BreathPainter(widget.color, _c, widget.active))),
     );
   }
 }
 
 class _BreathPainter extends CustomPainter {
   final Color color;
-  final double t;
+  final Animation<double> anim;
   final bool active;
-  _BreathPainter(this.color, this.t, this.active);
+  _BreathPainter(this.color, this.anim, this.active) : super(repaint: anim);
 
   @override
   void paint(Canvas canvas, Size size) {
+    final t = anim.value;
     final c = size.center(Offset.zero);
+    if (Look.flat) {
+      final r = size.shortestSide / 2.2 / 2;
+      canvas.drawCircle(c, r * 0.62, Paint()..color = active ? color : color.withValues(alpha: 0.6));
+      if (!active) {
+        canvas.drawCircle(
+            c,
+            r * 0.9,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1
+              ..color = color.withValues(alpha: 0.5));
+      }
+      return;
+    }
     final r = size.shortestSide / 2.2 / 2;
     if (active) {
       // Two rings expanding out of phase, and a soft glow that swells.
@@ -413,5 +505,5 @@ class _BreathPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_BreathPainter old) => old.t != t || old.color != color || old.active != active;
+  bool shouldRepaint(_BreathPainter old) => old.anim != anim || old.color != color || old.active != active;
 }

@@ -9,15 +9,15 @@ import 'dart:ui' as ui;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('aurora.frag loads and takes its 13 uniforms', () async {
+  test('aurora.frag loads and takes its 14 uniforms', () async {
     final program = await ui.FragmentProgram.fromAsset('shaders/aurora.frag');
     final shader = program.fragmentShader();
-    // uSize (2), uTime, uDeep/uMid/uHigh (3 each), uPulse: 13 floats, in the
-    // order LivingBackground sets them.
-    for (var i = 0; i < 13; i++) {
+    // uSize (2), uTime, uDeep/uMid/uHigh (3 each), uPulse, uPx: 14 floats,
+    // in the order LivingBackground sets them.
+    for (var i = 0; i < 14; i++) {
       shader.setFloat(i, 0.5);
     }
-    expect(() => shader.setFloat(13, 0), throwsA(anything));
+    expect(() => shader.setFloat(14, 0), throwsA(anything));
     shader.dispose();
   });
 }

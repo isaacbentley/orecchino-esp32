@@ -11,6 +11,11 @@
 //   -> ready.
 // The board drops a peer that has not paired within 10 s of connecting.
 //
+// A reconnect to a pinned detector can be a pending connect ([connect]
+// with pending: true): it waits, with no timeout and no scan, until the
+// detector is in range (Android autoConnect, CoreBluetooth's pending
+// connect), then verifies and subscribes as any connect does.
+//
 // Every connection attempt has a generation number; a callback from an
 // older attempt (a late disconnect, a slow step) is ignored, so it can never
 // tear down a newer link. Commands are written in MTU-sized chunks, one
@@ -48,6 +53,7 @@ class BleService extends ChangeNotifier implements DetectorLink {
   bool _disposed = false;
   Future<void> _writeChain = Future.value();
   List<BleScanHit> _hits = const [];
+  String? _waitingFor; // a pending connect's device, until it connects
   StreamSubscription<List<BleScanHit>>? _scanSub;
 
   final LineCodec _codec = LineCodec();
@@ -62,6 +68,9 @@ class BleService extends ChangeNotifier implements DetectorLink {
   DeviceInfoMessage? get info => _info;
   String? get connectedId => _state == BleLinkState.ready ? _peer?.id : null;
   String? get peerId => _peer?.id;
+
+  /// A pending connect is waiting for this detector to come into range.
+  String? get waitingFor => _waitingFor;
   List<BleScanHit> get scanHits => _hits;
   int get droppedLines => _codec.droppedLines;
 
@@ -115,7 +124,7 @@ class BleService extends ChangeNotifier implements DetectorLink {
   /// Connect, verify and pair. [pinnedBoard]: the board this detector was
   /// pinned as; a different board at the same ID is refused. Returns the
   /// verified info, or null (see [error]).
-  Future<DeviceInfoMessage?> connect(String id, {String? pinnedBoard}) async {
+  Future<DeviceInfoMessage?> connect(String id, {String? pinnedBoard, bool pending = false}) async {
     final gen = ++_gen;
     await _scanSub?.cancel();
     _scanSub = null;
@@ -126,11 +135,19 @@ class BleService extends ChangeNotifier implements DetectorLink {
     }
     await _teardown();
     if (gen != _gen) return null;
-    _set(BleLinkState.connecting);
+    // A pending connect leaves the link idle (the picker can still scan)
+    // until the detector is in range; then it is connecting like any other.
+    if (pending) _waitingFor = id;
+    _set(pending ? BleLinkState.idle : BleLinkState.connecting);
 
     BlePeer? peer;
     try {
-      peer = await transport.connect(id, timeout: connectTimeout);
+      try {
+        peer = await transport.connect(id, timeout: connectTimeout, pending: pending);
+      } finally {
+        if (_waitingFor == id && gen == _gen) _waitingFor = null;
+      }
+      if (pending && gen == _gen) _set(BleLinkState.connecting);
       if (gen != _gen) {
         await peer.disconnect();
         return null;
@@ -206,6 +223,13 @@ class BleService extends ChangeNotifier implements DetectorLink {
   }
 
   Future<void> _teardown() async {
+    final w = _waitingFor;
+    _waitingFor = null;
+    if (w != null) {
+      try {
+        await transport.cancelConnect(w);
+      } catch (_) {}
+    }
     final p = _peer;
     _peer = null;
     _info = null;

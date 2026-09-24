@@ -7,15 +7,28 @@
 // outlined chevrons (never filled, so the two cannot be confused) with a
 // dashed 60-second track projection and time-ghost dots every 15 s. A
 // drone-aircraft pair under a traffic alert is joined by a separation
-// bridge (its numbers are a widget; see sky_scene.dart). The painter draws
-// no words a screen reader needs: each mark has its own semantics node.
+// bridge (its numbers are a widget; see sky_scene.dart). A drone's operator
+// is a ground pin (a map-pin outline with a dot, in the drone's colour:
+// never an orb or a chevron) joined to its drone by a thin dotted line,
+// labelled "operator 420 m SW" (from its drone). Anything beyond the range
+// is pinned to the outer ring at its true bearing as an edge marker: a
+// chevron pointing outward at ground level (no stem), labelled
+// "<id> · <distance> ›". The painter draws no words a screen reader needs:
+// each mark has its own semantics node.
+//
+// The Flat look (look.dart) draws the mockups' radar instead: no ground
+// glow, no spokes, no sweep or pulses; plain rings in the rule colour, "▲
+// you face" at the top, drones as solid dots (a ring when alerting),
+// aircraft as outlined diamonds, the bridge as one translucent band.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../core/geo.dart';
 import '../../core/traffic/traffic_rules.dart';
 import '../../ui/canvas_text.dart';
 import '../../ui/theme/theme.dart';
@@ -38,6 +51,14 @@ class SkyContact {
   /// Time ghost: (distance, bearing) from the phone at +15/30/45/60 s.
   final List<(double, double)> ghost;
 
+  /// A drone's operator (a ground pin), linked to the drone [linkTo]; its
+  /// [label] is its words ("operator 420 m SW").
+  final bool isOperator;
+  final String? linkTo;
+
+  /// The sensors that heard a drone, compact ("📱BLE4 · T5 Wi-Fi").
+  final String? sensorLabel;
+
   const SkyContact({
     required this.id,
     required this.label,
@@ -52,20 +73,66 @@ class SkyContact {
     this.level = TrafficLevel.none,
     this.alerting = false,
     this.ghost = const [],
+    this.isOperator = false,
+    this.linkTo,
+    this.sensorLabel,
   });
 
   Color get color {
     final base = OrecchinoColors.level(level, none: isAircraft ? OrecchinoColors.aircraft : OrecchinoColors.aqua);
     return stale ? base.withValues(alpha: 0.45) : base;
   }
+
+  /// Value equality, so the painters can tell a new list of the same marks
+  /// (every rebuild makes one) from a change.
+  @override
+  bool operator ==(Object other) =>
+      other is SkyContact &&
+      other.id == id &&
+      other.label == label &&
+      other.heightLabel == heightLabel &&
+      other.distanceM == distanceM &&
+      other.bearingDeg == bearingDeg &&
+      other.heightM == heightM &&
+      other.heightKnown == heightKnown &&
+      other.trackDeg == trackDeg &&
+      other.isAircraft == isAircraft &&
+      other.stale == stale &&
+      other.level == level &&
+      other.alerting == alerting &&
+      listEquals(other.ghost, ghost) &&
+      other.isOperator == isOperator &&
+      other.linkTo == linkTo &&
+      other.sensorLabel == sensorLabel;
+
+  @override
+  int get hashCode => Object.hash(id, label, heightLabel, distanceM, bearingDeg, heightM, heightKnown, trackDeg,
+      isAircraft, stale, level, alerting, Object.hashAll(ghost), isOperator, linkTo, sensorLabel);
 }
 
 /// A traffic pair to join: drone contact id, aircraft contact id.
+/// A line from an alert's anchor to its aircraft: the drone for a pair, or
+/// for low traffic the nearest drone or the phone ([you]).
 class SkyBridge {
-  final String droneId;
+  /// The anchor id meaning the phone (the centre of the sky).
+  static const you = '@you';
+
+  final String droneId; // the anchor: a drone's id, or [you]
   final String aircraftId;
   final TrafficAlert alert;
   const SkyBridge({required this.droneId, required this.aircraftId, required this.alert});
+
+  /// Equal when drawn the same (the painter uses the level and separation).
+  @override
+  bool operator ==(Object other) =>
+      other is SkyBridge &&
+      other.droneId == droneId &&
+      other.aircraftId == aircraftId &&
+      other.alert.level == alert.level &&
+      other.alert.horizM == alert.horizM;
+
+  @override
+  int get hashCode => Object.hash(droneId, aircraftId, alert.level, alert.horizM);
 }
 
 /// Range rings at round distances: 500 m and 1 km on the 1 km range; 1, 2
@@ -98,12 +165,16 @@ class SkyPainter extends CustomPainter {
   final bool compact; // the History mini dome: no labels or compass letters
   final SkyLayer layer;
 
-  /// Seconds since the scene started; null when motion is reduced (no sweep).
-  final ValueNotifier<double>? clock;
+  /// Seconds of ambient motion; null when motion is off (no sweep).
+  final ValueListenable<double>? clock;
   final TextScaler textScaler;
 
   /// Screen areas labels must keep clear of (the bridges' numbers).
   final List<Rect> reserved;
+
+  /// Edges labels keep clear of: the notch, and the tab rail of a phone on
+  /// its side (the sky is drawn under them, its words are not).
+  final EdgeInsets labelInsets;
 
   static const double _sweepPeriodS = 4.0;
 
@@ -118,6 +189,7 @@ class SkyPainter extends CustomPainter {
     this.clock,
     this.textScaler = TextScaler.noScaling,
     this.reserved = const [],
+    this.labelInsets = EdgeInsets.zero,
   }) : super(repaint: layer == SkyLayer.base ? null : clock);
 
   double? get _time => layer == SkyLayer.base ? null : clock?.value;
@@ -125,19 +197,29 @@ class SkyPainter extends CustomPainter {
   bool get _base => layer != SkyLayer.live;
   bool get _live => layer != SkyLayer.base;
 
+  Size _canvas = Size.infinite;
+
   @override
   void paint(Canvas canvas, Size size) {
+    _canvas = size;
     final cam = camera;
     final t = _time;
     final tops = <String, SkyPoint>{};
+    final feet = <String, SkyPoint>{};
     final ordered = <(SkyContact, SkyPoint, SkyPoint)>[];
+    _beyond.clear();
     for (final c in contacts) {
-      final foot = cam.project(c.distanceM, c.bearingDeg);
-      final top = cam.project(c.distanceM, c.bearingDeg, heightM: c.heightM);
-      if (foot == null || top == null) continue;
-      tops[c.id] = top;
-      ordered.add((c, foot, top));
+      final top = cam.place(c.distanceM, c.bearingDeg, heightM: c.isOperator ? 0 : c.heightM);
+      if (top == null) continue;
+      final foot = top.beyond ? top.point : cam.project(c.distanceM, c.bearingDeg);
+      if (foot == null) continue;
+      if (top.beyond) _beyond.add(c.id);
+      tops[c.id] = top.point;
+      feet[c.id] = foot;
+      ordered.add((c, foot, top.point));
     }
+    final you = cam.groundAt(0, 0);
+    if (you != null) tops[SkyBridge.you] = you;
     ordered.sort((a, b) => b.$3.depth.compareTo(a.$3.depth)); // far first
 
     if (_base) {
@@ -151,7 +233,13 @@ class SkyPainter extends CustomPainter {
       _you(canvas, cam, t);
     }
     if (_base) {
+      // Operators' links first (under everything), on the ground.
+      for (final (c, foot, _) in ordered) {
+        final to = c.linkTo == null ? null : feet[c.linkTo];
+        if (c.isOperator && to != null) _link(canvas, foot, to, c.color);
+      }
       for (final (c, foot, top) in ordered) {
+        if (_beyond.contains(c.id) || c.isOperator) continue;
         _shadowAndStem(canvas, cam, c, foot, top);
         if (c.isAircraft) _track(canvas, cam, c, top);
       }
@@ -163,7 +251,11 @@ class SkyPainter extends CustomPainter {
       }
       for (final (c, _, top) in ordered) {
         final boost = t == null || c.stale ? 0.0 : _relight(cam, c, t);
-        if (c.isAircraft) {
+        if (_beyond.contains(c.id)) {
+          _edge(canvas, cam, c, top, boost);
+        } else if (c.isOperator) {
+          _operator(canvas, c, top);
+        } else if (c.isAircraft) {
           _chevron(canvas, cam, c, top, boost);
         } else {
           _orb(canvas, cam, c, top, boost, t);
@@ -180,7 +272,8 @@ class SkyPainter extends CustomPainter {
         ..addAll([
           for (final (c, _, top) in ordered)
             if (c.id == selectedId) Rect.fromCircle(center: top.offset, radius: 24 * top.scale.clamp(0.7, 1.6)),
-          for (final (_, _, top) in ordered) Rect.fromCircle(center: top.offset, radius: 11 * top.scale.clamp(0.7, 1.6)),
+          for (final (_, _, top) in ordered)
+            Rect.fromCircle(center: top.offset, radius: 11 * top.scale.clamp(0.7, 1.6)),
           if (cam.groundAt(0, 0) case final o?) Rect.fromCircle(center: o.offset, radius: 10),
         ]);
       final byNear = [...ordered]..sort((a, b) {
@@ -188,8 +281,18 @@ class SkyPainter extends CustomPainter {
           if (b.$1.id == selectedId) return 1;
           return a.$3.depth.compareTo(b.$3.depth);
         });
+      // The compass letters keep their places: labels go round them.
+      for (final (b, _) in const [(0, 'N'), (90, 'E'), (180, 'S'), (270, 'W')]) {
+        final p = cam.groundAt(1.16, b - cam.yawDeg);
+        if (p != null) _placed.add(Rect.fromCenter(center: p.offset, width: 22, height: 22));
+      }
+      // Drones and aircraft first, then the operators' labels in what room
+      // is left.
       for (final (c, _, top) in byNear) {
-        _label(canvas, c, top);
+        if (!c.isOperator) _label(canvas, c, top, outward: _beyond.contains(c.id) ? _out(cam, top) : null);
+      }
+      for (final (c, _, top) in byNear) {
+        if (c.isOperator) _label(canvas, c, top, outward: _beyond.contains(c.id) ? _out(cam, top) : null);
       }
       _ringLabels(canvas, cam);
       _cardinals(canvas, cam, [
@@ -220,6 +323,7 @@ class SkyPainter extends CustomPainter {
   }
 
   void _groundDisc(Canvas canvas, SkyCamera cam) {
+    if (Look.flat) return; // the plain ground shows through
     final path = _ringPath(cam, 1.0);
     if (path == null) return;
     final bounds = path.getBounds();
@@ -269,6 +373,10 @@ class SkyPainter extends CustomPainter {
   }
 
   void _rings(Canvas canvas, SkyCamera cam) {
+    if (Look.flat) {
+      _flatRings(canvas, cam);
+      return;
+    }
     final ring = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1
@@ -315,6 +423,46 @@ class SkyPainter extends CustomPainter {
     }
   }
 
+  /// The mockups' radar: rule-coloured rings (the outer one stronger),
+  /// quiet compass ticks, and "▲ you face" above the ring when heading-up.
+  void _flatRings(Canvas canvas, SkyCamera cam) {
+    final inner = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = OrecchinoColors.line;
+    for (final r in ringFractions(cam.rangeM).where((f) => f < 1)) {
+      final p = _ringPath(cam, r);
+      if (p != null) canvas.drawPath(p, inner);
+    }
+    final outer = _ringPath(cam, 1.0);
+    if (outer != null) {
+      canvas.drawPath(
+          outer,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5
+            ..color = OrecchinoColors.lineBright);
+    }
+    final tick = Paint()..strokeWidth = 1;
+    for (var b = 0; b < 360; b += 30) {
+      final rel = b - cam.yawDeg;
+      final p1 = cam.groundAt(1.0, rel), p2 = cam.groundAt(1.05, rel);
+      if (p1 == null || p2 == null) continue;
+      tick.color = b == 0 ? OrecchinoColors.aqua : OrecchinoColors.lineBright;
+      canvas.drawLine(p1.offset, p2.offset, tick);
+    }
+    if (showFacing && !compact) {
+      final top = cam.groundAt(1.0, 0);
+      if (top != null) {
+        final style = OrecchinoType.idSmall.copyWith(color: OrecchinoColors.inkMuted);
+        final size = CanvasText.measure('▲ you face', style, textScaler);
+        final at = top.offset + Offset(-size.width / 2, -size.height - 6);
+        CanvasText.paint(canvas, '▲ you face', at, style, scaler: textScaler);
+        _placed.add((at & size).inflate(2));
+      }
+    }
+  }
+
   /// N, E, S, W just outside the ring; a letter under a mark gives way to
   /// it (the ticks remain).
   void _cardinals(Canvas canvas, SkyCamera cam, List<Offset> marks) {
@@ -352,6 +500,7 @@ class SkyPainter extends CustomPainter {
   }
 
   void _facing(Canvas canvas, SkyCamera cam) {
+    if (Look.flat) return; // "▲ you face" instead (_flatRings)
     final path = Path();
     final o = cam.groundAt(0, 0);
     if (o == null) return;
@@ -371,36 +520,54 @@ class SkyPainter extends CustomPainter {
     );
   }
 
+  /// The sweep: one wedge on the ground trailing the leading edge, shaded
+  /// by one sweep gradient around the phone (it used to be 14 slices, each
+  /// its own path and paint, every frame).
   void _sweep(Canvas canvas, SkyCamera cam, double t) {
     final lead = (t % _sweepPeriodS) / _sweepPeriodS * 360;
     const trail = 50.0;
-    const slices = 14;
     final o = cam.groundAt(0, 0);
     if (o == null) return;
-    for (var i = 0; i < slices; i++) {
-      final a1 = lead - trail * i / slices, a2 = lead - trail * (i + 1) / slices;
-      final path = Path()..moveTo(o.offset.dx, o.offset.dy);
-      for (final a in [a1, (a1 + a2) / 2, a2]) {
-        final p = cam.groundAt(1.0, a);
-        if (p != null) path.lineTo(p.offset.dx, p.offset.dy);
-      }
-      path.close();
-      final k = 1 - i / slices;
-      canvas.drawPath(path, Paint()..color = OrecchinoColors.aqua.withValues(alpha: 0.2 * k * k));
+    final path = Path()..moveTo(o.offset.dx, o.offset.dy);
+    Offset? first, last;
+    for (var i = 0; i <= 10; i++) {
+      final p = cam.groundAt(1.0, lead - trail + trail * i / 10);
+      if (p == null) continue;
+      first ??= p.offset;
+      last = p.offset;
+      path.lineTo(p.offset.dx, p.offset.dy);
     }
-    final edge = cam.groundAt(1.0, lead);
-    if (edge != null) {
-      canvas.drawLine(
-          o.offset,
-          edge.offset,
-          Paint()
-            ..strokeWidth = 1.4
-            ..shader = LinearGradient(colors: [
-              OrecchinoColors.aqua.withValues(alpha: 0.0),
-              OrecchinoColors.aqua.withValues(alpha: 0.7),
-            ]).createShader(Rect.fromPoints(o.offset, edge.offset)));
-    }
+    path.close();
+    if (first == null || last == null) return;
+    // Screen angles of the trailing and leading edges around the phone.
+    final a0 = math.atan2(first.dy - o.offset.dy, first.dx - o.offset.dx);
+    final a1 = math.atan2(last.dy - o.offset.dy, last.dx - o.offset.dx);
+    var span = (a1 - a0) % (2 * math.pi);
+    final forward = span <= math.pi; // the sweep turns clockwise on screen
+    if (!forward) span = 2 * math.pi - span;
+    if (span < 1e-3) return;
+    const fade = [0.0, 0.25, 0.5, 0.75, 1.0];
+    final colors = [for (final f in fade) _aqua(0.2 * f * f)];
+    _sweepPaint.shader = SweepGradient(
+      startAngle: 0,
+      endAngle: span,
+      colors: forward ? colors : colors.reversed.toList(),
+      stops: fade,
+      transform: GradientRotation(forward ? a0 : a1),
+    ).createShader(Rect.fromCircle(center: o.offset, radius: 1)); // centred on the phone
+    canvas.drawPath(path, _sweepPaint);
+    canvas.drawLine(
+        o.offset,
+        last,
+        _edgePaint
+          ..shader = LinearGradient(colors: [_aqua(0.0), _aqua(0.7)]).createShader(Rect.fromPoints(o.offset, last)));
   }
+
+  static final Paint _sweepPaint = Paint();
+  static final Paint _edgePaint = Paint()..strokeWidth = 1.4;
+  static final Map<int, Color> _aquaCache = {};
+  static Color _aqua(double alpha) =>
+      _aquaCache.putIfAbsent((alpha * 1000).round(), () => OrecchinoColors.aqua.withValues(alpha: alpha));
 
   /// 1 just after the sweep passes a contact, fading over ~1.2 s.
   double _relight(SkyCamera cam, SkyContact c, double t) {
@@ -414,6 +581,10 @@ class SkyPainter extends CustomPainter {
   void _you(Canvas canvas, SkyCamera cam, double? t) {
     final o = cam.groundAt(0, 0);
     if (o == null) return;
+    if (Look.flat) {
+      canvas.drawCircle(o.offset, 5, Paint()..color = OrecchinoColors.inkMuted);
+      return;
+    }
     final pulse = t == null ? 0.5 : (t % 2.4) / 2.4;
     canvas.drawCircle(
         o.offset,
@@ -435,6 +606,7 @@ class SkyPainter extends CustomPainter {
   // --- Contacts ------------------------------------------------------------
 
   void _shadowAndStem(Canvas canvas, SkyCamera cam, SkyContact c, SkyPoint foot, SkyPoint top) {
+    if (Look.flat) return; // top-down: no stems, no shadows
     final color = c.color;
     final rx = 7 * foot.scale;
     final ry = rx * math.max(0.25, math.cos(cam.tiltDeg * math.pi / 180));
@@ -470,6 +642,31 @@ class SkyPainter extends CustomPainter {
   void _orb(Canvas canvas, SkyCamera cam, SkyContact c, SkyPoint p, double boost, double? t) {
     final color = c.color;
     final s = p.scale.clamp(0.6, 1.8);
+    if (Look.flat) {
+      // A solid dot; alerting adds a ring (still, no pulse).
+      canvas.drawCircle(p.offset, 6 * s, Paint()..color = color);
+      if (c.alerting) {
+        canvas.drawCircle(
+            p.offset,
+            11 * s,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2
+              ..color = color);
+      }
+      final trk = c.trackDeg;
+      if (trk != null) {
+        final a = cam.screenAngle(p, c.distanceM, c.bearingDeg, trk, heightM: c.heightM);
+        final dir = Offset(math.cos(a), math.sin(a));
+        canvas.drawLine(
+            p.offset + dir * (c.alerting ? 12 : 8) * s,
+            p.offset + dir * 18 * s,
+            Paint()
+              ..strokeWidth = 2
+              ..color = color);
+      }
+      return;
+    }
     final glowR = (18 + 10 * boost) * s;
     canvas.drawCircle(
       p.offset,
@@ -510,6 +707,23 @@ class SkyPainter extends CustomPainter {
   void _chevron(Canvas canvas, SkyCamera cam, SkyContact c, SkyPoint p, double boost) {
     final color = c.color;
     final s = p.scale.clamp(0.6, 1.8);
+    if (Look.flat) {
+      // The mockups' aircraft: an outlined diamond, never filled.
+      final d = 10 * s;
+      canvas.drawPath(
+          Path()
+            ..moveTo(p.offset.dx, p.offset.dy - d)
+            ..lineTo(p.offset.dx + d, p.offset.dy)
+            ..lineTo(p.offset.dx, p.offset.dy + d)
+            ..lineTo(p.offset.dx - d, p.offset.dy)
+            ..close(),
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = c.id == selectedId ? 3 : 2.5
+            ..strokeJoin = StrokeJoin.miter
+            ..color = color);
+      return;
+    }
     if (boost > 0.02) {
       final r = 20 * s;
       canvas.drawCircle(
@@ -586,14 +800,32 @@ class SkyPainter extends CustomPainter {
     final color = OrecchinoColors.level(b.alert.level, none: OrecchinoColors.caution);
     final h = b.alert.horizM ?? TrafficRules.holdHM;
     final k = (1 - (h / TrafficRules.holdHM)).clamp(0.0, 1.0); // thicker as the pair converges
+    if (Look.flat) {
+      // One translucent band, thicker as they converge (the mockups').
+      canvas.drawLine(
+          p1.offset,
+          p2.offset,
+          Paint()
+            ..strokeWidth = 8 + 8 * k
+            ..strokeCap = StrokeCap.round
+            ..color = color.withValues(alpha: 0.28));
+      return;
+    }
+    // The glow: two soft strokes (a blur here would cost an offscreen pass
+    // on every frame of the live layer).
+    final glow = Paint()..strokeCap = StrokeCap.round;
     canvas.drawLine(
         p1.offset,
         p2.offset,
-        Paint()
-          ..strokeWidth = 8 + 14 * k
-          ..strokeCap = StrokeCap.round
-          ..color = color.withValues(alpha: 0.14 + 0.10 * k)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+        glow
+          ..strokeWidth = 10 + 16 * k
+          ..color = color.withValues(alpha: 0.07 + 0.05 * k));
+    canvas.drawLine(
+        p1.offset,
+        p2.offset,
+        glow
+          ..strokeWidth = 5 + 8 * k
+          ..color = color.withValues(alpha: 0.10 + 0.07 * k));
     final core = Paint()
       ..strokeWidth = 1.8
       ..strokeCap = StrokeCap.round
@@ -612,7 +844,7 @@ class SkyPainter extends CustomPainter {
 
   void _reticle(Canvas canvas, SkyPoint p, Color color, double? t) {
     final s = p.scale.clamp(0.7, 1.6);
-    final breathe = t == null ? 0.0 : math.sin(t * 3) * 1.5;
+    final breathe = t == null || Look.flat ? 0.0 : math.sin(t * 3) * 1.5;
     final r = 20 * s + breathe;
     final paint = Paint()
       ..style = PaintingStyle.stroke
@@ -630,6 +862,103 @@ class SkyPainter extends CustomPainter {
   /// Labels placed so far this frame, nearest first (see [paint]).
   final List<Rect> _placed = [];
 
+  /// Marks pinned to the ring this frame (beyond the range).
+  final Set<String> _beyond = {};
+
+  /// The unit direction on screen from the ground centre out to [p].
+  Offset _out(SkyCamera cam, SkyPoint p) {
+    final c = cam.groundAt(0, 0)?.offset ?? cam.center;
+    final d = p.offset - c;
+    final l = d.distance;
+    return l < 1e-6 ? const Offset(0, -1) : d / l;
+  }
+
+  /// A mark beyond the range: a chevron on the ring pointing outward (filled
+  /// for a drone, outlined for an aircraft, as their marks), with a soft
+  /// glow; the label says how far it really is.
+  void _edge(Canvas canvas, SkyCamera cam, SkyContact c, SkyPoint p, double boost) {
+    final color = c.color;
+    final dir = _out(cam, p);
+    final s = p.scale.clamp(0.7, 1.4);
+    if (!Look.flat) {
+      canvas.drawCircle(
+        p.offset,
+        16 * s,
+        Paint()
+          ..shader = RadialGradient(colors: [color.withValues(alpha: 0.28 + 0.25 * boost), color.withValues(alpha: 0)])
+              .createShader(Rect.fromCircle(center: p.offset, radius: 16 * s)),
+      );
+    }
+    canvas.save();
+    canvas.translate(p.offset.dx, p.offset.dy);
+    canvas.rotate(math.atan2(dir.dy, dir.dx));
+    final k = 1.0 * s;
+    final path = Path()
+      ..moveTo(9 * k, 0)
+      ..lineTo(-5 * k, 7 * k)
+      ..lineTo(-2 * k, 0)
+      ..lineTo(-5 * k, -7 * k)
+      ..close();
+    if (c.isAircraft || c.isOperator) {
+      canvas.drawPath(
+          path,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.8
+            ..strokeJoin = StrokeJoin.round
+            ..color = color);
+    } else {
+      canvas.drawPath(path, Paint()..color = color);
+      canvas.drawPath(
+          path,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1
+            ..color = OrecchinoColors.void0.withValues(alpha: 0.6));
+    }
+    canvas.restore();
+  }
+
+  /// An operator: a map-pin outline with a dot, standing on the ground.
+  void _operator(Canvas canvas, SkyContact c, SkyPoint p) {
+    final color = c.color;
+    final s = p.scale.clamp(0.7, 1.4);
+    final tip = p.offset;
+    final head = tip - Offset(0, 13 * s);
+    final r = 5.5 * s;
+    final pin = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..quadraticBezierTo(head.dx - r * 1.1, head.dy + r * 0.9, head.dx - r, head.dy)
+      ..arcToPoint(Offset(head.dx + r, head.dy), radius: Radius.circular(r))
+      ..quadraticBezierTo(head.dx + r * 1.1, head.dy + r * 0.9, tip.dx, tip.dy)
+      ..close();
+    canvas.drawPath(pin, Paint()..color = OrecchinoColors.void0.withValues(alpha: 0.75));
+    canvas.drawPath(
+        pin,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6
+          ..color = color);
+    canvas.drawCircle(head, 2 * s, Paint()..color = color);
+    canvas.drawOval(
+        Rect.fromCenter(center: tip, width: 8 * s, height: 3 * s), Paint()..color = color.withValues(alpha: 0.35));
+  }
+
+  /// A drone's link to its operator: a thin dotted line on the ground.
+  void _link(Canvas canvas, SkyPoint a, SkyPoint b, Color color) {
+    final d = b.offset - a.offset;
+    final len = d.distance;
+    if (len < 2) return;
+    final u = d / len;
+    final paint = Paint()
+      ..strokeWidth = 1.2
+      ..strokeCap = StrokeCap.round
+      ..color = color.withValues(alpha: 0.55);
+    for (var x = 0.0; x < len; x += 7) {
+      canvas.drawLine(a.offset + u * x, a.offset + u * math.min(len, x + 3), paint);
+    }
+  }
+
   /// A size step for canvas text (so the text cache is not flooded by
   /// every fractional scale).
   static double _step(double v) => (v * 20).round() / 20;
@@ -637,12 +966,12 @@ class SkyPainter extends CustomPainter {
   /// A contact's name and height beside its mark: to the right if that is
   /// free, else to the left, else nudged down until it clears the labels
   /// already placed.
-  void _label(Canvas canvas, SkyContact c, SkyPoint p) {
+  void _label(Canvas canvas, SkyContact c, SkyPoint p, {Offset? outward}) {
     final s = _step(p.scale.clamp(0.75, 1.3));
     final mainStyle = TextStyle(
       fontFamily: OrecchinoType.display,
-      fontSize: 12 * s,
-      fontWeight: FontWeight.w600,
+      fontSize: (c.isOperator ? 10.5 : 12) * s,
+      fontWeight: c.isOperator ? FontWeight.w500 : FontWeight.w600,
       color: c.stale ? OrecchinoColors.inkSubtle : OrecchinoColors.ink,
     );
     final subStyle = TextStyle(
@@ -652,15 +981,32 @@ class SkyPainter extends CustomPainter {
       fontFeatures: OrecchinoType.tabular,
       color: OrecchinoColors.inkMuted,
     );
-    final main = CanvasText.measure(c.label, mainStyle, textScaler);
-    final hl = c.heightLabel;
-    final sub = hl == null ? null : CanvasText.measure(hl, subStyle, textScaler);
-    bool free(Rect r) => !_placed.any((o) => o.overlaps(r));
+    // Beyond the range: '<id> · <distance> ›', no height (it is on the ground).
+    final text = outward == null ? c.label : '${c.label} · ${Geo.rangeText(c.distanceM)} ›';
+    final main = CanvasText.measure(text, mainStyle, textScaler);
+    // The second line: the height and, for a drone, the sensors that heard
+    // it ("100 m · 📱BLE4 · T5 Wi-Fi"); without room, the height alone.
+    final withSensors = outward == null && c.sensorLabel != null
+        ? [c.heightLabel, c.sensorLabel].whereType<String>().join(' · ')
+        : null;
+    var hl = outward == null ? (withSensors ?? c.heightLabel) : null;
+    var sub = hl == null ? null : CanvasText.measure(hl, subStyle, textScaler);
+    // Free of the labels already placed, and on the screen.
+    bool free(Rect r) =>
+        !_placed.any((o) => o.overlaps(r)) &&
+        r.left >= labelInsets.left + 2 &&
+        r.top >= labelInsets.top &&
+        r.right <= _canvas.width - labelInsets.right - 2;
     // Try the full label, then the name alone; beside the mark on the right,
     // on the left, then a little lower each way.
     Offset? spot(double w, double h) {
       final right = p.offset + Offset(16 * s, -10 * s);
       final left = p.offset + Offset(-16 * s - w, -10 * s);
+      // An edge marker's label goes outside the ring when it can.
+      final out = outward == null
+          ? null
+          : p.offset + outward * 20 * s + Offset(outward.dx >= 0 ? 0 : -w, outward.dy >= 0 ? 0 : -h);
+      if (out != null && free(out & Size(w, h))) return out;
       for (var dy = 0.0; dy <= 2 * h; dy += h * 0.5) {
         for (final base in [right, left]) {
           final at = base + Offset(0, dy);
@@ -670,9 +1016,16 @@ class SkyPainter extends CustomPainter {
       return null;
     }
 
-    final fullW = [main.width, sub?.width ?? 0].reduce((a, b) => a > b ? a : b);
-    final fullH = main.height + (sub?.height ?? 0);
+    var fullW = [main.width, sub?.width ?? 0].reduce((a, b) => a > b ? a : b);
+    var fullH = main.height + (sub?.height ?? 0);
     var at = spot(fullW, fullH);
+    if (at == null && withSensors != null && c.heightLabel != null) {
+      hl = c.heightLabel;
+      sub = CanvasText.measure(hl!, subStyle, textScaler);
+      fullW = [main.width, sub.width].reduce((a, b) => a > b ? a : b);
+      fullH = main.height + sub.height;
+      at = spot(fullW, fullH);
+    }
     var withSub = sub != null;
     if (at == null && sub != null) {
       at = spot(main.width, main.height);
@@ -684,7 +1037,8 @@ class SkyPainter extends CustomPainter {
     if (at != null) {
       final size = withSub ? Size(fullW, fullH) : main;
       _placed.add((at & size).inflate(2));
-      CanvasText.paint(canvas, c.label, at, mainStyle, scaler: textScaler);
+      CanvasText.paint(canvas, text, at, c.isOperator ? mainStyle.copyWith(color: c.color) : mainStyle,
+          scaler: textScaler);
       if (withSub) CanvasText.paint(canvas, hl!, at + Offset(0, main.height), subStyle, scaler: textScaler);
     }
   }
@@ -697,12 +1051,15 @@ class SkyPainter extends CustomPainter {
   /// live layer also repaints on every [clock] tick.
   @override
   bool shouldRepaint(covariant SkyPainter old) =>
+      old.layer != layer ||
+      old.compact != compact ||
       old.camera != camera ||
-      old.contacts != contacts ||
-      old.bridges != bridges ||
+      !listEquals(old.contacts, contacts) ||
+      !listEquals(old.bridges, bridges) ||
       old.selectedId != selectedId ||
       old.showFacing != showFacing ||
       old.textScaler != textScaler ||
-      old.reserved.length != reserved.length ||
+      !listEquals(old.reserved, reserved) ||
+      old.labelInsets != labelInsets ||
       old.clock != clock;
 }

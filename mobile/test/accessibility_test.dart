@@ -12,12 +12,17 @@ import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orecchino_mobile/app/app_controller.dart';
+import 'package:orecchino_mobile/core/alerts/alert_policy.dart';
 import 'package:orecchino_mobile/core/ble/ble_service.dart';
 import 'package:orecchino_mobile/core/location/location_service.dart';
 import 'package:orecchino_mobile/core/protocol/messages.dart';
+import 'package:orecchino_mobile/core/traffic/adsb_source.dart';
 import 'package:orecchino_mobile/core/traffic/traffic_rules.dart';
 import 'package:orecchino_mobile/data/db.dart';
 import 'package:orecchino_mobile/features/live/live_view.dart';
+import 'package:orecchino_mobile/features/live/sky_painter.dart';
+import 'package:orecchino_mobile/ui/ambient_clock.dart';
+import 'package:orecchino_mobile/ui/glass.dart';
 import 'package:orecchino_mobile/ui/living_background.dart';
 import 'package:orecchino_mobile/ui/theme/theme.dart';
 
@@ -43,8 +48,11 @@ class FakeLocation extends LocationService {
 }
 
 void main() {
-  test('text colours reach 4.5:1 on every background', () {
-    const texts = {
+  for (final look in AppLook.values) {
+  test('${look.label}: text colours reach 4.5:1 on every background', () {
+    Look.setForTest(look);
+    addTearDown(() => Look.setForTest(AppLook.sky));
+    final texts = {
       'ink': OrecchinoColors.ink,
       'inkMuted': OrecchinoColors.inkMuted,
       'inkSubtle': OrecchinoColors.inkSubtle,
@@ -84,14 +92,24 @@ void main() {
       }
       // Bridge badge and filled tags: deep-space text on the solid colour.
       expect(contrast(OrecchinoColors.void0, c), greaterThanOrEqualTo(4.5), reason: 'badge $c');
+      // Flat: the mockups' dark banner of the colour, with the colour's
+      // words and ink on it.
+      if (look == AppLook.flat) {
+        final banner = Glass.flatWash(c);
+        expect(contrast(c, banner), greaterThanOrEqualTo(4.5), reason: 'flat banner $c');
+        expect(contrast(OrecchinoColors.ink, banner), greaterThanOrEqualTo(4.5), reason: 'ink on banner $c');
+        expect(contrast(OrecchinoColors.inkMuted, banner), greaterThanOrEqualTo(4.5), reason: 'muted on banner $c');
+      }
     }
   });
 
-  test('text drawn straight onto the sky keeps 4.5:1 over a star, on its halo', () {
+  test('${look.label}: text drawn straight onto the sky keeps 4.5:1 over a star, on its halo', () {
+    Look.setForTest(look);
+    addTearDown(() => Look.setForTest(AppLook.sky));
     // The worst case: the brightest living-background colour plus a star at
     // its peak (shaders/aurora.frag), under the dark halo every canvas label
     // is drawn on (lib/ui/canvas_text.dart).
-    const canvasTexts = {
+    final canvasTexts = {
       'ink': OrecchinoColors.ink,
       'inkMuted': OrecchinoColors.inkMuted,
       'inkSubtle': OrecchinoColors.inkSubtle,
@@ -106,10 +124,14 @@ void main() {
         expect(contrast(e.value, bg), greaterThanOrEqualTo(4.5), reason: '${e.key} on star + halo $bg');
       }
     }
-    // Without the halo a star would break it: the halo is doing the work.
-    final bare = Color.alphaBlend(OrecchinoColors.starPeak.withValues(alpha: 1), OrecchinoColors.auroraCalm.last);
-    expect(contrast(OrecchinoColors.inkSubtle, bare), lessThan(4.5));
+    // Without the halo a star would break it: the halo is doing the work
+    // (Sky; Flat has no stars).
+    if (look == AppLook.sky) {
+      final bare = Color.alphaBlend(OrecchinoColors.starPeak.withValues(alpha: 1), OrecchinoColors.auroraCalm.last);
+      expect(contrast(OrecchinoColors.inkSubtle, bare), lessThan(4.5));
+    }
   });
+  }
 
   group('Live screen', () {
     late AppController app;
@@ -161,7 +183,7 @@ void main() {
             gsMps: 60,
             trackDeg: 180,
             seenMs: now - 3000),
-      ], now);
+      ], now, const AdsbArea(37.8039, -122.4640, 10000));
       app.tick();
     });
 
@@ -195,18 +217,29 @@ void main() {
     testWidgets('marks and cards read the same words to a screen reader', (tester) async {
       final handle = tester.ensureSemantics();
       await pumpLive(tester, 1.0);
-      // The alert capsule leads with the rule's words.
-      expect(find.textContaining('TRAFFIC NEAR DRONE D9A03'), findsWidgets);
-      expect(find.bySemanticsLabel(RegExp(r'^TRAFFIC NEAR DRONE D9A03, ')), findsOneWidget);
+      // The alert capsule leads with the action, then the geometry and the rule.
+      expect(find.text('GIVE WAY: DESCEND AND LAND D9A03'), findsWidgets);
+      expect(
+          find.bySemanticsLabel(RegExp(r'^GIVE WAY: DESCEND AND LAND D9A03, AIRCRAFT 80 M ABOVE, .*, '
+              r'TRAFFIC NEAR DRONE D9A03 · ADS-B 3 s old')),
+          findsOneWidget);
       expect(find.bySemanticsLabel(RegExp(r'^Sky view, 3D, heading up, 3.0 km range, 3 marks')), findsOneWidget);
-      // The sheet's handle says what it holds; pull the contacts all the way up.
-      expect(find.bySemanticsLabel(RegExp(r'^Contacts sheet, 2 drones · 1 aircraft')), findsOneWidget);
+      // The sheet's handle says what it holds (drones only); pull it all the way up.
+      expect(find.bySemanticsLabel(RegExp(r'^Drones sheet, 2 drones, show or hide')), findsOneWidget);
       await tester.drag(find.text('drones'), const Offset(0, -700));
       await settle(tester);
-      // A mark on the sky for the drone with its alert and range, as its card.
-      final drone = find.bySemanticsLabel(RegExp(r'^Drone D9A03, EMERGENCY REPORTED, TRAFFIC NEAR DRONE D9A03, 334 m'));
+      // A mark on the sky for the drone with its alert's action, the
+      // geometry and the rule, and its range, as its card.
+      final drone = find.bySemanticsLabel(RegExp(r'^Drone D9A03, EMERGENCY REPORTED, GIVE WAY: DESCEND AND LAND D9A03, '
+          r'AIRCRAFT 80 M ABOVE, 110 M N, CLOSEST IN [0-9]+ S, TRAFFIC NEAR DRONE D9A03, 334 m'));
       expect(drone, findsNWidgets(2)); // the mark and the card
-      expect(find.bySemanticsLabel(RegExp(r'^Aircraft UAL123, TRAFFIC NEAR DRONE D9A03')), findsNWidgets(2));
+      // The aircraft in the alert: a mark on the sky, never a card.
+      expect(find.bySemanticsLabel(RegExp(r'^Aircraft UAL123, GIVE WAY: DESCEND AND LAND D9A03')), findsOneWidget);
+      expect(find.text('DRONES (2)'), findsOneWidget);
+      // The conflict watch says it is on.
+      expect(
+          find.bySemanticsLabel(RegExp(r'^conflict watch on, 1 ADS-B conflict|^conflict watch on, 2 ADS-B conflicts')),
+          findsOneWidget);
       // Every mark is a 44 pt target.
       for (final e in drone.evaluate()) {
         final size = tester.getSize(find.byWidget(e.widget));
@@ -217,32 +250,46 @@ void main() {
     });
 
     testWidgets('2x text: no overflow anywhere down the screen', (tester) async {
+      final handle = tester.ensureSemantics();
       await pumpLive(tester, 2.0);
       expect(tester.takeException(), isNull);
+      // The aircraft's card (from its mark on the sky: it has no row), at the
+      // top of the sheet, at 2x.
+      await tester.tap(find.bySemanticsLabel(RegExp(r'^Aircraft UAL123')).first);
+      await settle(tester);
+      expect(tester.takeException(), isNull);
+      expect(find.text('GIVE WAY: DESCEND AND LAND D9A03'), findsWidgets);
       // Drag the sheet all the way up and walk down it.
       await tester.drag(find.text('drones'), const Offset(0, -700));
       await settle(tester);
       expect(tester.takeException(), isNull);
-      await tester.scrollUntilVisible(find.text('CONTACTS (3)'), 200, scrollable: sheetScrollable());
+      await tester.scrollUntilVisible(find.textContaining('Positions as reported'), 200, scrollable: sheetScrollable());
       expect(tester.takeException(), isNull);
-      await tester.scrollUntilVisible(find.text('UAL123'), 200, scrollable: sheetScrollable());
+      await tester.scrollUntilVisible(find.text('DRONES (2)'), 200, scrollable: sheetScrollable());
       expect(tester.takeException(), isNull);
-      // The selected aircraft's card, at the top of the sheet, at 2x.
-      await tester.tap(find.text('UAL123'));
-      await settle(tester);
+      await tester.scrollUntilVisible(find.text('2A002'), 200, scrollable: sheetScrollable());
       expect(tester.takeException(), isNull);
-      await tester.scrollUntilVisible(find.textContaining('Positions as reported'), -200,
-          scrollable: sheetScrollable());
-      expect(tester.takeException(), isNull);
+      handle.dispose();
     });
 
     testWidgets('the living background animates, and stops under reduce motion', (tester) async {
+      // A change of level cross-fades the palette on the ambient clock
+      // (without a GPU the aurora itself is a still gradient).
       await tester.pumpWidget(const MediaQuery(data: MediaQueryData(), child: LivingBackground()));
+      await tester.pumpWidget(
+          const MediaQuery(data: MediaQueryData(), child: LivingBackground(level: TrafficLevel.caution)));
       await tester.pump(const Duration(milliseconds: 100));
-      expect(tester.binding.hasScheduledFrame, isTrue);
+      expect(AmbientClock.instance.running, isTrue);
+      await tester.pump(const Duration(seconds: 2)); // the fade ends: the clock stops
+      await tester.pump();
+      expect(AmbientClock.instance.running, isFalse);
       await tester.pumpWidget(const MediaQuery(
           data: MediaQueryData(disableAnimations: true), child: LivingBackground(key: ValueKey('still'))));
+      await tester.pumpWidget(const MediaQuery(
+          data: MediaQueryData(disableAnimations: true),
+          child: LivingBackground(key: ValueKey('still'), level: TrafficLevel.warning)));
       await tester.pump(const Duration(milliseconds: 100));
+      expect(AmbientClock.instance.running, isFalse);
       expect(tester.binding.hasScheduledFrame, isFalse);
     });
 
@@ -274,7 +321,7 @@ void main() {
       await pumpLive(tester, 1.0);
       // Drone D9A03 reports an emergency and is also in a traffic pair.
       expect(find.bySemanticsLabel(RegExp(r'^EMERGENCY REPORTED, drone D9A03')), findsOneWidget);
-      expect(find.bySemanticsLabel(RegExp(r'^TRAFFIC NEAR DRONE D9A03, ')), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(r'^GIVE WAY: DESCEND AND LAND D9A03, ')), findsOneWidget);
       handle.dispose();
     });
 
@@ -282,7 +329,7 @@ void main() {
       final handle = tester.ensureSemantics();
       await pumpLive(tester, 1.0);
       for (final f in [
-        find.bySemanticsLabel(RegExp(r'^Contacts sheet')),
+        find.bySemanticsLabel(RegExp(r'^Drones sheet')),
         find.bySemanticsLabel('1 km range'),
         find.bySemanticsLabel('3 km range'),
         find.bySemanticsLabel('5 km range'),
@@ -328,7 +375,14 @@ void main() {
       await tester.pump();
       expect(find.bySemanticsLabel(RegExp(r'^Sky view, 3D, heading up, 1.0 km range')), findsOneWidget);
       // Double tap on open sky (away from the marks and the header).
-      const sky = Offset(20, 400); // the sheet is half up after the selection
+      // Open sky: between the header and the sheet (back down to its peek:
+      // with both alerts the header is tall).
+      await settle(tester);
+      await tester.tap(find.bySemanticsLabel(RegExp(r'^Drones sheet')));
+      await settle(tester);
+      final headerBottom = tester.getRect(find.byType(SingleChildScrollView).first).bottom;
+      final sheetTop = tester.getRect(find.bySemanticsLabel(RegExp(r'^Drones sheet'))).top;
+      final sky = Offset(20, (headerBottom + sheetTop) / 2);
       await tester.tapAt(sky);
       await tester.pump(const Duration(milliseconds: 80));
       await tester.tapAt(sky);
@@ -337,10 +391,87 @@ void main() {
       handle.dispose();
     });
 
+    testWidgets('an aircraft no alert names is never drawn, listed, counted or announced', (tester) async {
+      final handle = tester.ensureSemantics();
+      final now = app.nowMs();
+      // UAL123 near D9A03 as before, and DAL9 high and far: no alert names it.
+      app.traffic.update([
+        ...app.traffic.aircraft,
+        TrafficAircraft(
+            hex: 'c0ffee',
+            callsign: 'DAL9',
+            type: 'A321',
+            lat: 37.8039,
+            lon: -122.5140, // ~4.4 km west of the phone, 4.4 km from both drones
+            altGeomM: 3000,
+            altBaroM: 2980,
+            gsMps: 200,
+            trackDeg: 270,
+            seenMs: now - 2000),
+      ], now, const AdsbArea(37.8039, -122.4640, 10000));
+      app.tick();
+      expect(app.traffic.aircraft.map((a) => a.hex), contains('c0ffee'));
+      expect(app.traffic.result.alertForHex('c0ffee'), isNull);
+      // Not an item: so not on the sky, in the sheet, in Find or in the counts.
+      expect(buildLiveItems(app).map((c) => c.label), isNot(contains('DAL9')));
+      await pumpLive(tester, 1.0);
+      await tester.drag(find.text('drones'), const Offset(0, -700));
+      await settle(tester);
+      expect(find.textContaining('DAL9'), findsNothing);
+      expect(find.bySemanticsLabel(RegExp('DAL9')), findsNothing);
+      expect(find.bySemanticsLabel(RegExp(r'^Sky view, .*, 3 marks')), findsOneWidget); // 2 drones + UAL123
+      expect(find.textContaining('aircraft'), findsNothing); // no aircraft count anywhere
+      // Nor a notification.
+      final events = AlertPolicy().consider(
+          nowMs: now,
+          traffic: app.traffic.result,
+          aircraft: app.traffic.byHex,
+          drones: const [],
+          detectorConnected: true);
+      expect(events.map((e) => e.body).join(), isNot(contains('DAL9')));
+      handle.dispose();
+    });
+
+    testWidgets('low traffic: drawn with a line to you, caution, "be ready to land"', (tester) async {
+      final handle = tester.ensureSemantics();
+      final now = app.nowMs();
+      // Only a helicopter 2 km north of you at 300 m, far from both drones'
+      // pairs (over 150 m above them): LOW, anchored on you.
+      app.traffic.clear();
+      app.traffic.update([
+        TrafficAircraft(
+            hex: 'a7c0de',
+            callsign: 'N911SIM',
+            type: 'EC35',
+            lat: 37.8219,
+            lon: -122.4640,
+            altGeomM: 300,
+            altBaroM: 290,
+            gsMps: 45,
+            trackDeg: 90,
+            seenMs: now - 1500),
+      ], now, const AdsbArea(37.8039, -122.4640, 10000));
+      app.tick();
+      final al = app.traffic.result.alerts.single;
+      expect(al.kind, TrafficKind.low);
+      expect(al.level, TrafficLevel.caution);
+      await pumpLive(tester, 1.0);
+      expect(find.text('BE READY TO LAND DRONES'), findsOneWidget);
+      expect(
+          find.bySemanticsLabel(RegExp(r'^Aircraft N911SIM, BE READY TO LAND DRONES, AIRCRAFT [0-9]+ M ABOVE GROUND')),
+          findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(r'^conflict watch on, 1 low aircraft')), findsOneWidget);
+      // Drawn: a bridge from you (the sky's centre) to it.
+      final live =
+          tester.widgetList<CustomPaint>(find.byType(CustomPaint)).map((p) => p.painter).whereType<SkyPainter>();
+      expect(live.first.bridges.single.droneId, SkyBridge.you);
+      handle.dispose();
+    });
+
     testWidgets('the 2D view and range keep the words in step', (tester) async {
       final handle = tester.ensureSemantics();
       await pumpLive(tester, 1.0);
-      await tester.tap(find.bySemanticsLabel(RegExp(r'^3D sky view, switch to flat view')));
+      await tester.tap(find.bySemanticsLabel('Flat sky view'));
       await tester.tap(find.bySemanticsLabel('1 km range'));
       await settle(tester);
       expect(find.bySemanticsLabel(RegExp(r'^Sky view, flat, heading up, 1.0 km range, 3 marks')), findsOneWidget);

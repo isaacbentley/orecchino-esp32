@@ -1,6 +1,10 @@
-// live_view.dart — "the sky is the interface": a full-bleed 3D sky of every
-// contact on its height stem, glass controls floating over it, the alert
-// capsule at the top and the contacts in a sheet at the bottom.
+// live_view.dart — "the sky is the interface": a full-bleed 3D sky of the
+// drones on their height stems, glass controls floating over it, the alert
+// capsule at the top and the drones in a sheet at the bottom. Remote ID
+// first: an aircraft is drawn only while an alert names it, with a line to
+// its drone (or, for low traffic far from any drone, to you) and its track;
+// the capsule leads with the alert's action. The sheet's chip says whether
+// the ADS-B conflict watch is on, stale or off.
 //
 // Heading-up from the compass (north-up, and said so, without one). Drag to
 // rotate and tilt the view, pinch for range (1 / 3 / 5 km), double-tap to
@@ -24,14 +28,17 @@ import 'package:flutter/scheduler.dart';
 import '../../app/app_controller.dart';
 import '../../core/alerts/alert_policy.dart';
 import '../../core/geo.dart';
-import '../../core/traffic/traffic_rules.dart';
+import '../../ui/ambient_clock.dart';
 import '../../ui/glass.dart';
+import '../../ui/living_background.dart';
 import '../../ui/measure_height.dart';
 import '../../ui/theme/theme.dart';
 import '../../ui/traffic_widgets.dart';
+import '../details/drone_details_sheet.dart';
 import 'alert_capsule.dart';
 import 'contact_sheet.dart';
 import 'live_items.dart';
+import 'live_map.dart';
 import 'sky_painter.dart';
 import 'sky_projection.dart';
 import 'sky_scene.dart';
@@ -47,12 +54,13 @@ class LiveView extends StatefulWidget {
   State<LiveView> createState() => _LiveViewState();
 }
 
-class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
+class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin {
   static const _ranges = [1000.0, 3000.0, 5000.0];
   static const _snapSizes = [0.5];
 
   double _rangeM = 3000.0;
   bool _is3D = true;
+  bool _map = false; // Map mode: the scene on a street map (live_map.dart)
   double _userYaw = 0;
   String? _selectedId;
 
@@ -68,8 +76,6 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
   double _moved = 0;
   int _lastTapMs = 0;
   Offset? _lastTapAt;
-  late final Ticker _ticker = createTicker(_onTick);
-  final ValueNotifier<double> _clock = ValueNotifier<double>(0);
   final DraggableScrollableController _sheet = DraggableScrollableController();
 
   double _pinchBase = 1;
@@ -88,19 +94,19 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
     // The cards' sparklines: sampled as the app updates, not while building.
     widget.app.addListener(_recordHistory);
     _recordHistory();
+    if (Look.flat) _flatten();
+  }
+
+  /// The Flat look has no 3D dome: a top-down radar (tilt 0).
+  void _flatten() {
+    _is3D = false;
+    _tilt.stop();
+    _tilt.value = 0;
   }
 
   void _recordHistory() {
     final app = widget.app;
     ContactHistory.of(app).record(buildLiveItems(app), app.nowMs());
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final reduced = Motion.reduced(context);
-    if (!reduced && !_ticker.isActive) _ticker.start();
-    if (reduced && _ticker.isActive) _ticker.stop();
   }
 
   void _onSheet() {
@@ -113,8 +119,6 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
     }
     setState(() => _sheetSize = _sheet.size);
   }
-
-  void _onTick(Duration elapsed) => _clock.value = elapsed.inMicroseconds / 1e6;
 
   /// A notification's Show: the contact to select ('ac:<hex>' or a drone).
   String? _takeShowRequest() {
@@ -130,8 +134,7 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
     widget.app.removeListener(_recordHistory);
     _panelScroll.dispose();
     _tilt.dispose();
-    _ticker.dispose();
-    _clock.dispose();
+    if (_map) LivingBackground.covered.value = false;
     _sheet.dispose();
     super.dispose();
   }
@@ -219,7 +222,7 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
       return;
     }
     final delta = d.focalPointDelta;
-    final t = (_tilt.value - delta.dy * 0.3).clamp(0.0, SkyCamera.maxTiltDeg);
+    final t = Look.flat ? 0.0 : (_tilt.value - delta.dy * 0.3).clamp(0.0, SkyCamera.maxTiltDeg);
     _tilt.value = t; // the sky's AnimatedBuilder redraws
     setState(() {
       _userYaw = (_userYaw - delta.dx * 0.35) % 360;
@@ -253,6 +256,12 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final app = widget.app;
+    if (Look.flat && (_is3D || _tilt.value != 0)) {
+      // Switched to Flat while tilted: lay the sky down after this frame.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(_flatten);
+      });
+    }
     final now = app.nowMs();
     final contacts = buildLiveItems(app);
     final history = ContactHistory.of(app);
@@ -261,13 +270,14 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
     final topAlert = result.alerts.isEmpty ? null : result.alerts.first;
     final topAircraft = topAlert == null ? null : app.traffic.byHex(topAlert.hex);
     final o = app.observer;
-    final droneAlert = contacts.where((c) => !c.isAircraft && c.alertWords.isNotEmpty && !c.stale).firstOrNull;
+    final droneAlert = contacts.where((c) => c.isDrone && c.alertWords.isNotEmpty && !c.stale).firstOrNull;
     final byId = {for (final c in contacts) c.id: c};
     final selected = byId[_selectedId];
 
     final bridges = <SkyBridge>[
       for (final a in result.alerts)
-        if (a.kind.isPair && a.droneId.isNotEmpty) SkyBridge(droneId: a.droneId, aircraftId: 'ac:${a.hex}', alert: a),
+        if (byId.containsKey('ac:${a.hex}'))
+          SkyBridge(droneId: a.droneId.isNotEmpty ? a.droneId : SkyBridge.you, aircraftId: 'ac:${a.hex}', alert: a),
     ];
     final marks = <SkyContact>[
       for (final c in contacts)
@@ -275,7 +285,9 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
           SkyContact(
             id: c.id,
             label: c.label,
-            heightLabel: c.heightText == null ? null : (c.isAircraft ? c.heightText : '${c.heightM!.round()} m'),
+            heightLabel: c.isOperator || c.heightText == null
+                ? null
+                : (c.isAircraft ? c.heightText : '${c.heightM!.round()} m'),
             distanceM: c.distanceM!,
             bearingDeg: c.bearingDeg!,
             heightM: math.max(0, c.heightMetres ?? 0),
@@ -286,6 +298,9 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
             level: c.alertLevel,
             alerting: c.alerting && !c.stale,
             ghost: c.ghost,
+            isOperator: c.isOperator,
+            linkTo: c.ofDrone,
+            sensorLabel: c.isDrone ? c.sublabel : null,
           ),
     ];
     final inRange = marks.where((m) => m.distanceM <= _rangeM).length;
@@ -295,26 +310,33 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
       if (!app.isSimulated && app.location.problem != null) (app.location.problem!, OrecchinoColors.caution),
       if (app.settings.adsb && app.adsbError != null) (app.adsbError!, OrecchinoColors.caution),
     ];
-    final ageS = result.dataAgeS;
-    final idleDetail = app.settings.adsb && result.haveData && ageS != null ? TrafficRules.ageWords(ageS) : null;
-    final idleText = contacts.isEmpty
+    final drones = contacts.where((c) => c.isDrone).toList();
+    final nearest = (drones.where((c) => c.distanceM != null).toList()
+          ..sort((a, b) => a.distanceM!.compareTo(b.distanceM!)))
+        .firstOrNull;
+    final idleText = drones.isEmpty
         ? (app.detectorReady ? 'Listening · no drone heard yet' : 'No detector connected')
-        : contactCounts(contacts);
+        : contactCounts(drones);
+    final idleDetail = nearest == null ? null : 'nearest ${nearest.label} ${nearest.rangeText}';
+    final conflictWatch = app.settings.adsb ? result.summary : 'CONFLICT WATCH OFF: ADS-B off in Settings';
 
-    final Widget? detail = selected == null
+    // An operator's card is its drone's (the operator line is on it).
+    final shown = selected != null && selected.isOperator ? byId[selected.ofDrone] : selected;
+    final Widget? detail = shown == null
         ? null
-        : selected.isAircraft && selected.aircraft != null
+        : shown.isAircraft && shown.aircraft != null
             ? TrafficDetailCard(
-                aircraft: selected.aircraft!,
-                alert: selected.alert,
+                aircraft: shown.aircraft!,
+                alert: shown.alert,
                 nowMs: now,
                 onClose: () => _select(null),
               )
             : DroneDetailCard(
-                item: selected,
+                item: shown,
                 headingDeg: heading,
-                series: history.series(selected.id),
+                series: history.series(shown.id),
                 onClose: () => _select(null),
+                onDetails: () => DroneDetailsSheet.showLive(context, app, shown.id),
               );
 
     final mq = MediaQuery.of(context);
@@ -340,10 +362,13 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
           runSpacing: 6,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            _headingChip(heading),
+            ValueListenableBuilder<double?>(
+              valueListenable: app.heading,
+              builder: (context, h, _) => _headingChip(h),
+            ),
             for (final (text, color) in notices)
               Glass(
-                borderRadius: BorderRadius.circular(999),
+                borderRadius: BorderRadius.circular(OrecchinoTheme.pill),
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 child: Text(text, style: OrecchinoType.caption.copyWith(color: color, fontWeight: FontWeight.w600)),
               ),
@@ -360,7 +385,8 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
           onToggle: _toggleSheet,
           detail: detail,
           emptyText: app.detectorReady ? 'No drone heard yet' : 'No detector connected',
-          trafficSummary: app.settings.adsb ? result.summary : null,
+          conflictWatch: conflictWatch,
+          onDetails: (id) => DroneDetailsSheet.showLive(context, app, id),
           history: history,
           bottomInset: bottomInset,
           panel: panel,
@@ -383,7 +409,25 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
                 },
         );
 
-    Widget sky(Rect viewport, Size size) => Listener(
+    Widget sky(Rect viewport, Size size) => _map
+        ? LiveMap(
+            items: contacts,
+            bridges: bridges,
+            history: history,
+            selectedId: _selectedId,
+            observerLat: o?.lat,
+            observerLon: o?.lon,
+            headingDeg: heading,
+            rangeM: _rangeM,
+            viewport: viewport,
+            onSelect: _select,
+            source: app.settings.mapUrl.isNotEmpty && MapTileSource.validTemplate(app.settings.mapUrl)
+                ? MapTiles.custom(app.settings.mapUrl, app.settings.mapAttribution)
+                : MapTiles.esriDarkGray,
+            fallbackLat: app.isSimulated ? null : app.lastHome?.lat,
+            fallbackLon: app.isSimulated ? null : app.lastHome?.lon,
+          )
+        : Listener(
           onPointerDown: _pointerDown,
           onPointerMove: _pointerMove,
           onPointerUp: _pointerUp,
@@ -391,9 +435,12 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
             behavior: HitTestBehavior.translucent,
             onScaleStart: _onScaleStart,
             onScaleUpdate: _onScaleUpdate,
+            // The sky turns with the phone: only this builder listens to the
+            // compass (throttled, location_service.dart), not the screen.
             child: AnimatedBuilder(
-              animation: _tilt,
+              animation: Listenable.merge([_tilt, app.heading]),
               builder: (context, _) {
+                final heading = app.heading.value;
                 final camera = SkyCamera.fit(
                   size: size,
                   viewport: viewport,
@@ -410,7 +457,9 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
                   selectedId: _selectedId,
                   headingDeg: heading,
                   showFacing: heading != null,
-                  clock: _ticker.isActive ? _clock : null,
+                  // The sweep and the glows move on the shared ambient clock
+                  // (24–30 frames a second; none with Reduce Motion).
+                  clock: AmbientClock.of(context),
                   semanticLabel: 'Sky view, ${_is3D ? '3D' : 'flat'}, '
                       '${heading == null ? 'north up' : 'heading up'}${rotated ? ', rotated' : ''}, '
                       '${Geo.rangeText(_rangeM)} range, $inRange marks'
@@ -547,7 +596,7 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Transform.rotate(
           angle: -(_userYaw + (heading ?? 0)) * math.pi / 180,
-          child: const Icon(Icons.navigation_rounded, size: 16, color: OrecchinoColors.aqua),
+          child: Icon(Icons.navigation_rounded, size: 16, color: OrecchinoColors.aqua),
         ),
         const SizedBox(width: 6),
         Flexible(
@@ -566,16 +615,27 @@ class _LiveViewState extends State<LiveView> with TickerProviderStateMixin {
       spacing: 8,
       runSpacing: 8,
       children: [
-        GlassButton(
-          semanticLabel: _is3D ? '3D sky view, switch to flat view' : 'Flat top-down view, switch to 3D sky view',
-          onTap: () => _setView(!_is3D),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(_is3D ? Icons.view_in_ar_rounded : Icons.radar_rounded, size: 16, color: OrecchinoColors.aqua),
-            const SizedBox(width: 6),
-            Text(_is3D ? '3D' : '2D',
-                style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink, fontWeight: FontWeight.w700)),
-          ]),
+        // Sky 3D / Sky 2D / Map.
+        GlassSegmented<String>(
+          // Flat: a top-down radar or the map; no 3D dome.
+          options: [
+            if (!Look.flat) ('3d', '3D', '3D sky view'),
+            ('2d', Look.flat ? 'Radar' : '2D', Look.flat ? 'Radar view' : 'Flat sky view'),
+            ('map', 'Map', 'Map view'),
+          ],
+          value: _map ? 'map' : (_is3D ? '3d' : '2d'),
+          onChanged: (v) {
+            // The map is opaque: the sweep goes, and the aurora under it
+            // stands still until the sky comes back.
+            if (v == 'map') {
+              setState(() => _map = true);
+              LivingBackground.covered.value = true;
+            } else {
+              setState(() => _map = false);
+              LivingBackground.covered.value = false;
+              _setView(v == '3d');
+            }
+          },
         ),
         GlassSegmented<double>(
           options: const [

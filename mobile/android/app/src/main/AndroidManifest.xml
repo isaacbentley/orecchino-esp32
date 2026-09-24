@@ -15,14 +15,35 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <!-- "Orecchino connected to 1 detector" while a detector is connected. -->
+    <!-- "Watch in the background" (OrecchinoWatchService.kt): a foreground
+         service of type connectedDevice, plus location when the location
+         permission is granted. Never dataSync. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- A pinned detector associated as a companion device (WatchPlugin.kt):
+         the app may run and start its service in the background for it, and
+         Android 12+ wakes it when the detector comes into range. -->
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
+    <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <!-- The phone's own Wi-Fi Remote ID receiver (WifiRidPlugin.kt): Wi-Fi
+         Aware (NAN) subscribe and beacon scan results. NAN discovery never
+         derives location on API 33+; scan results still need
+         ACCESS_FINE_LOCATION (above), as does Wi-Fi Aware on API <= 32. -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="tiramisu" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
 
     <application
         android:label="Orecchino"
-        android:name="${applicationName}"
+        android:name=".OrecchinoApplication"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:fullBackupContent="false"
@@ -50,6 +71,20 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- "Watch in the background": keeps the app's engine running. -->
+        <service
+            android:name=".OrecchinoWatchService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|location" />
+        <!-- Android 12+: woken when an associated detector comes into range. -->
+        <service
+            android:name=".DetectorPresenceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
         <!-- flutter_local_notifications: action buttons and the foreground service. -->
         <receiver android:exported="false"
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />

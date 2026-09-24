@@ -1,8 +1,10 @@
 // alert_capsule.dart — the floating capsule at the top of the Live screen.
-// Idle it is a small glass pill with the counts and the ADS-B data age; with
-// a traffic alert it morphs (size, radius and colour wash on a spring) into
-// a full-width card with the rule's words, and a tap opens the aircraft's
-// card inside it. Alerts are words; the colour only repeats them.
+// Idle it is a small glass pill with the drones ("2 drones · nearest 2A002
+// 485 m"); with a traffic alert it morphs (size, radius and colour wash on a
+// spring) into a full-width card that leads with the alert's action ("GIVE
+// WAY: DESCEND AND LAND D9A11"), then the geometry, then the rule's words
+// and the data age; a tap opens the aircraft's card inside it. Alerts are
+// words; the colour only repeats them.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -19,8 +21,8 @@ class AlertCapsule extends StatefulWidget {
   final TrafficAircraft? trafficAircraft;
   final String? trafficExtra; // the clock position from the phone
   final LiveContactItem? droneAlert;
-  final String idleText; // '2 drones · 1 aircraft'
-  final String? idleDetail; // 'ADS-B 3 s old'
+  final String idleText; // '2 drones'
+  final String? idleDetail; // 'nearest 2A002 485 m'
   final int nowMs;
   final ValueChanged<String> onSelect;
 
@@ -88,30 +90,34 @@ class _AlertCapsuleState extends State<AlertCapsule> {
     }
     final alerting = wash != null;
     final dur = Motion.of(context, Motion.morph);
+    final Widget capsule = TweenAnimationBuilder<double>(
+      tween: Tween(end: alerting ? 1.0 : 0.0),
+      duration: dur,
+      curve: Motion.emphasized,
+      builder: (context, k, child) => Glass(
+        borderRadius: BorderRadius.circular(999 - (999 - OrecchinoTheme.radius) * k.clamp(0.0, 1.0)),
+        wash: wash == null ? null : Color.lerp(OrecchinoColors.night, wash, k),
+        edge: wash?.withValues(alpha: 0.6 * k),
+        shadows: wash != null ? [BoxShadow(color: wash.withValues(alpha: 0.25 * k), blurRadius: 30)] : null,
+        child: child!,
+      ),
+      child: AnimatedSwitcher(
+        duration: Motion.of(context, Motion.base),
+        switchInCurve: Motion.emphasized,
+        switchOutCurve: Motion.exit,
+        layoutBuilder: (current, previous) =>
+            Stack(alignment: Alignment.topCenter, children: [...previous, if (current != null) current]),
+        child: KeyedSubtree(key: ValueKey(key), child: content),
+      ),
+    );
+    // Reduce Motion: no AnimatedSize at all (a zero-length one asserts
+    // when the capsule changes size mid-layout); the capsule just resizes.
+    if (Motion.reduced(context)) return capsule;
     return AnimatedSize(
       duration: dur,
       curve: Motion.springy,
       alignment: Alignment.topCenter,
-      child: TweenAnimationBuilder<double>(
-        tween: Tween(end: alerting ? 1.0 : 0.0),
-        duration: dur,
-        curve: Motion.emphasized,
-        builder: (context, k, child) => Glass(
-          borderRadius: BorderRadius.circular(999 - (999 - OrecchinoTheme.radius) * k.clamp(0.0, 1.0)),
-          wash: wash == null ? null : Color.lerp(OrecchinoColors.night, wash, k),
-          edge: wash?.withValues(alpha: 0.6 * k),
-          shadows: wash != null ? [BoxShadow(color: wash.withValues(alpha: 0.25 * k), blurRadius: 30)] : null,
-          child: child!,
-        ),
-        child: AnimatedSwitcher(
-          duration: Motion.of(context, Motion.base),
-          switchInCurve: Motion.emphasized,
-          switchOutCurve: Motion.exit,
-          layoutBuilder: (current, previous) =>
-              Stack(alignment: Alignment.topCenter, children: [...previous, if (current != null) current]),
-          child: KeyedSubtree(key: ValueKey(key), child: content),
-        ),
-      ),
+      child: capsule,
     );
   }
 
@@ -127,7 +133,7 @@ class _AlertCapsuleState extends State<AlertCapsule> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const BreathingDot(color: OrecchinoColors.aqua, size: 7),
+              BreathingDot(color: OrecchinoColors.aqua, size: 7),
               const SizedBox(width: 2),
               Flexible(
                 child: Text.rich(
@@ -145,7 +151,14 @@ class _AlertCapsuleState extends State<AlertCapsule> {
   }
 
   Widget _traffic(TrafficAlert t, Color color) {
-    final lines = [t.text, trafficDetail(t), if (widget.trafficExtra != null) widget.trafficExtra!];
+    final geometry = trafficGeometry(t);
+    final why = '${t.text} · ${TrafficRules.ageWords(t.ageS)}';
+    final lines = [
+      trafficAction(t),
+      if (geometry.isNotEmpty) geometry,
+      why,
+      if (widget.trafficExtra != null) widget.trafficExtra!,
+    ];
     final ac = widget.trafficAircraft;
     return SizedBox(
       width: double.infinity,
@@ -182,11 +195,14 @@ class _AlertCapsuleState extends State<AlertCapsule> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(t.text, style: OrecchinoType.alert.copyWith(color: color, fontSize: 15)),
-                          const SizedBox(height: 3),
+                          Text(trafficAction(t), style: OrecchinoType.alert.copyWith(color: color, fontSize: 15)),
+                          if (geometry.isNotEmpty) ...[
+                            const SizedBox(height: 3),
+                            Text(geometry, style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
+                          ],
+                          const SizedBox(height: 2),
                           // A non-breaking hyphen on screen only, so "ADS-B" never splits.
-                          Text(trafficDetail(t).replaceAll('ADS-B', 'ADS\u2011B'),
-                              style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
+                          Text(why.replaceAll('ADS-B', 'ADS\u2011B'), style: OrecchinoType.caption),
                           if (widget.trafficExtra != null) Text(widget.trafficExtra!, style: OrecchinoType.caption),
                         ],
                       ),
@@ -195,7 +211,7 @@ class _AlertCapsuleState extends State<AlertCapsule> {
                       turns: _open ? 0.5 : 0,
                       duration: Motion.of(context, Motion.base),
                       curve: Motion.standard,
-                      child: const Icon(Icons.expand_more_rounded, color: OrecchinoColors.inkMuted),
+                      child: Icon(Icons.expand_more_rounded, color: OrecchinoColors.inkMuted),
                     ),
                   ],
                 ),

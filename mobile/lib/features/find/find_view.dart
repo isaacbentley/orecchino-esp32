@@ -1,5 +1,6 @@
 // find_view.dart — "point at the sky". A head-up pointer shows where the
-// chosen drone or aircraft is relative to where the phone points: left or
+// chosen drone is relative to where the phone points (an aircraft can be
+// chosen only while an alert names it, as part of that alert): left or
 // right (bearing) and how high above the horizon (elevation, from its height
 // and distance). A lock-on ring tightens as the phone comes round to it,
 // and haptic ticks mark each step closer in angle and in range.
@@ -12,16 +13,21 @@
 
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import '../../app/app_controller.dart';
 import '../../core/geo.dart';
+import '../../core/live/sensors.dart';
+import '../../ui/ambient_clock.dart';
 import '../../ui/canvas_text.dart';
 import '../../ui/contact_glyph.dart';
 import '../../ui/glass.dart';
+import '../../ui/sensor_chips.dart';
 import '../../ui/theme/theme.dart';
+import '../../ui/traffic_widgets.dart';
+import '../details/drone_details_sheet.dart';
 import '../live/contact_sheet.dart';
 import '../live/live_items.dart';
 import 'find_geometry.dart';
@@ -35,18 +41,22 @@ class FindView extends StatefulWidget {
   State<FindView> createState() => _FindViewState();
 }
 
-class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin {
+class _FindViewState extends State<FindView> {
   String? _targetId;
   final FindHaptics _haptics = FindHaptics();
-  late final Ticker _ticker = createTicker(_onTick);
-  final ValueNotifier<double> _clock = ValueNotifier<double>(0);
-  bool _reduced = false;
+  // The pointer eases toward the compass on the shared ambient clock (24–30
+  // frames a second, not the display's 120) and stops once it arrives; the
+  // lock pulse runs on the same clock. Without ambient motion (Reduce
+  // Motion, Saver) the pointer jumps.
+  final _ease = _Repaint();
+  ValueListenable<double>? _ambient;
+  ValueListenable<double>? _easingOn; // the clock the easing listens to
+  double? _lastClock;
+  bool _started = false;
 
   // Displayed pointer values, eased toward the live ones while they differ.
   double? _rel, _el;
   double? _goalRel, _goalEl;
-  bool _locked = false;
-  Duration _last = Duration.zero;
 
   @override
   void initState() {
@@ -54,6 +64,8 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
     // The target, the pointer's goal and the haptic cues follow the app's
     // updates (positions, compass), never a rebuild.
     widget.app.addListener(_changed);
+    // The compass has its own listenable (throttled to 10 a second).
+    widget.app.heading.addListener(_changed);
   }
 
   void _changed() {
@@ -64,17 +76,23 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final first = _last == Duration.zero && _goalRel == null && _goalEl == null && _targetId == null;
-    _reduced = Motion.reduced(context);
-    if (_reduced && _ticker.isActive) _ticker.stop();
-    if (first) _onApp();
+    _ambient = AmbientClock.of(context);
+    if (_easingOn != null && _easingOn != _ambient) {
+      _stopEasing();
+      _setGoal(_goalRel, _goalEl); // on the new clock, or a jump
+    }
+    if (!_started) {
+      _started = true;
+      _onApp();
+    }
   }
 
   @override
   void dispose() {
     widget.app.removeListener(_changed);
-    _ticker.dispose();
-    _clock.dispose();
+    widget.app.heading.removeListener(_changed);
+    _stopEasing();
+    _ease.dispose();
     super.dispose();
   }
 
@@ -97,17 +115,22 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
     final heading = app.headingDeg;
     final hasBearing = target.bearingDeg != null;
     final rel = hasBearing && heading != null ? FindGeometry.relativeDeg(target.bearingDeg!, heading) : null;
-    _locked = rel != null && FindGeometry.locked(rel);
     _setGoal(rel ?? (hasBearing ? target.bearingDeg : null),
         FindGeometry.elevationDeg(target.heightMetres, target.distanceM));
     _cue(_haptics.update(relDeg: rel, distanceM: target.distanceM));
   }
 
-  /// Eases the pointer; stops once it has arrived (the ticker keeps running
-  /// only while locked on, for the lock pulse).
-  void _onTick(Duration elapsed) {
-    final dt = _last == Duration.zero ? 0.016 : (elapsed - _last).inMicroseconds / 1e6;
-    _last = elapsed;
+  void _stopEasing() {
+    _easingOn?.removeListener(_onClock);
+    _easingOn = null;
+    _lastClock = null;
+  }
+
+  /// Eases the pointer one ambient frame; stops once it has arrived.
+  void _onClock() {
+    final now = _easingOn?.value ?? 0;
+    final dt = _lastClock == null ? 1 / 24 : (now - _lastClock!).clamp(0.0, 0.25);
+    _lastClock = now;
     final k = 1 - math.exp(-dt * 7);
     var moving = false;
     if (_goalRel != null) {
@@ -121,11 +144,8 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
       _el = cur + (_goalEl! - cur) * k;
       moving |= (_goalEl! - cur).abs() > 0.05;
     }
-    _clock.value = elapsed.inMicroseconds / 1e6;
-    if (!moving && !_locked) {
-      _ticker.stop();
-      _last = Duration.zero;
-    }
+    _ease.tick();
+    if (!moving) _stopEasing();
   }
 
   void _setGoal(double? rel, double? el) {
@@ -133,12 +153,18 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
     _goalEl = el;
     if (rel == null) _rel = null;
     if (el == null) _el = null;
-    if (_reduced) {
+    final clock = _ambient;
+    if (clock == null) {
       _rel = rel;
       _el = el;
+      _ease.tick();
       return;
     }
-    if (!_ticker.isActive && (rel != null || el != null)) _ticker.start();
+    if (_easingOn == null && (rel != null || el != null)) {
+      _easingOn = clock;
+      _lastClock = null;
+      clock.addListener(_onClock);
+    }
   }
 
   void _cue(FindCue cue) {
@@ -185,23 +211,36 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
       runSpacing: 10,
       children: [
         Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          const Text('POINT AT THE SKY', style: OrecchinoType.eyebrow),
+          Text('POINT AT THE SKY', style: OrecchinoType.eyebrow),
           const SizedBox(height: 2),
-          Semantics(header: true, child: const Text('Find', style: OrecchinoType.title)),
+          Semantics(header: true, child: Text('Find', style: OrecchinoType.title)),
         ]),
         if (target != null)
-          GlassButton(
-            semanticLabel: 'Choose what to find, now ${target.isAircraft ? 'aircraft' : 'drone'} ${target.label}',
-            onTap: () => _pick(contacts, target),
-            padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              ContactGlyph(aircraft: target.isAircraft, color: contactColor(target), size: 28),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Flexible(
+              child: GlassButton(
+                semanticLabel: 'Choose what to find, now ${target.kindWord.toLowerCase()} ${target.label}',
+                onTap: () => _pick(contacts, target),
+                padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  ContactGlyph(aircraft: target.isAircraft, operator: target.isOperator, color: contactColor(target), size: 28),
+                  const SizedBox(width: 8),
+                  Flexible(child: Text(target.label, style: OrecchinoType.bodyStrong)),
+                  const SizedBox(width: 4),
+                  Icon(Icons.unfold_more_rounded, size: 18, color: OrecchinoColors.inkMuted),
+                ]),
+              ),
+            ),
+            if (!target.isAircraft) ...[
               const SizedBox(width: 8),
-              Flexible(child: Text(target.label, style: OrecchinoType.bodyStrong)),
-              const SizedBox(width: 4),
-              const Icon(Icons.unfold_more_rounded, size: 18, color: OrecchinoColors.inkMuted),
-            ]),
-          ),
+              GlassButton(
+                semanticLabel: 'All details of drone ${target.isOperator ? target.ofDroneLabel : target.label}',
+                onTap: () => DroneDetailsSheet.showLive(context, app, target.ofDrone ?? target.id),
+                padding: const EdgeInsets.all(10),
+                child: Icon(Icons.info_outline_rounded, size: 22, color: OrecchinoColors.aqua),
+              ),
+            ],
+          ]),
       ],
     );
 
@@ -221,13 +260,13 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
                 Glass(
                   padding: const EdgeInsets.all(28),
                   child: Column(children: [
-                    const Icon(Icons.explore_off_rounded, size: 40, color: OrecchinoColors.inkSubtle),
+                    Icon(Icons.explore_off_rounded, size: 40, color: OrecchinoColors.inkSubtle),
                     const SizedBox(height: 12),
-                    Text('No contacts yet', style: OrecchinoType.heading.copyWith(fontSize: 18)),
+                    Text('No drones yet', style: OrecchinoType.heading.copyWith(fontSize: 18)),
                     const SizedBox(height: 6),
                     Text(
                       app.detectorReady
-                          ? 'Drones and aircraft appear here as the detector hears them.'
+                          ? 'Drones appear here as the detector hears them.'
                           : 'Connect a detector, or try the demo in Detectors.',
                       textAlign: TextAlign.center,
                       style: OrecchinoType.label,
@@ -304,10 +343,11 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
     final locked = rel != null && FindGeometry.locked(rel);
     final approx = target.isAircraft ? 'about ' : '';
     final elWords = el == null ? null : '$approx${FindGeometry.elevationWords(el)}';
-    final words = [...target.alertWords, if (target.alert != null) target.alert!.text];
+    final al = target.alert;
+    final words = [...target.alertWords, if (al != null) al.text];
 
     final pointerLabel = [
-      'Pointer to ${target.isAircraft ? 'aircraft' : 'drone'} ${target.label}',
+      'Pointer to ${target.kindWord.toLowerCase()} ${target.label}',
       if (clock != null) clock,
       if (heading == null && hasBearing) 'bearing ${target.bearingDeg!.round()} degrees true',
       if (rel != null) locked ? 'on target' : FindGeometry.turnWords(rel),
@@ -329,7 +369,9 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
                     headingDeg: heading ?? 0,
                     color: color,
                     aircraft: target.isAircraft,
-                    clock: _clock,
+                    ease: _ease,
+                    // The lock pulse only while locked on.
+                    clock: locked ? _ambient : null,
                   ),
                 ),
               ),
@@ -338,7 +380,7 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
         : Glass(
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.location_disabled_rounded, size: 36, color: OrecchinoColors.inkSubtle),
+              Icon(Icons.location_disabled_rounded, size: 36, color: OrecchinoColors.inkSubtle),
               const SizedBox(height: 12),
               Text(why ?? '',
                   textAlign: TextAlign.center, style: OrecchinoType.body.copyWith(color: OrecchinoColors.inkMuted)),
@@ -346,10 +388,20 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
           );
 
     final readouts = <Widget>[
-      // Who it is: alert words, where it was heard from (or its type).
+      // What to do first (the alert's action and why), then who it is:
+      // alert words, where it was heard from (or its type).
+      if (al != null) ...[
+        Text(trafficAction(al), style: OrecchinoType.alert.copyWith(color: color)),
+        if (trafficGeometry(al).isNotEmpty)
+          Text(trafficGeometry(al), style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
+        const SizedBox(height: 8),
+      ],
       Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
         for (final w in words) Tag(w, color: color, filled: true),
-        if (target.sublabel != null && target.sublabel!.isNotEmpty) Tag(target.sublabel!),
+        if (target.isDrone && target.sensors.isNotEmpty)
+          Semantics(label: sensorWords(target.sensors), child: SensorChips(target.sensors))
+        else if (target.sublabel != null && target.sublabel!.isNotEmpty)
+          Tag(target.sublabel!),
       ]),
       if (target.trendText != null)
         Padding(
@@ -366,8 +418,8 @@ class _FindViewState extends State<FindView> with SingleTickerProviderStateMixin
           child: AnimatedSwitcher(
             duration: Motion.of(context, Motion.base),
             child: locked
-                ? const Tag('ON TARGET',
-                    key: ValueKey('lock'),
+                ? Tag('ON TARGET',
+                    key: const ValueKey('lock'),
                     color: OrecchinoColors.aqua,
                     filled: true,
                     icon: Icons.center_focus_strong_rounded)
@@ -403,7 +455,8 @@ class _HudPainter extends CustomPainter {
   final double headingDeg;
   final Color color;
   final bool aircraft;
-  final ValueNotifier<double>? clock;
+  final Listenable ease;
+  final ValueListenable<double>? clock;
 
   _HudPainter({
     required this.state,
@@ -411,8 +464,9 @@ class _HudPainter extends CustomPainter {
     required this.headingDeg,
     required this.color,
     required this.aircraft,
+    required this.ease,
     required this.clock,
-  }) : super(repaint: clock);
+  }) : super(repaint: clock == null ? ease : Listenable.merge([ease, clock]));
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -421,22 +475,24 @@ class _HudPainter extends CustomPainter {
     final t = clock?.value ?? 0;
     final rel = state._rel, el = state._el;
 
-    // The scope.
+    // The scope (Flat: a plain panel inside a rule, as the mockups' radar).
     canvas.drawCircle(
         c,
         r,
-        Paint()
-          ..shader = RadialGradient(colors: [
-            OrecchinoColors.night.withValues(alpha: 0.55),
-            OrecchinoColors.void0.withValues(alpha: 0.75),
-          ]).createShader(Rect.fromCircle(center: c, radius: r)));
+        Look.flat
+            ? (Paint()..color = OrecchinoColors.night)
+            : (Paint()
+              ..shader = RadialGradient(colors: [
+                OrecchinoColors.night.withValues(alpha: 0.55),
+                OrecchinoColors.void0.withValues(alpha: 0.75),
+              ]).createShader(Rect.fromCircle(center: c, radius: r))));
     canvas.drawCircle(
         c,
         r,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.2
-          ..color = OrecchinoColors.aqua.withValues(alpha: 0.35));
+          ..strokeWidth = Look.flat ? 1.5 : 1.2
+          ..color = Look.flat ? OrecchinoColors.lineBright : OrecchinoColors.aqua.withValues(alpha: 0.35));
     // Where the target mark will be, so the compass letters can step aside.
     Offset? mark;
     if (rel != null) {
@@ -488,14 +544,16 @@ class _HudPainter extends CustomPainter {
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2
             ..color = OrecchinoColors.aqua.withValues(alpha: 0.6 * (1 - pulse)));
-      canvas.drawCircle(
-          c,
-          lr * 1.8,
-          Paint()
-            ..shader = RadialGradient(colors: [
-              OrecchinoColors.aqua.withValues(alpha: 0.18),
-              OrecchinoColors.aqua.withValues(alpha: 0),
-            ]).createShader(Rect.fromCircle(center: c, radius: lr * 1.8)));
+      if (!Look.flat) {
+        canvas.drawCircle(
+            c,
+            lr * 1.8,
+            Paint()
+              ..shader = RadialGradient(colors: [
+                OrecchinoColors.aqua.withValues(alpha: 0.18),
+                OrecchinoColors.aqua.withValues(alpha: 0),
+              ]).createShader(Rect.fromCircle(center: c, radius: lr * 1.8)));
+      }
     } else {
       // Brackets on the ring at the four quarters, closing in.
       final b = Paint()
@@ -648,13 +706,15 @@ class _HudPainter extends CustomPainter {
 
   void _target(Canvas canvas, Offset p, double t, bool locked) {
     final glow = 26.0 + (locked ? 8 * math.sin(t * 5).abs() : 0.0);
-    canvas.drawCircle(
-        p,
-        glow,
-        Paint()
-          ..shader =
-              RadialGradient(colors: [color.withValues(alpha: aircraft ? 0.25 : 0.5), color.withValues(alpha: 0)])
-                  .createShader(Rect.fromCircle(center: p, radius: glow)));
+    if (!Look.flat) {
+      canvas.drawCircle(
+          p,
+          glow,
+          Paint()
+            ..shader =
+                RadialGradient(colors: [color.withValues(alpha: aircraft ? 0.25 : 0.5), color.withValues(alpha: 0)])
+                    .createShader(Rect.fromCircle(center: p, radius: glow)));
+    }
     if (aircraft) {
       canvas.drawPath(
           Path()
@@ -713,7 +773,12 @@ class _HudPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _HudPainter old) => true;
+  bool shouldRepaint(covariant _HudPainter old) =>
+      old.northUp != northUp ||
+      old.headingDeg != headingDeg ||
+      old.color != color ||
+      old.aircraft != aircraft ||
+      old.clock != clock;
 }
 
 class _TargetPicker extends StatelessWidget {
@@ -735,7 +800,7 @@ class _TargetPicker extends StatelessWidget {
             constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.7),
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               Row(children: [
-                const Expanded(child: Text('What to find', style: OrecchinoType.heading)),
+                Expanded(child: Text('What to find', style: OrecchinoType.heading)),
                 IconButton(
                     tooltip: 'Close', icon: const Icon(Icons.close_rounded), onPressed: () => Navigator.pop(context)),
               ]),
@@ -745,7 +810,11 @@ class _TargetPicker extends StatelessWidget {
                     Semantics(
                       button: true,
                       selected: c.id == currentId,
-                      label: '${c.isAircraft ? 'Aircraft' : 'Drone'} ${c.label}, ${c.rangeText}',
+                      label: [
+                        '${c.kindWord} ${c.label}',
+                        if (c.alert != null) trafficAction(c.alert!),
+                        c.rangeText,
+                      ].join(', '),
                       excludeSemantics: true,
                       child: InkWell(
                         borderRadius: BorderRadius.circular(16),
@@ -758,13 +827,17 @@ class _TargetPicker extends StatelessWidget {
                             borderRadius: BorderRadius.circular(16),
                           ),
                           child: Row(children: [
-                            ContactGlyph(aircraft: c.isAircraft, color: contactColor(c), size: 32),
+                            ContactGlyph(aircraft: c.isAircraft, operator: c.isOperator, color: contactColor(c), size: 32),
                             const SizedBox(width: 12),
                             Expanded(
                               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text('${c.isAircraft ? 'Aircraft' : 'Drone'} ${c.label}',
+                                Text('${c.kindWord} ${c.label}',
                                     style: OrecchinoType.bodyStrong),
-                                if (c.sublabel != null) Text(c.sublabel!, style: OrecchinoType.caption),
+                                if (c.alert != null)
+                                  Text(trafficAction(c.alert!),
+                                      style: OrecchinoType.caption.copyWith(color: contactColor(c)))
+                                else if (c.sublabel != null)
+                                  Text(c.sublabel!, style: OrecchinoType.caption),
                               ]),
                             ),
                             Text(c.rangeText, style: OrecchinoType.metric.copyWith(fontSize: 15)),
@@ -780,4 +853,8 @@ class _TargetPicker extends StatelessWidget {
       ),
     );
   }
+}
+
+class _Repaint extends ChangeNotifier {
+  void tick() => notifyListeners();
 }

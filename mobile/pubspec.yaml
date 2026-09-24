@@ -20,6 +20,8 @@ dependencies:
   path: ^1.9.0
   flutter_local_notifications: ^22.3.1
   flutter_tts: ^4.2.5
+  flutter_map: ^8.3.2
+  latlong2: ^0.10.1
 
 dev_dependencies:
   flutter_test:
@@ -47,3 +49,31 @@ flutter:
     - family: JetBrainsMono
       fonts:
         - asset: assets/fonts/jetbrains_mono/JetBrainsMono-Variable.ttf
+    # The Flat look (the design mockups): IBM Plex, SIL OFL 1.1, from
+    # github.com/IBM/plex releases (plex-sans-condensed 2.0.0, plex-sans
+    # 1.1.0, plex-mono 2.5.0); only the weights the look uses.
+    - family: IBMPlexSansCondensed
+      fonts:
+        - asset: assets/fonts/ibm_plex_sans_condensed/IBMPlexSansCondensed-Regular.ttf
+        - asset: assets/fonts/ibm_plex_sans_condensed/IBMPlexSansCondensed-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/ibm_plex_sans_condensed/IBMPlexSansCondensed-Bold.ttf
+          weight: 700
+    - family: IBMPlexSans
+      fonts:
+        - asset: assets/fonts/ibm_plex_sans/IBMPlexSans-Regular.ttf
+        - asset: assets/fonts/ibm_plex_sans/IBMPlexSans-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/ibm_plex_sans/IBMPlexSans-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/ibm_plex_sans/IBMPlexSans-Bold.ttf
+          weight: 700
+    - family: IBMPlexMono
+      fonts:
+        - asset: assets/fonts/ibm_plex_mono/IBMPlexMono-Regular.ttf
+        - asset: assets/fonts/ibm_plex_mono/IBMPlexMono-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/ibm_plex_mono/IBMPlexMono-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/ibm_plex_mono/IBMPlexMono-Bold.ttf
+          weight: 700

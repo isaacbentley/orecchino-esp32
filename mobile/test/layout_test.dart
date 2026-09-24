@@ -91,7 +91,7 @@ void main() {
         // Step down until the list's heading is inside the panel.
         final panelBox = tester.getRect(find.byType(ContactSheet));
         bool inPanel() {
-          final f = find.text('CONTACTS (3)');
+          final f = find.text('DRONES (3)');
           return f.evaluate().isNotEmpty && panelBox.contains(tester.getCenter(f));
         }
 
@@ -100,7 +100,7 @@ void main() {
           await tester.pump();
         }
       }
-      final list = tester.getRect(find.text('CONTACTS (3)'));
+      final list = tester.getRect(find.text('DRONES (3)'));
       final panelRect = tester.getRect(find.byType(ContactSheet));
       expect(panelRect.right, lessThanOrEqualTo(d.size.width - d.padding.right),
           reason: '${d.name}: clear of the side inset');

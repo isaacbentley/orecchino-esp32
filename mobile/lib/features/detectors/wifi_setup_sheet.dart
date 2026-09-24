@@ -5,8 +5,11 @@
 // rebuild never adds a listener and a swipe-dismiss never leaks one. The
 // mode chips show the board's reported mode; every step has a state the
 // person can see: scanning, no networks, scan failed, connecting, connected,
-// failed with the board's reason, and a refused command. Drawn on glass to
-// match the rest of the app.
+// failed with the board's reason, and a refused command; "Wi-Fi paused:
+// phone connected" while this phone's link holds the board's automatic
+// windows ("paused":"phone"). Below the networks, the board's ADS-B radius
+// and map area (wifi_config) with its storage plan, when the firmware
+// reports them. Drawn on glass to match the rest of the app.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -26,9 +29,12 @@ class WifiSetupSheet extends StatefulWidget {
   final DetectorLink link;
   final Duration scanTimeout;
 
-  const WifiSetupSheet({super.key, required this.link, this.scanTimeout = const Duration(seconds: 20)});
+  /// The board's last map plan, if a "net" line already carried one.
+  final String? mapPlan;
 
-  static Future<void> show(BuildContext context, DetectorLink link) {
+  const WifiSetupSheet({super.key, required this.link, this.scanTimeout = const Duration(seconds: 20), this.mapPlan});
+
+  static Future<void> show(BuildContext context, DetectorLink link, {String? mapPlan}) {
     return showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -39,7 +45,7 @@ class WifiSetupSheet extends StatefulWidget {
         child: Glass(
           blur: 32,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
-          child: WifiSetupSheet(link: link),
+          child: WifiSetupSheet(link: link, mapPlan: mapPlan),
         ),
       ),
     );
@@ -59,6 +65,9 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
   String? _joining; // ssid while a join we asked for runs
   String? _error; // a refused command or a failed send
   String? _pendingMode;
+  bool? _paused; // from wifi_status "paused", then the "net" paused / resumed lines
+  String? _mapPlan;
+  double? _adsbKm, _tileKm; // while a slider is dragged or its command is on the way
 
   /// For tests: the networks shown.
   List<WifiNetMessage> get networks => List.unmodifiable(_nets);
@@ -66,6 +75,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
   @override
   void initState() {
     super.initState();
+    _mapPlan = widget.mapPlan;
     _sub = widget.link.messages.listen(_onMessage);
     _send(HostCommands.wifiStatus());
     _startScan();
@@ -120,11 +130,18 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
       } else if (msg is WifiStatusMessage) {
         _status = msg;
         _pendingMode = null;
+        _paused = msg.pausedByPhone;
+        _adsbKm = _tileKm = null;
         if (_joining != null && (msg.state == 'connected' || msg.state == 'failed')) _joining = null;
+      } else if (msg is NetStatusMessage) {
+        if (msg.state == 'paused') _paused = true;
+        if (msg.state == 'resumed') _paused = false;
+        if (msg.map != null && msg.map!.isNotEmpty) _mapPlan = msg.map;
       } else if (msg is WifiErrorMessage) {
         _error = '${msg.command}: ${msg.reason}';
         _joining = null;
         _pendingMode = null;
+        if (msg.command == 'wifi_config') _adsbKm = _tileKm = null;
         if (msg.command == 'wifi_scan' && _scan == WifiScanState.scanning) {
           _scan = WifiScanState.failed;
           _scanError = msg.reason;
@@ -157,10 +174,9 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 10, 12, 8),
-        // Short (a phone on its side, large text): the whole sheet scrolls
-        // as one; tall: the network list scrolls under a fixed top.
-        child: LayoutBuilder(builder: (context, box) {
-          final short = box.maxHeight < 520;
+        // One list: the status and mode on top, the networks, then the
+        // board's data settings.
+        child: Builder(builder: (context) {
           final top = <Widget>[
             Center(
               child: Container(
@@ -172,9 +188,9 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
             ),
             Row(
               children: [
-                const Icon(Icons.wifi_rounded, color: OrecchinoColors.aqua, size: 22),
+                Icon(Icons.wifi_rounded, color: OrecchinoColors.aqua, size: 22),
                 const SizedBox(width: 10),
-                Expanded(child: Semantics(header: true, child: const Text('T5 Wi-Fi', style: OrecchinoType.heading))),
+                Expanded(child: Semantics(header: true, child: Text('T5 Wi-Fi', style: OrecchinoType.heading))),
                 IconButton(
                   tooltip: 'Close',
                   icon: const Icon(Icons.close_rounded),
@@ -184,13 +200,15 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
             ),
             const SizedBox(height: 4),
             Padding(padding: const EdgeInsets.only(right: 8), child: _statusLine(st)),
+            if (_paused == true && st?.state != 'connected' && st?.state != 'connecting' && _joining == null)
+              _pausedNote(),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8, right: 8),
                 child: Text(_error!, style: OrecchinoType.label.copyWith(color: OrecchinoColors.warning)),
               ),
             const SizedBox(height: 14),
-            const Text('MODE', style: OrecchinoType.eyebrow),
+            Text('MODE', style: OrecchinoType.eyebrow),
             const SizedBox(height: 8),
             Wrap(spacing: 8, runSpacing: 8, children: [
               _modeChip('sync', 'Sync every ${st?.everyMin ?? 15} min', mode),
@@ -198,8 +216,8 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
               _modeChip('off', 'Off', mode),
             ]),
             const SizedBox(height: 8),
-            const Padding(
-              padding: EdgeInsets.only(right: 8),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
               child: Text(
                 'Remote ID Wi-Fi pauses while the board scans or syncs; in Stay connected it hears only the '
                 'access point\'s channel. BLE Remote ID is unaffected.',
@@ -209,7 +227,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
             const SizedBox(height: 10),
             Row(
               children: [
-                const Expanded(child: Text('NETWORKS', style: OrecchinoType.eyebrow)),
+                Expanded(child: Text('NETWORKS', style: OrecchinoType.eyebrow)),
                 if (_scan == WifiScanState.scanning)
                   const Padding(
                     padding: EdgeInsets.all(12),
@@ -223,15 +241,109 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
               ],
             ),
           ];
-          if (short) {
-            return ListView(padding: EdgeInsets.zero, children: [...top, ..._rows(saved)]);
-          }
-          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            ...top,
-            Expanded(child: ListView(padding: const EdgeInsets.only(right: 8), children: _rows(saved))),
-          ]);
+          return MediaQuery.removePadding(
+            // The sheet is already clear of the side insets: a ListTile must not add them again.
+            context: context,
+            removeLeft: true,
+            removeRight: true,
+            child: ListView(
+              padding: const EdgeInsets.only(right: 8),
+              children: [...top, ..._rows(saved), if (st?.adsbKm != null) ..._dataSettings(st!)],
+            ),
+          );
         }),
       ),
+    );
+  }
+
+  Widget _pausedNote() => Padding(
+        padding: const EdgeInsets.only(top: 8, right: 8),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(Icons.pause_circle_outline_rounded, size: 18, color: OrecchinoColors.caution),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Wi-Fi paused: phone connected',
+                  style: OrecchinoType.bodyStrong.copyWith(color: OrecchinoColors.caution)),
+              const SizedBox(height: 2),
+              Text(
+                'The board skips its automatic syncs while this phone is linked (the phone sends the data). '
+                'Scan, connect and mode changes still run.',
+                style: OrecchinoType.caption,
+              ),
+            ]),
+          ),
+        ]),
+      );
+
+  /// The board's ADS-B radius and map area (wifi_config), and its storage
+  /// plan: only when its wifi_status reports them.
+  List<Widget> _dataSettings(WifiStatusMessage st) {
+    final maxTile = (st.tileMaxKm != null && st.tileMaxKm! >= 1) ? st.tileMaxKm!.floor().clamp(1, 30) : 30;
+    final adsb = (_adsbKm ?? st.adsbKm!.toDouble()).clamp(5.0, 30.0);
+    final tile = (_tileKm ?? (st.tileKm ?? 3).toDouble()).clamp(1.0, maxTile.toDouble());
+    return [
+      const SizedBox(height: 18),
+      Text('BOARD DATA', style: OrecchinoType.eyebrow),
+      const SizedBox(height: 4),
+      _slider(
+        title: 'ADS-B radius',
+        value: adsb,
+        min: 5,
+        max: 30,
+        caption: 'Around the board\'s home. Only for aircraft near drones: a live drone more than 3 km out '
+            'widens it so each has 9 km, up to 30 km.',
+        onChanged: (v) => setState(() => _adsbKm = v),
+        onDone: (v) => _send(HostCommands.wifiConfig(adsbKm: v.round())),
+      ),
+      _slider(
+        title: 'Map area',
+        value: tile,
+        min: 1,
+        max: maxTile.toDouble(),
+        caption: _mapPlan ??
+            (st.tileMaxKm == null
+                ? 'The storage plan shows after the board\'s next map sync.'
+                : 'This board\'s flash holds up to ${st.tileMaxKm!.toStringAsFixed(1)} km of map.'),
+        onChanged: (v) => setState(() => _tileKm = v),
+        onDone: (v) => _send(HostCommands.wifiConfig(tileKm: v.round())),
+      ),
+      const SizedBox(height: 8),
+    ];
+  }
+
+  Widget _slider({
+    required String title,
+    required double value,
+    required double min,
+    required double max,
+    required String caption,
+    required ValueChanged<double> onChanged,
+    required ValueChanged<double> onDone,
+  }) {
+    final km = '${value.round()} km';
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text(title, style: OrecchinoType.bodyStrong)),
+          Text(km, style: OrecchinoType.bodyStrong.copyWith(color: OrecchinoColors.aqua)),
+        ]),
+        Slider(
+          value: value,
+          min: min,
+          max: max,
+          divisions: max > min ? (max - min).round() : null,
+          label: km,
+          semanticFormatterCallback: (v) => '$title ${v.round()} kilometres',
+          onChanged: max > min ? onChanged : null,
+          onChangeEnd: onDone,
+        ),
+        Text(caption, style: OrecchinoType.caption),
+      ]),
     );
   }
 
@@ -303,7 +415,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
     }
     children.add(ListTile(
       contentPadding: const EdgeInsets.only(left: 4, right: 8),
-      leading: const Icon(Icons.add_rounded, color: OrecchinoColors.aqua),
+      leading: Icon(Icons.add_rounded, color: OrecchinoColors.aqua),
       title: Text('Other network…', style: OrecchinoType.bodyStrong.copyWith(color: OrecchinoColors.aqua)),
       onTap: () => _askPassword(null, secure: true),
     ));
@@ -337,7 +449,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
   }
 
   Widget _savedTile(String ssid) => _row(
-        leading: const Icon(Icons.bookmark_rounded, color: OrecchinoColors.inkSubtle, size: 20),
+        leading: Icon(Icons.bookmark_rounded, color: OrecchinoColors.inkSubtle, size: 20),
         title: ssid,
         subtitle: 'saved, not in range',
         onTap: _joining != null ? null : () => _savedActions(ssid),
@@ -355,7 +467,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
         color: Colors.white.withValues(alpha: 0.04),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: OrecchinoColors.line),
+          side: BorderSide(color: OrecchinoColors.line),
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -399,7 +511,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.delete_outline, color: OrecchinoColors.warning),
+            leading: Icon(Icons.delete_outline, color: OrecchinoColors.warning),
             title: const Text('FORGET'),
             onTap: () {
               Navigator.pop(ctx);

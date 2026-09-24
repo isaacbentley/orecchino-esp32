@@ -22,15 +22,15 @@ import 'package:orecchino_mobile/ui/theme/theme.dart';
 import 'support/fakes.dart';
 
 class TurningLocation extends LocationService {
-  double heading = 0;
+  double h = 0;
   @override
   Future<void> start() async {}
   @override
   PhoneLocation? get currentLocation => const PhoneLocation(lat: 37.8039, lon: -122.464, timeMs: 0);
   @override
-  double? get headingDeg => heading;
-  void turn(double h) {
-    heading = h;
+  double? get headingDeg => h;
+  void turn(double to) {
+    h = to;
     notifyListeners();
   }
 }

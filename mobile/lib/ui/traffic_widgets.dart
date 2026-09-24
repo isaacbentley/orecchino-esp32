@@ -1,15 +1,21 @@
-// traffic_widgets.dart — the separation bridge's numbers and the aircraft
-// card. Fed by the pair rules in core/traffic/traffic_rules.dart; every
-// widget reads the same words to a screen reader.
-// Words: never "collision", "conflict", "safe", "clear" or "TCAS".
+// traffic_widgets.dart — the words every traffic surface shares (the action
+// first, then the geometry behind it), the separation bridge's numbers and
+// the aircraft card. Fed by the rules in core/traffic/traffic_rules.dart;
+// every widget reads the same words to a screen reader. Aircraft appear
+// only while an alert names them (a drone pair, or low traffic).
+// Words: never "collision", "safe", "clear" (but the rules' "KEEP CLEAR
+// OF"), "conflict resolved" or "TCAS".
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'package:flutter/material.dart';
 
 import '../core/traffic/traffic_rules.dart';
+import '../core/traffic/traffic_words.dart';
 import 'glass.dart';
 import 'theme/theme.dart';
+
+export '../core/traffic/traffic_words.dart';
 
 Color trafficColor(TrafficLevel? level) => OrecchinoColors.level(level);
 
@@ -23,10 +29,18 @@ String trafficVert(double? m) {
   return v >= 0 ? '+$v m' : '$v m';
 }
 
-/// The detail line under a traffic alert: '0.4 km · +85 m · ADS-B 3 s old'.
-String trafficDetail(TrafficAlert a) => a.kind.isPair
-    ? '${trafficKm(a.horizM)} · ${trafficVert(a.vertM)} · ${TrafficRules.ageWords(a.ageS)}'
-    : '${trafficKm(a.horizM)} · ${TrafficRules.ageWords(a.ageS)}';
+/// Low traffic (an aircraft in UAS airspace), not a drone pair.
+bool trafficIsLow(TrafficAlert a) => !a.kind.isPair;
+
+/// '240 m above ground', 'height unknown' (low traffic: the height is above
+/// the ground, not relative to a drone).
+String trafficAgl(double? m) => m == null ? 'height unknown' : '${trafficAglM(m)} m above ground';
+
+/// The detail line under a traffic alert: '0.4 km · +85 m · ADS-B 3 s old'
+/// (low traffic: '2.4 km · 240 m above ground · ADS-B 3 s old').
+String trafficDetail(TrafficAlert a) =>
+    '${trafficKm(a.horizM)} · ${trafficIsLow(a) ? trafficAgl(a.vertM) : trafficVert(a.vertM)} · '
+    '${TrafficRules.ageWords(a.ageS)}';
 
 /// Floats on a separation bridge: that pair's own numbers.
 class SeparationBridgeBadge extends StatelessWidget {
@@ -38,7 +52,9 @@ class SeparationBridgeBadge extends StatelessWidget {
   static final TextStyle _style =
       OrecchinoType.label.copyWith(color: OrecchinoColors.void0, fontWeight: FontWeight.w700, fontSize: 12);
 
-  static String _vertText(TrafficAlert a) => a.vertM == null ? 'height unknown' : 'Δ ${trafficVert(a.vertM)}';
+  static String _vertText(TrafficAlert a) => a.vertM == null
+      ? 'height unknown'
+      : (trafficIsLow(a) ? '${trafficAglM(a.vertM!)} m AGL' : 'Δ ${trafficVert(a.vertM)}');
 
   /// The badge's size at [scaler], so the sky can keep its labels clear.
   static Size measure(TrafficAlert alert, TextScaler scaler) {
@@ -63,7 +79,7 @@ class SeparationBridgeBadge extends StatelessWidget {
       decoration: BoxDecoration(
         color: color,
         borderRadius: BorderRadius.circular(999),
-        boxShadow: [BoxShadow(color: color.withValues(alpha: 0.45), blurRadius: 14)],
+        boxShadow: Look.flat ? null : [BoxShadow(color: color.withValues(alpha: 0.45), blurRadius: 14)],
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -118,8 +134,12 @@ class TrafficDetailCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     if (al != null) ...[
-                      Text(al.text, style: OrecchinoType.alert.copyWith(color: levelColor)),
-                      const SizedBox(height: 6),
+                      Text(trafficAction(al), style: OrecchinoType.alert.copyWith(color: levelColor)),
+                      if (trafficGeometry(al).isNotEmpty)
+                        Text(trafficGeometry(al), style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
+                      const SizedBox(height: 2),
+                      Text(al.text, style: OrecchinoType.caption),
+                      const SizedBox(height: 8),
                     ],
                     Text(aircraft.name, style: OrecchinoType.title.copyWith(fontSize: 26)),
                     const SizedBox(height: 2),
@@ -141,12 +161,17 @@ class TrafficDetailCard extends StatelessWidget {
               children: [
                 if (al != null)
                   _Metric(
-                    al.kind.isPair ? 'FROM DRONE ${TrafficRules.droneLabel(al.droneId)}' : 'FROM HERE',
+                    al.droneId.isNotEmpty ? 'FROM DRONE ${TrafficRules.droneLabel(al.droneId)}' : 'FROM YOU',
                     trafficKm(al.horizM),
                     al.cpaS == null ? null : 'closest in ${(al.cpaS! + 0.5).floor()} s',
                   ),
-                if (al != null && al.kind.isPair)
-                  _Metric('VERTICAL', trafficVert(al.vertM), null,
+                if (al != null)
+                  _Metric(
+                      trafficIsLow(al) ? 'ABOVE GROUND' : 'VERTICAL',
+                      trafficIsLow(al)
+                          ? (al.vertM == null ? 'unknown' : '${trafficAglM(al.vertM!)} m')
+                          : trafficVert(al.vertM),
+                      null,
                       valueColor: al.vertM == null ? OrecchinoColors.caution : null),
                 _Metric('ALTITUDE', altFt == null ? '--' : '$altFt ft', null),
                 _Metric('SPEED', kt == null ? '--' : '$kt kt', null),
@@ -166,8 +191,8 @@ class TrafficDetailCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          const Padding(
-            padding: EdgeInsets.only(right: 10),
+          Padding(
+            padding: const EdgeInsets.only(right: 10),
             child: Text('Positions as reported, not a prediction. Not every aircraft broadcasts ADS-B.',
                 style: OrecchinoType.caption),
           ),

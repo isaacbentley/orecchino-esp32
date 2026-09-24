@@ -47,6 +47,10 @@ class HostCommands {
     return jsonEncode(map);
   }
 
+  /// Clear the detector's match log; every connected app then hears
+  /// {"type":"log_cleared"} (firmware/common/rx_core.h rx_log_clear_all).
+  static String logClear() => jsonEncode({'cmd': 'log_clear'});
+
   static String wifiScan() => jsonEncode({'cmd': 'wifi_scan'});
 
   /// [psk] "" joins an open network; null joins with the saved password.
@@ -74,4 +78,14 @@ class HostCommands {
   }
 
   static String wifiStatus() => jsonEncode({'cmd': 'wifi_status'});
+
+  /// The T5's ADS-B radius (5-30 km) and map area radius (1 km to what its
+  /// flash holds); either or both. The board clamps and answers wifi_status.
+  static String wifiConfig({int? adsbKm, int? tileKm}) {
+    return jsonEncode({
+      'cmd': 'wifi_config',
+      if (adsbKm != null) 'adsb_km': adsbKm,
+      if (tileKm != null) 'tile_km': tileKm,
+    });
+  }
 }

@@ -68,7 +68,18 @@ abstract class BleTransport {
   Stream<List<BleScanHit>> get scanResults;
   Future<void> startScan({Duration timeout});
   Future<void> stopScan();
-  Future<BlePeer> connect(String id, {Duration timeout});
+
+  /// Connect within [timeout]; or with [pending], wait as long as it takes
+  /// for the device to come into range (no timeout, no scanning: Android's
+  /// autoConnect, CoreBluetooth's pending connect), cancelled by
+  /// [cancelConnect].
+  Future<BlePeer> connect(String id, {Duration timeout, bool pending = false});
+
+  /// Whether [connect] can wait ([pending]).
+  bool get pendingConnect;
+
+  /// Give up a pending [connect] to [id].
+  Future<void> cancelConnect(String id);
   Future<void> forgetBond(String id);
 }
 
@@ -115,11 +126,54 @@ class FbpTransport implements BleTransport {
   Future<void> stopScan() => FlutterBluePlus.stopScan();
 
   @override
-  Future<BlePeer> connect(String id, {Duration timeout = const Duration(seconds: 15)}) async {
+  bool get pendingConnect => true;
+
+  // A waiting pending connect per device, so [cancelConnect] ends its wait:
+  // otherwise it would complete on the device's next connection (a newer
+  // connect's) and the stale attempt would disconnect that link.
+  final Map<String, void Function()> _pendingCancel = {};
+
+  @override
+  Future<BlePeer> connect(String id,
+      {Duration timeout = const Duration(seconds: 15), bool pending = false}) async {
     final device = BluetoothDevice.fromId(id);
+    if (pending) {
+      // autoConnect: Android's controller connects whenever the detector
+      // is in range (low duty, no app scan); iOS connects with no timeout
+      // and flutter_blue_plus re-arms it after a drop. mtu must be null.
+      final up = Completer<void>();
+      up.future.ignore(); // a cancel before the wait below is not an unhandled error
+      void cancel() {
+        if (!up.isCompleted) up.completeError(StateError('pending connect cancelled'));
+      }
+
+      _pendingCancel.remove(id)?.call();
+      _pendingCancel[id] = cancel;
+      // connectionState replays the current state, so a peripheral that is
+      // already connected (iOS state restoration) completes at once.
+      final sub = device.connectionState.listen((s) {
+        if (s == BluetoothConnectionState.connected && !up.isCompleted) up.complete();
+      });
+      try {
+        await device.connect(mtu: null, autoConnect: true);
+        await up.future;
+      } finally {
+        await sub.cancel();
+        if (identical(_pendingCancel[id], cancel)) _pendingCancel.remove(id);
+      }
+      return _FbpPeer(device);
+    }
     // mtu: null — the MTU is asked for explicitly after connecting (Android).
     await device.connect(timeout: timeout, mtu: null);
     return _FbpPeer(device);
+  }
+
+  @override
+  Future<void> cancelConnect(String id) async {
+    _pendingCancel.remove(id)?.call();
+    try {
+      await BluetoothDevice.fromId(id).disconnect();
+    } catch (_) {}
   }
 
   @override

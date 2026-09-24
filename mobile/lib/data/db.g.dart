@@ -731,6 +731,36 @@ class $DetectionsTable extends Detections
       requiredDuringInsert: true,
       defaultConstraints:
           GeneratedColumn.constraintIsAlways('CHECK ("tfr" IN (0, 1))'));
+  static const VerificationMeta _inTfrMeta = const VerificationMeta('inTfr');
+  @override
+  late final GeneratedColumn<bool> inTfr = GeneratedColumn<bool>(
+      'in_tfr', aliasedName, true,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("in_tfr" IN (0, 1))'));
+  static const VerificationMeta _tfrIdMeta = const VerificationMeta('tfrId');
+  @override
+  late final GeneratedColumn<String> tfrId = GeneratedColumn<String>(
+      'tfr_id', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _classTypeMeta =
+      const VerificationMeta('classType');
+  @override
+  late final GeneratedColumn<int> classType = GeneratedColumn<int>(
+      'class_type', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
+  static const VerificationMeta _catEuMeta = const VerificationMeta('catEu');
+  @override
+  late final GeneratedColumn<int> catEu = GeneratedColumn<int>(
+      'cat_eu', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
+  static const VerificationMeta _classEuMeta =
+      const VerificationMeta('classEu');
+  @override
+  late final GeneratedColumn<int> classEu = GeneratedColumn<int>(
+      'class_eu', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
   static const VerificationMeta _emergMeta = const VerificationMeta('emerg');
   @override
   late final GeneratedColumn<bool> emerg = GeneratedColumn<bool>(
@@ -764,6 +794,11 @@ class $DetectionsTable extends Detections
         peakRssi,
         authState,
         tfr,
+        inTfr,
+        tfrId,
+        classType,
+        catEu,
+        classEu,
         emerg,
         msgs
       ];
@@ -865,6 +900,26 @@ class $DetectionsTable extends Detections
     } else if (isInserting) {
       context.missing(_tfrMeta);
     }
+    if (data.containsKey('in_tfr')) {
+      context.handle(
+          _inTfrMeta, inTfr.isAcceptableOrUnknown(data['in_tfr']!, _inTfrMeta));
+    }
+    if (data.containsKey('tfr_id')) {
+      context.handle(
+          _tfrIdMeta, tfrId.isAcceptableOrUnknown(data['tfr_id']!, _tfrIdMeta));
+    }
+    if (data.containsKey('class_type')) {
+      context.handle(_classTypeMeta,
+          classType.isAcceptableOrUnknown(data['class_type']!, _classTypeMeta));
+    }
+    if (data.containsKey('cat_eu')) {
+      context.handle(
+          _catEuMeta, catEu.isAcceptableOrUnknown(data['cat_eu']!, _catEuMeta));
+    }
+    if (data.containsKey('class_eu')) {
+      context.handle(_classEuMeta,
+          classEu.isAcceptableOrUnknown(data['class_eu']!, _classEuMeta));
+    }
     if (data.containsKey('emerg')) {
       context.handle(
           _emergMeta, emerg.isAcceptableOrUnknown(data['emerg']!, _emergMeta));
@@ -922,6 +977,16 @@ class $DetectionsTable extends Detections
           .read(DriftSqlType.string, data['${effectivePrefix}auth_state'])!,
       tfr: attachedDatabase.typeMapping
           .read(DriftSqlType.bool, data['${effectivePrefix}tfr'])!,
+      inTfr: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}in_tfr']),
+      tfrId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}tfr_id']),
+      classType: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}class_type']),
+      catEu: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}cat_eu']),
+      classEu: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}class_eu']),
       emerg: attachedDatabase.typeMapping
           .read(DriftSqlType.bool, data['${effectivePrefix}emerg'])!,
       msgs: attachedDatabase.typeMapping
@@ -954,6 +1019,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
   final int? peakRssi;
   final String authState;
   final bool tfr;
+  final bool? inTfr;
+  final String? tfrId;
+  final int? classType;
+  final int? catEu;
+  final int? classEu;
   final bool emerg;
   final int msgs;
   const DetectionEntry(
@@ -975,6 +1045,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
       this.peakRssi,
       required this.authState,
       required this.tfr,
+      this.inTfr,
+      this.tfrId,
+      this.classType,
+      this.catEu,
+      this.classEu,
       required this.emerg,
       required this.msgs});
   @override
@@ -1016,6 +1091,21 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
     }
     map['auth_state'] = Variable<String>(authState);
     map['tfr'] = Variable<bool>(tfr);
+    if (!nullToAbsent || inTfr != null) {
+      map['in_tfr'] = Variable<bool>(inTfr);
+    }
+    if (!nullToAbsent || tfrId != null) {
+      map['tfr_id'] = Variable<String>(tfrId);
+    }
+    if (!nullToAbsent || classType != null) {
+      map['class_type'] = Variable<int>(classType);
+    }
+    if (!nullToAbsent || catEu != null) {
+      map['cat_eu'] = Variable<int>(catEu);
+    }
+    if (!nullToAbsent || classEu != null) {
+      map['class_eu'] = Variable<int>(classEu);
+    }
     map['emerg'] = Variable<bool>(emerg);
     map['msgs'] = Variable<int>(msgs);
     return map;
@@ -1045,6 +1135,18 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
           : Value(peakRssi),
       authState: Value(authState),
       tfr: Value(tfr),
+      inTfr:
+          inTfr == null && nullToAbsent ? const Value.absent() : Value(inTfr),
+      tfrId:
+          tfrId == null && nullToAbsent ? const Value.absent() : Value(tfrId),
+      classType: classType == null && nullToAbsent
+          ? const Value.absent()
+          : Value(classType),
+      catEu:
+          catEu == null && nullToAbsent ? const Value.absent() : Value(catEu),
+      classEu: classEu == null && nullToAbsent
+          ? const Value.absent()
+          : Value(classEu),
       emerg: Value(emerg),
       msgs: Value(msgs),
     );
@@ -1072,6 +1174,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
       peakRssi: serializer.fromJson<int?>(json['peakRssi']),
       authState: serializer.fromJson<String>(json['authState']),
       tfr: serializer.fromJson<bool>(json['tfr']),
+      inTfr: serializer.fromJson<bool?>(json['inTfr']),
+      tfrId: serializer.fromJson<String?>(json['tfrId']),
+      classType: serializer.fromJson<int?>(json['classType']),
+      catEu: serializer.fromJson<int?>(json['catEu']),
+      classEu: serializer.fromJson<int?>(json['classEu']),
       emerg: serializer.fromJson<bool>(json['emerg']),
       msgs: serializer.fromJson<int>(json['msgs']),
     );
@@ -1098,6 +1205,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
       'peakRssi': serializer.toJson<int?>(peakRssi),
       'authState': serializer.toJson<String>(authState),
       'tfr': serializer.toJson<bool>(tfr),
+      'inTfr': serializer.toJson<bool?>(inTfr),
+      'tfrId': serializer.toJson<String?>(tfrId),
+      'classType': serializer.toJson<int?>(classType),
+      'catEu': serializer.toJson<int?>(catEu),
+      'classEu': serializer.toJson<int?>(classEu),
       'emerg': serializer.toJson<bool>(emerg),
       'msgs': serializer.toJson<int>(msgs),
     };
@@ -1122,6 +1234,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
           Value<int?> peakRssi = const Value.absent(),
           String? authState,
           bool? tfr,
+          Value<bool?> inTfr = const Value.absent(),
+          Value<String?> tfrId = const Value.absent(),
+          Value<int?> classType = const Value.absent(),
+          Value<int?> catEu = const Value.absent(),
+          Value<int?> classEu = const Value.absent(),
           bool? emerg,
           int? msgs}) =>
       DetectionEntry(
@@ -1143,6 +1260,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
         peakRssi: peakRssi.present ? peakRssi.value : this.peakRssi,
         authState: authState ?? this.authState,
         tfr: tfr ?? this.tfr,
+        inTfr: inTfr.present ? inTfr.value : this.inTfr,
+        tfrId: tfrId.present ? tfrId.value : this.tfrId,
+        classType: classType.present ? classType.value : this.classType,
+        catEu: catEu.present ? catEu.value : this.catEu,
+        classEu: classEu.present ? classEu.value : this.classEu,
         emerg: emerg ?? this.emerg,
         msgs: msgs ?? this.msgs,
       );
@@ -1167,6 +1289,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
       peakRssi: data.peakRssi.present ? data.peakRssi.value : this.peakRssi,
       authState: data.authState.present ? data.authState.value : this.authState,
       tfr: data.tfr.present ? data.tfr.value : this.tfr,
+      inTfr: data.inTfr.present ? data.inTfr.value : this.inTfr,
+      tfrId: data.tfrId.present ? data.tfrId.value : this.tfrId,
+      classType: data.classType.present ? data.classType.value : this.classType,
+      catEu: data.catEu.present ? data.catEu.value : this.catEu,
+      classEu: data.classEu.present ? data.classEu.value : this.classEu,
       emerg: data.emerg.present ? data.emerg.value : this.emerg,
       msgs: data.msgs.present ? data.msgs.value : this.msgs,
     );
@@ -1193,6 +1320,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
           ..write('peakRssi: $peakRssi, ')
           ..write('authState: $authState, ')
           ..write('tfr: $tfr, ')
+          ..write('inTfr: $inTfr, ')
+          ..write('tfrId: $tfrId, ')
+          ..write('classType: $classType, ')
+          ..write('catEu: $catEu, ')
+          ..write('classEu: $classEu, ')
           ..write('emerg: $emerg, ')
           ..write('msgs: $msgs')
           ..write(')'))
@@ -1200,27 +1332,33 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
   }
 
   @override
-  int get hashCode => Object.hash(
-      detectorId,
-      rowKey,
-      seq,
-      active,
-      uasId,
-      mac,
-      srcs,
-      fmts,
-      uaType,
-      firstUtc,
-      lastUtc,
-      durS,
-      lat,
-      lon,
-      maxH,
-      peakRssi,
-      authState,
-      tfr,
-      emerg,
-      msgs);
+  int get hashCode => Object.hashAll([
+        detectorId,
+        rowKey,
+        seq,
+        active,
+        uasId,
+        mac,
+        srcs,
+        fmts,
+        uaType,
+        firstUtc,
+        lastUtc,
+        durS,
+        lat,
+        lon,
+        maxH,
+        peakRssi,
+        authState,
+        tfr,
+        inTfr,
+        tfrId,
+        classType,
+        catEu,
+        classEu,
+        emerg,
+        msgs
+      ]);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1243,6 +1381,11 @@ class DetectionEntry extends DataClass implements Insertable<DetectionEntry> {
           other.peakRssi == this.peakRssi &&
           other.authState == this.authState &&
           other.tfr == this.tfr &&
+          other.inTfr == this.inTfr &&
+          other.tfrId == this.tfrId &&
+          other.classType == this.classType &&
+          other.catEu == this.catEu &&
+          other.classEu == this.classEu &&
           other.emerg == this.emerg &&
           other.msgs == this.msgs);
 }
@@ -1266,6 +1409,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
   final Value<int?> peakRssi;
   final Value<String> authState;
   final Value<bool> tfr;
+  final Value<bool?> inTfr;
+  final Value<String?> tfrId;
+  final Value<int?> classType;
+  final Value<int?> catEu;
+  final Value<int?> classEu;
   final Value<bool> emerg;
   final Value<int> msgs;
   final Value<int> rowid;
@@ -1288,6 +1436,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
     this.peakRssi = const Value.absent(),
     this.authState = const Value.absent(),
     this.tfr = const Value.absent(),
+    this.inTfr = const Value.absent(),
+    this.tfrId = const Value.absent(),
+    this.classType = const Value.absent(),
+    this.catEu = const Value.absent(),
+    this.classEu = const Value.absent(),
     this.emerg = const Value.absent(),
     this.msgs = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -1311,6 +1464,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
     this.peakRssi = const Value.absent(),
     this.authState = const Value.absent(),
     required bool tfr,
+    this.inTfr = const Value.absent(),
+    this.tfrId = const Value.absent(),
+    this.classType = const Value.absent(),
+    this.catEu = const Value.absent(),
+    this.classEu = const Value.absent(),
     required bool emerg,
     required int msgs,
     this.rowid = const Value.absent(),
@@ -1342,6 +1500,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
     Expression<int>? peakRssi,
     Expression<String>? authState,
     Expression<bool>? tfr,
+    Expression<bool>? inTfr,
+    Expression<String>? tfrId,
+    Expression<int>? classType,
+    Expression<int>? catEu,
+    Expression<int>? classEu,
     Expression<bool>? emerg,
     Expression<int>? msgs,
     Expression<int>? rowid,
@@ -1365,6 +1528,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
       if (peakRssi != null) 'peak_rssi': peakRssi,
       if (authState != null) 'auth_state': authState,
       if (tfr != null) 'tfr': tfr,
+      if (inTfr != null) 'in_tfr': inTfr,
+      if (tfrId != null) 'tfr_id': tfrId,
+      if (classType != null) 'class_type': classType,
+      if (catEu != null) 'cat_eu': catEu,
+      if (classEu != null) 'class_eu': classEu,
       if (emerg != null) 'emerg': emerg,
       if (msgs != null) 'msgs': msgs,
       if (rowid != null) 'rowid': rowid,
@@ -1390,6 +1558,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
       Value<int?>? peakRssi,
       Value<String>? authState,
       Value<bool>? tfr,
+      Value<bool?>? inTfr,
+      Value<String?>? tfrId,
+      Value<int?>? classType,
+      Value<int?>? catEu,
+      Value<int?>? classEu,
       Value<bool>? emerg,
       Value<int>? msgs,
       Value<int>? rowid}) {
@@ -1412,6 +1585,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
       peakRssi: peakRssi ?? this.peakRssi,
       authState: authState ?? this.authState,
       tfr: tfr ?? this.tfr,
+      inTfr: inTfr ?? this.inTfr,
+      tfrId: tfrId ?? this.tfrId,
+      classType: classType ?? this.classType,
+      catEu: catEu ?? this.catEu,
+      classEu: classEu ?? this.classEu,
       emerg: emerg ?? this.emerg,
       msgs: msgs ?? this.msgs,
       rowid: rowid ?? this.rowid,
@@ -1475,6 +1653,21 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
     if (tfr.present) {
       map['tfr'] = Variable<bool>(tfr.value);
     }
+    if (inTfr.present) {
+      map['in_tfr'] = Variable<bool>(inTfr.value);
+    }
+    if (tfrId.present) {
+      map['tfr_id'] = Variable<String>(tfrId.value);
+    }
+    if (classType.present) {
+      map['class_type'] = Variable<int>(classType.value);
+    }
+    if (catEu.present) {
+      map['cat_eu'] = Variable<int>(catEu.value);
+    }
+    if (classEu.present) {
+      map['class_eu'] = Variable<int>(classEu.value);
+    }
     if (emerg.present) {
       map['emerg'] = Variable<bool>(emerg.value);
     }
@@ -1508,6 +1701,11 @@ class DetectionsCompanion extends UpdateCompanion<DetectionEntry> {
           ..write('peakRssi: $peakRssi, ')
           ..write('authState: $authState, ')
           ..write('tfr: $tfr, ')
+          ..write('inTfr: $inTfr, ')
+          ..write('tfrId: $tfrId, ')
+          ..write('classType: $classType, ')
+          ..write('catEu: $catEu, ')
+          ..write('classEu: $classEu, ')
           ..write('emerg: $emerg, ')
           ..write('msgs: $msgs, ')
           ..write('rowid: $rowid')
@@ -2442,6 +2640,11 @@ typedef $$DetectionsTableCreateCompanionBuilder = DetectionsCompanion Function({
   Value<int?> peakRssi,
   Value<String> authState,
   required bool tfr,
+  Value<bool?> inTfr,
+  Value<String?> tfrId,
+  Value<int?> classType,
+  Value<int?> catEu,
+  Value<int?> classEu,
   required bool emerg,
   required int msgs,
   Value<int> rowid,
@@ -2465,6 +2668,11 @@ typedef $$DetectionsTableUpdateCompanionBuilder = DetectionsCompanion Function({
   Value<int?> peakRssi,
   Value<String> authState,
   Value<bool> tfr,
+  Value<bool?> inTfr,
+  Value<String?> tfrId,
+  Value<int?> classType,
+  Value<int?> catEu,
+  Value<int?> classEu,
   Value<bool> emerg,
   Value<int> msgs,
   Value<int> rowid,
@@ -2532,6 +2740,21 @@ class $$DetectionsTableFilterComposer
 
   ColumnFilters<bool> get tfr => $composableBuilder(
       column: $table.tfr, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<bool> get inTfr => $composableBuilder(
+      column: $table.inTfr, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get tfrId => $composableBuilder(
+      column: $table.tfrId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get classType => $composableBuilder(
+      column: $table.classType, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get catEu => $composableBuilder(
+      column: $table.catEu, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get classEu => $composableBuilder(
+      column: $table.classEu, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<bool> get emerg => $composableBuilder(
       column: $table.emerg, builder: (column) => ColumnFilters(column));
@@ -2603,6 +2826,21 @@ class $$DetectionsTableOrderingComposer
   ColumnOrderings<bool> get tfr => $composableBuilder(
       column: $table.tfr, builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<bool> get inTfr => $composableBuilder(
+      column: $table.inTfr, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get tfrId => $composableBuilder(
+      column: $table.tfrId, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get classType => $composableBuilder(
+      column: $table.classType, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get catEu => $composableBuilder(
+      column: $table.catEu, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get classEu => $composableBuilder(
+      column: $table.classEu, builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<bool> get emerg => $composableBuilder(
       column: $table.emerg, builder: (column) => ColumnOrderings(column));
 
@@ -2673,6 +2911,21 @@ class $$DetectionsTableAnnotationComposer
   GeneratedColumn<bool> get tfr =>
       $composableBuilder(column: $table.tfr, builder: (column) => column);
 
+  GeneratedColumn<bool> get inTfr =>
+      $composableBuilder(column: $table.inTfr, builder: (column) => column);
+
+  GeneratedColumn<String> get tfrId =>
+      $composableBuilder(column: $table.tfrId, builder: (column) => column);
+
+  GeneratedColumn<int> get classType =>
+      $composableBuilder(column: $table.classType, builder: (column) => column);
+
+  GeneratedColumn<int> get catEu =>
+      $composableBuilder(column: $table.catEu, builder: (column) => column);
+
+  GeneratedColumn<int> get classEu =>
+      $composableBuilder(column: $table.classEu, builder: (column) => column);
+
   GeneratedColumn<bool> get emerg =>
       $composableBuilder(column: $table.emerg, builder: (column) => column);
 
@@ -2724,6 +2977,11 @@ class $$DetectionsTableTableManager extends RootTableManager<
             Value<int?> peakRssi = const Value.absent(),
             Value<String> authState = const Value.absent(),
             Value<bool> tfr = const Value.absent(),
+            Value<bool?> inTfr = const Value.absent(),
+            Value<String?> tfrId = const Value.absent(),
+            Value<int?> classType = const Value.absent(),
+            Value<int?> catEu = const Value.absent(),
+            Value<int?> classEu = const Value.absent(),
             Value<bool> emerg = const Value.absent(),
             Value<int> msgs = const Value.absent(),
             Value<int> rowid = const Value.absent(),
@@ -2747,6 +3005,11 @@ class $$DetectionsTableTableManager extends RootTableManager<
             peakRssi: peakRssi,
             authState: authState,
             tfr: tfr,
+            inTfr: inTfr,
+            tfrId: tfrId,
+            classType: classType,
+            catEu: catEu,
+            classEu: classEu,
             emerg: emerg,
             msgs: msgs,
             rowid: rowid,
@@ -2770,6 +3033,11 @@ class $$DetectionsTableTableManager extends RootTableManager<
             Value<int?> peakRssi = const Value.absent(),
             Value<String> authState = const Value.absent(),
             required bool tfr,
+            Value<bool?> inTfr = const Value.absent(),
+            Value<String?> tfrId = const Value.absent(),
+            Value<int?> classType = const Value.absent(),
+            Value<int?> catEu = const Value.absent(),
+            Value<int?> classEu = const Value.absent(),
             required bool emerg,
             required int msgs,
             Value<int> rowid = const Value.absent(),
@@ -2793,6 +3061,11 @@ class $$DetectionsTableTableManager extends RootTableManager<
             peakRssi: peakRssi,
             authState: authState,
             tfr: tfr,
+            inTfr: inTfr,
+            tfrId: tfrId,
+            classType: classType,
+            catEu: catEu,
+            classEu: classEu,
             emerg: emerg,
             msgs: msgs,
             rowid: rowid,

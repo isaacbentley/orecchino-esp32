@@ -16,6 +16,7 @@ uniform vec3 uDeep;
 uniform vec3 uMid;
 uniform vec3 uHigh;
 uniform float uPulse;
+uniform float uPx; // rendered pixels per screen point (the aurora is drawn small)
 
 out vec4 fragColor;
 
@@ -70,10 +71,11 @@ void main() {
 
   // A few faint round stars where the curtains are thin: one candidate per
   // 9 px cell, a soft point at a random spot inside it.
-  vec2 cell = floor(frag / 9.0);
+  vec2 pt = frag / max(uPx, 0.01); // in screen points, whatever the render scale
+  vec2 cell = floor(pt / 9.0);
   float s = hash(cell);
   vec2 spot = (cell + 0.2 + 0.6 * vec2(hash(cell + 7.1), hash(cell + 3.3))) * 9.0;
-  float d = length(frag - spot);
+  float d = length(pt - spot);
   float twinkle = 0.55 + 0.45 * sin(uTime * (0.6 + s * 1.8) + s * 40.0);
   float star = step(0.975, s) * smoothstep(1.6, 0.0, d) * twinkle * (1.0 - curtain);
   col += vec3(0.32, 0.34, 0.38) * star;

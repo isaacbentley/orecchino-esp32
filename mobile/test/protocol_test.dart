@@ -81,7 +81,8 @@ void main() {
 
   group('HostMessage parsing', () {
     test('Heartbeat message parses all fields', () {
-      const json = '{"type":"hb","up":34103,"wifi_frames":117,"ble_advs":4674,"rid":1,"dropped":0,"ch":6,"ble":true,"ble_ext":true,"ble_drop":2}';
+      const json =
+          '{"type":"hb","up":34103,"wifi_frames":117,"ble_advs":4674,"rid":1,"dropped":0,"ch":6,"ble":true,"ble_ext":true,"ble_drop":2}';
       final msg = HostMessage.parse(json);
       expect(msg, isA<HeartbeatMessage>());
       final hb = msg as HeartbeatMessage;
@@ -97,7 +98,8 @@ void main() {
     });
 
     test('RidMessage preserves missing fields as null', () {
-      const json = '{"type":"rid","src":"ble","mac":"AA:BB:CC:DD:EE:FF","rssi":-61,"phy":"coded","basic_id":[{"id_type":1,"ua_type":2,"uas_id":"1581F204C68D9A11"}],"loc":{"status":2,"lat":37.8039,"lon":-122.464,"alt_geo":100.0,"height":60.0,"height_ref":0,"speed":5.0,"dir":90}}';
+      const json =
+          '{"type":"rid","src":"ble","mac":"AA:BB:CC:DD:EE:FF","rssi":-61,"phy":"coded","basic_id":[{"id_type":1,"ua_type":2,"uas_id":"1581F204C68D9A11"}],"loc":{"status":2,"lat":37.8039,"lon":-122.464,"alt_geo":100.0,"height":60.0,"height_ref":0,"speed":5.0,"dir":90}}';
       final msg = HostMessage.parse(json);
       expect(msg, isA<RidMessage>());
       final rid = msg as RidMessage;
@@ -112,7 +114,8 @@ void main() {
     });
 
     test('LogRecordMessage with seq and null coordinates', () {
-      const json = '{"type":"log","seq":42,"uas_id":"UAS999","mac":"11:22:33:44:55:66","first_utc":1700000000,"last_utc":1700000060,"dur_s":60,"peak_rssi":-55,"auth_state":1,"tfr":false,"emerg":true,"msgs":15}';
+      const json =
+          '{"type":"log","seq":42,"uas_id":"UAS999","mac":"11:22:33:44:55:66","first_utc":1700000000,"last_utc":1700000060,"dur_s":60,"peak_rssi":-55,"auth_state":1,"tfr":false,"emerg":true,"msgs":15}';
       final msg = HostMessage.parse(json);
       expect(msg, isA<LogRecordMessage>());
       final log = msg as LogRecordMessage;
@@ -169,7 +172,8 @@ void main() {
     });
 
     test('Firmware log records: ended and live', () {
-      final ended = HostMessage.parse('{"type":"log","seq":17,"i":17,"active":false,"uas":"1581F2","mac":"11:22:33:44:55:66",'
+      final ended = HostMessage.parse(
+          '{"type":"log","seq":17,"i":17,"active":false,"uas":"1581F2","mac":"11:22:33:44:55:66",'
           '"srcs":1,"fmts":1,"ua_type":2,"first":1700000000,"last":1700000060,"dur":60,"lat":37.80390,"lon":-122.46400,'
           '"max_h":118,"peak_rssi":-55,"auth_state":"test_key","tfr":true,"emerg":false,"msgs":15}') as LogRecordMessage;
       expect(ended.seq, 17);
@@ -180,10 +184,11 @@ void main() {
       expect(ended.maxHeightM, 118);
       expect(ended.authState, AuthState.testKey);
       expect(AuthState.words(ended.authState), 'TEST KEY');
-      expect(ended.inTfr, isTrue);
+      expect(ended.tfrEver, isTrue);
 
-      final live = HostMessage.parse('{"type":"log","seq":null,"i":null,"active":true,"uas":"","mac":"AA:AA:AA:AA:AA:AA",'
-          '"first":1700000000,"last":1700000100,"dur":100,"peak_rssi":-60,"auth_state":"none","tfr":false,"emerg":false,"msgs":3}')
+      final live = HostMessage.parse(
+              '{"type":"log","seq":null,"i":null,"active":true,"uas":"","mac":"AA:AA:AA:AA:AA:AA",'
+              '"first":1700000000,"last":1700000100,"dur":100,"peak_rssi":-60,"auth_state":"none","tfr":false,"emerg":false,"msgs":3}')
           as LogRecordMessage;
       expect(live.seq, isNull);
       expect(live.active, isTrue);
@@ -222,15 +227,32 @@ void main() {
       final d = HostMessage.parse('{"type":"wifi_scan_done","n":0,"err":"scan failed"}') as WifiScanDoneMessage;
       expect(d.error, 'scan failed');
       final st = HostMessage.parse('{"type":"wifi_status","state":"failed","mode":"sync","every_min":15,'
-          '"reason":"wrong password","scanning":false,"syncing":false,"clock":true,"tfr_n":0,"ac_n":0,"saved":["Home"]}')
+              '"reason":"wrong password","scanning":false,"syncing":false,"clock":true,"tfr_n":0,"ac_n":0,"saved":["Home"]}')
           as WifiStatusMessage;
       expect(st.state, 'failed');
       expect(st.reason, 'wrong password');
       expect(st.mode, 'sync');
       expect(st.saved, ['Home']);
-      final e = HostMessage.parse('{"type":"wifi_err","cmd":"wifi_join","reason":"needs a bonded link"}')
-          as WifiErrorMessage;
+      final e =
+          HostMessage.parse('{"type":"wifi_err","cmd":"wifi_join","reason":"needs a bonded link"}') as WifiErrorMessage;
       expect(e.command, 'wifi_join');
+      expect(st.pausedByPhone, isFalse);
+      expect(st.adsbKm, isNull);
+      // A board that is paused by the phone and has a map plan.
+      final p = HostMessage.parse('{"type":"wifi_status","state":"idle","mode":"sync","every_min":15,'
+          '"adsb_km":10,"tile_km":3,"tile_max_km":14.75,"paused":"phone","saved":[]}') as WifiStatusMessage;
+      expect(p.pausedByPhone, isTrue);
+      expect((p.adsbKm, p.tileKm, p.tileMaxKm), (10, 3, 14.75));
+      final net = HostMessage.parse('{"type":"net","state":"synced","ok":["adsb","tiles"],"failed":[],'
+          '"adsb_km":10.0,"map":"Map: 3 km z12-15; 0.8 MB of 11.9 MB","map_tiles":360,"map_have":360,'
+          '"tile_max_km":14.75,"storage_full":false}') as NetStatusMessage;
+      expect(net.state, 'synced');
+      expect(net.map, 'Map: 3 km z12-15; 0.8 MB of 11.9 MB');
+      expect(
+          (HostMessage.parse('{"type":"net","state":"paused","reason":"phone"}') as NetStatusMessage).reason, 'phone');
+      expect(jsonDecode(HostCommands.wifiConfig(adsbKm: 12)), {'cmd': 'wifi_config', 'adsb_km': 12});
+      expect(jsonDecode(HostCommands.wifiConfig(adsbKm: 12, tileKm: 4)),
+          {'cmd': 'wifi_config', 'adsb_km': 12, 'tile_km': 4});
     });
 
     test('LogDoneMessage parses next and oldest', () {

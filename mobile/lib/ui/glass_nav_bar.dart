@@ -10,6 +10,10 @@ import 'package:flutter/material.dart';
 import 'glass.dart';
 import 'theme/theme.dart';
 
+/// A selection's corner radius: rounded pills in Sky, the mockups' small
+/// radius in Flat.
+double _r(double sky) => Look.flat ? OrecchinoTheme.radiusSmall : sky;
+
 class GlassNavItem {
   final IconData icon;
   final IconData selectedIcon;
@@ -70,16 +74,20 @@ class GlassNavBar extends StatelessWidget {
                     height: height - 12,
                     child: DecoratedBox(
                       decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(26),
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            OrecchinoColors.aqua.withValues(alpha: 0.22),
-                            OrecchinoColors.aqua.withValues(alpha: 0.08),
-                          ],
-                        ),
-                        border: Border.all(color: OrecchinoColors.aqua.withValues(alpha: 0.35)),
+                        borderRadius: BorderRadius.circular(_r(26)),
+                        // Flat: the mockups' selected chip, no gradient.
+                        color: Look.flat ? OrecchinoColors.raised : null,
+                        gradient: Look.flat
+                            ? null
+                            : LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  OrecchinoColors.aqua.withValues(alpha: 0.22),
+                                  OrecchinoColors.aqua.withValues(alpha: 0.08),
+                                ],
+                              ),
+                        border: Border.all(color: OrecchinoColors.aqua.withValues(alpha: Look.flat ? 0.6 : 0.35)),
                       ),
                     ),
                   ),
@@ -92,7 +100,7 @@ class GlassNavBar extends StatelessWidget {
                           label: [items[i].label, if (badges[i] != null) badges[i]!].join(', '),
                           excludeSemantics: true,
                           child: InkWell(
-                            borderRadius: BorderRadius.circular(26),
+                            borderRadius: BorderRadius.circular(_r(26)),
                             onTap: () => onTap(i),
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
@@ -190,13 +198,17 @@ class GlassNavRail extends StatelessWidget {
                   curve: Motion.standard,
                   margin: const EdgeInsets.symmetric(vertical: 2),
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(24),
-                    color: i == index ? OrecchinoColors.aqua.withValues(alpha: 0.16) : Colors.transparent,
+                    borderRadius: BorderRadius.circular(_r(24)),
+                    color: i == index
+                        ? (Look.flat ? OrecchinoColors.raised : OrecchinoColors.aqua.withValues(alpha: 0.16))
+                        : Colors.transparent,
                     border: Border.all(
-                        color: i == index ? OrecchinoColors.aqua.withValues(alpha: 0.35) : Colors.transparent),
+                        color: i == index
+                            ? OrecchinoColors.aqua.withValues(alpha: Look.flat ? 0.6 : 0.35)
+                            : Colors.transparent),
                   ),
                   child: InkWell(
-                    borderRadius: BorderRadius.circular(24),
+                    borderRadius: BorderRadius.circular(_r(24)),
                     onTap: () => onTap(i),
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(minHeight: 60),

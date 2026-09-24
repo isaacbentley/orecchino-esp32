@@ -10,26 +10,32 @@
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
 import '../../app/app_controller.dart';
 import '../../core/geo.dart';
+import '../../core/live/phone_history.dart';
+import '../../core/live/sensors.dart';
 import '../../core/protocol/messages.dart';
 import '../../core/traffic/traffic_rules.dart';
 import '../../data/db.dart';
 import '../../ui/contact_glyph.dart';
 import '../../ui/glass.dart';
+import '../../ui/sensor_chips.dart';
 import '../../ui/theme/theme.dart';
+import '../details/drone_details_sheet.dart';
 import '../live/sky_painter.dart';
 import '../live/sky_projection.dart';
+import 'clear_history_sheet.dart';
 import 'history_timeline.dart';
 
 List<String> recordWords(DetectionEntry d) => [
       if (d.active) 'LIVE',
       if (d.emerg) 'EMERGENCY REPORTED',
-      if (d.tfr) 'IN TFR',
+      if (d.tfr) d.tfrId == null ? 'IN TFR' : 'IN TFR ${d.tfrId}',
       if (AuthState.words(d.authState) != null) AuthState.words(d.authState)!,
     ];
 
@@ -61,7 +67,41 @@ class _HistoryViewState extends State<HistoryView> {
   /// A record's replay sheet is up: the inline card waits (one replay at a
   /// time), then plays the same record when the sheet closes.
   bool _sheetOpen = false;
-  late final Stream<List<DetectionEntry>> _records = widget.db.watchDetections();
+  /// The records: the ribbon's longest window (7 days, at most
+  /// [_recentLimit]) unless the person asks for everything, so each write
+  /// re-reads a bounded query, not the whole table.
+  static const _recentLimit = 2000;
+  bool _all = false;
+  late Stream<List<DetectionEntry>> _records = _watch();
+
+  Stream<List<DetectionEntry>> _watch() => _all
+      ? widget.db.watchDetections()
+      : widget.db.watchDetections(
+          afterUtc: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 7 * 24 * 3600, limit: _recentLimit);
+
+  void _showAll() => setState(() {
+        _all = true;
+        _records = _watch();
+      });
+
+  /// Detector id -> its short name for the records' sensor chips ("T5").
+  Map<String, String> _names = const {};
+  late final StreamSubscription<List<DetectorEntry>> _detSub = widget.db.watchAllDetectors().listen((ds) {
+    if (!mounted) return;
+    setState(() => _names = {for (final d in ds) d.id: detectorShortName(d.name, d.board)});
+  });
+
+  @override
+  void initState() {
+    super.initState();
+    _detSub; // start listening
+  }
+
+  @override
+  void dispose() {
+    unawaited(_detSub.cancel());
+    super.dispose();
+  }
 
   /// A record from the list replays in a sheet over the list, which stays
   /// where it was (the ribbon's cursor moves to it too).
@@ -91,6 +131,7 @@ class _HistoryViewState extends State<HistoryView> {
                   obsLon: o?.lon,
                   simulated: widget.app?.isSimulated ?? false,
                   onClose: () => Navigator.of(ctx).maybePop(),
+                  onDetails: () => DroneDetailsSheet.showRecord(ctx, d, app: widget.app),
                 ),
               ),
             ),
@@ -188,6 +229,7 @@ class _HistoryViewState extends State<HistoryView> {
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: _RecordCard(
+                            sensor: recordSensor(list[i], _names),
                             record: list[i],
                             selected: _key(list[i]) == _selectedKey,
                             onTap: () => _openRecord(list[i]),
@@ -195,6 +237,21 @@ class _HistoryViewState extends State<HistoryView> {
                         ),
                     ]),
                   ),
+              if (!_all && snapshot.hasData)
+                SliverPadding(
+                  padding: hPad,
+                  sliver: SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Wrap(crossAxisAlignment: WrapCrossAlignment.center, spacing: 8, children: [
+                        Text(
+                            'The last 7 days${(snapshot.data?.length ?? 0) >= _recentLimit ? ', latest $_recentLimit records' : ''}',
+                            style: OrecchinoType.caption),
+                        TextButton(onPressed: _showAll, child: const Text('Show older records')),
+                      ]),
+                    ),
+                  ),
+                ),
               SliverToBoxAdapter(child: SizedBox(height: mq.padding.bottom + 24)),
             ],
           );
@@ -211,27 +268,36 @@ class _HistoryViewState extends State<HistoryView> {
       runSpacing: 10,
       children: [
         Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          const Text('FLIGHT LOG', style: OrecchinoType.eyebrow),
+          Text('FLIGHT LOG', style: OrecchinoType.eyebrow),
           const SizedBox(height: 2),
-          Semantics(header: true, child: const Text('History', style: OrecchinoType.title)),
+          Semantics(header: true, child: Text('History', style: OrecchinoType.title)),
           const SizedBox(height: 2),
           Text('$n record${n == 1 ? '' : 's'} · $alerts with alerts', style: OrecchinoType.label),
         ]),
-        GlassButton(
-          semanticLabel: _onlyAlerts ? 'Show all records' : 'Show alerts only',
-          selected: _onlyAlerts,
-          wash: _onlyAlerts ? OrecchinoColors.caution : null,
-          onTap: () => setState(() => _onlyAlerts = !_onlyAlerts),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.warning_amber_rounded,
-                size: 18, color: _onlyAlerts ? OrecchinoColors.caution : OrecchinoColors.inkMuted),
-            const SizedBox(width: 6),
-            Text('Alerts only',
-                style: OrecchinoType.label.copyWith(
-                    color: _onlyAlerts ? OrecchinoColors.caution : OrecchinoColors.ink, fontWeight: FontWeight.w600)),
-          ]),
-        ),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          if (widget.app != null)
+            GlassButton(
+              semanticLabel: 'Clear history',
+              onTap: () => ClearHistorySheet.show(context, widget.app!),
+              padding: const EdgeInsets.all(10),
+              child: Icon(Icons.delete_sweep_rounded, size: 20, color: OrecchinoColors.inkMuted),
+            ),
+          GlassButton(
+            semanticLabel: _onlyAlerts ? 'Show all records' : 'Show alerts only',
+            selected: _onlyAlerts,
+            wash: _onlyAlerts ? OrecchinoColors.caution : null,
+            onTap: () => setState(() => _onlyAlerts = !_onlyAlerts),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.warning_amber_rounded,
+                  size: 18, color: _onlyAlerts ? OrecchinoColors.caution : OrecchinoColors.inkMuted),
+              const SizedBox(width: 6),
+              Text('Alerts only',
+                  style: OrecchinoType.label.copyWith(
+                      color: _onlyAlerts ? OrecchinoColors.caution : OrecchinoColors.ink, fontWeight: FontWeight.w600)),
+            ]),
+          ),
+        ]),
       ],
     );
   }
@@ -241,9 +307,9 @@ class _HistoryViewState extends State<HistoryView> {
     return Glass(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
       child: d == null
-          ? const Row(children: [
+          ? Row(children: [
               Icon(Icons.play_circle_outline_rounded, color: OrecchinoColors.inkSubtle, size: 28),
-              SizedBox(width: 12),
+              const SizedBox(width: 12),
               Expanded(
                 child: Text('Scrub the ribbon or pick a record to replay it on the sky.', style: OrecchinoType.label),
               ),
@@ -254,6 +320,7 @@ class _HistoryViewState extends State<HistoryView> {
               obsLat: o?.lat,
               obsLon: o?.lon,
               simulated: widget.app?.isSimulated ?? false,
+              onDetails: () => DroneDetailsSheet.showRecord(context, d, app: widget.app),
             ),
     );
   }
@@ -328,7 +395,7 @@ class _TimelineState extends State<_Timeline> {
           spacing: 8,
           runSpacing: 8,
           children: [
-            const Text('ACTIVITY', style: OrecchinoType.eyebrow),
+            Text('ACTIVITY', style: OrecchinoType.eyebrow),
             GlassSegmented<int>(
               options: const [(6, '6 h', 'Last 6 hours'), (24, '24 h', 'Last 24 hours'), (168, '7 d', 'Last 7 days')],
               value: windowH,
@@ -366,8 +433,12 @@ class _TimelineState extends State<_Timeline> {
           }),
         ),
         const SizedBox(height: 6),
+        // Axis ticks: a label on the graphic (the cursor words below speak
+        // the times), so its text grows only to 1.3x and never overflows.
         ExcludeSemantics(
-          child: Row(children: [
+          child: MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1.3,
+            child: Row(children: [
             for (var i = 0; i <= 4; i++) ...[
               if (i > 0) const Spacer(),
               Text(
@@ -378,6 +449,7 @@ class _TimelineState extends State<_Timeline> {
               ),
             ],
           ]),
+          ),
         ),
         const SizedBox(height: 8),
         // Spoken as it changes while scrubbing.
@@ -468,7 +540,17 @@ class _Replay extends StatefulWidget {
   /// Shown as a sheet over the list: a close button.
   final VoidCallback? onClose;
 
-  const _Replay({super.key, required this.record, this.obsLat, this.obsLon, this.simulated = false, this.onClose});
+  /// Opens the record's full details.
+  final VoidCallback? onDetails;
+
+  const _Replay(
+      {super.key,
+      required this.record,
+      this.obsLat,
+      this.obsLon,
+      this.simulated = false,
+      this.onClose,
+      this.onDetails});
 
   @override
   State<_Replay> createState() => _ReplayState();
@@ -516,8 +598,9 @@ class _ReplayState extends State<_Replay> with SingleTickerProviderStateMixin {
       dist = Geo.distanceM(widget.obsLat!, widget.obsLon!, d.lat!, d.lon!);
       brg = Geo.bearingDeg(widget.obsLat!, widget.obsLon!, d.lat!, d.lon!);
     }
-    final range =
-        [500.0, 1000.0, 3000.0, 5000.0, 10000.0].firstWhere((r) => r >= dist * 1.25, orElse: () => dist * 1.25);
+    // The smallest ring that holds it; past 10 km it is pinned to the ring's
+    // edge at its bearing, as on the Live sky.
+    final range = [500.0, 1000.0, 3000.0, 5000.0, 10000.0].firstWhere((r) => r >= dist * 1.25, orElse: () => 10000.0);
     final color = d.emerg ? OrecchinoColors.warning : (recordAlert(d) ? OrecchinoColors.caution : OrecchinoColors.aqua);
     // Words only for what is known: no distance from an unknown or made-up
     // position, and no bearing where there is no distance to have one.
@@ -536,7 +619,13 @@ class _ReplayState extends State<_Replay> with SingleTickerProviderStateMixin {
 
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Row(children: [
-        const Expanded(child: Text('REPLAY', style: OrecchinoType.eyebrow)),
+        Expanded(child: Text('REPLAY', style: OrecchinoType.eyebrow)),
+        if (widget.onDetails != null)
+          IconButton(
+            tooltip: 'All details',
+            icon: Icon(Icons.info_outline_rounded, size: 20, color: OrecchinoColors.aqua),
+            onPressed: widget.onDetails,
+          ),
         IconButton(
           tooltip: 'Replay again',
           icon: const Icon(Icons.replay_rounded, size: 20),
@@ -644,12 +733,30 @@ Color _wordColor(String w) => switch (w) {
       _ => OrecchinoColors.inkMuted,
     };
 
+/// Who heard a record: this phone, or its detector, with the transports
+/// from the record's source bits (Wi-Fi beacon 1, NAN 2, Bluetooth 4).
+SensorChip recordSensor(DetectionEntry d, Map<String, String> names) {
+  final m = d.srcs ?? 0;
+  final t = [if (m & 4 != 0) 'BLE', if (m & 2 != 0) 'NAN', if (m & 1 != 0) 'Wi-Fi'];
+  final w = [if (m & 4 != 0) 'Bluetooth', if (m & 2 != 0) 'Wi-Fi NAN', if (m & 1 != 0) 'Wi-Fi'];
+  final phone = d.detectorId == PhoneHistory.detectorId;
+  return SensorChip(
+    key: d.detectorId,
+    phone: phone,
+    detector: phone ? null : (names[d.detectorId] ?? 'Detector'),
+    transport: t.isEmpty ? (phone ? 'This phone' : 'heard') : (phone ? 'This phone · ${t.join(' + ')}' : t.join(' + ')),
+    transportWords: w.isEmpty ? 'Remote ID' : w.join(' and '),
+    ageS: 0,
+  );
+}
+
 class _RecordCard extends StatelessWidget {
   final DetectionEntry record;
   final bool selected;
   final VoidCallback onTap;
+  final SensorChip sensor;
 
-  const _RecordCard({required this.record, required this.selected, required this.onTap});
+  const _RecordCard({required this.record, required this.selected, required this.onTap, required this.sensor});
 
   @override
   Widget build(BuildContext context) {
@@ -667,6 +774,7 @@ class _RecordCard extends StatelessWidget {
     ];
     final label = [
       d.uasId ?? d.mac,
+      'heard by ${sensor.words}',
       ...words,
       time,
       ...detail,
@@ -698,6 +806,8 @@ class _RecordCard extends StatelessWidget {
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(d.uasId ?? d.mac, style: OrecchinoType.id.copyWith(fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 5),
+                  SensorChips([sensor]),
                   if (words.isNotEmpty) ...[
                     const SizedBox(height: 5),
                     Wrap(spacing: 6, runSpacing: 4, children: [

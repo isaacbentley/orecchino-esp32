@@ -21,6 +21,12 @@ String? _str(Object? v) => v is String ? v : null;
 bool? _bool(Object? v) => v is bool ? v : null;
 Map<String, dynamic>? _map(Object? v) => v is Map<String, dynamic> ? v : null;
 
+/// A 4-bit ODID code (0..15), else null.
+int? _code(Object? v) {
+  final i = _int(v);
+  return i != null && i >= 0 && i <= 15 ? i : null;
+}
+
 /// An altitude, or null for the ODID "unknown" (-1000) and anything <= -999.
 double? _alt(Object? v) {
   final d = _num(v);
@@ -60,6 +66,8 @@ sealed class HostMessage {
           return WifiStatusMessage.fromJson(json);
         case 'wifi_err':
           return WifiErrorMessage(command: _str(json['cmd']) ?? '', reason: _str(json['reason']) ?? 'refused');
+        case 'net':
+          return NetStatusMessage.fromJson(json);
         default:
           return GenericHostMessage(type is String ? type : 'unknown', json);
       }
@@ -118,7 +126,13 @@ class RidLocation {
   final double? speed; // m/s
   final double? dir; // degrees true
   final double? vspeed; // m/s, omitted by the firmware when unknown
-  final double? timestamp;
+  final double? timestamp; // seconds past the hour, 0.1 s
+
+  /// ODID accuracy codes (F3411 enums; 0 = unknown). The decoder has them;
+  /// the firmware's rid line does not carry them yet, so they are null
+  /// unless a receiver sends "h_acc", "v_acc", "baro_acc", "spd_acc",
+  /// "ts_acc".
+  final int? hAcc, vAcc, baroAcc, spdAcc, tsAcc;
 
   const RidLocation({
     this.status,
@@ -132,6 +146,11 @@ class RidLocation {
     this.dir,
     this.vspeed,
     this.timestamp,
+    this.hAcc,
+    this.vAcc,
+    this.baroAcc,
+    this.spdAcc,
+    this.tsAcc,
   });
 
   bool get hasPosition => lat != null && lon != null;
@@ -156,6 +175,11 @@ class RidLocation {
       dir: dir != null && dir >= 0 && dir <= 360 ? dir : null,
       vspeed: vs != null && vs > -900 ? vs : null,
       timestamp: ts != null && ts >= 0 ? ts : null,
+      hAcc: _code(json['h_acc']),
+      vAcc: _code(json['v_acc']),
+      baroAcc: _code(json['baro_acc']),
+      spdAcc: _code(json['spd_acc']),
+      tsAcc: _code(json['ts_acc']),
     );
   }
 }
@@ -196,7 +220,14 @@ class RidSystem {
   final double? operatorAltGeo;
   final int? operatorLocType;
   final int? areaCount;
-  final int? timestamp;
+  final int? timestamp; // seconds since 2019-01-01 00:00 UTC
+
+  /// The operating area and the EU classification (firmware 0.7+): null
+  /// when not sent. "area_radius" (m), "area_ceiling", "area_floor" (m;
+  /// absent or -1000 when unknown), "class_type" (1 = EU), "cat_eu" (1
+  /// Open, 2 Specific, 3 Certified), "class_eu" (1-7 = C0-C6).
+  final double? areaRadius, areaCeiling, areaFloor;
+  final int? classType, catEu, classEu;
 
   const RidSystem({
     this.operatorLat,
@@ -205,6 +236,12 @@ class RidSystem {
     this.operatorLocType,
     this.areaCount,
     this.timestamp,
+    this.areaRadius,
+    this.areaCeiling,
+    this.areaFloor,
+    this.classType,
+    this.catEu,
+    this.classEu,
   });
 
   factory RidSystem.fromJson(Map<String, dynamic> json) {
@@ -217,6 +254,12 @@ class RidSystem {
       operatorLocType: _int(json['op_loc_type']),
       areaCount: _int(json['area_count']),
       timestamp: _int(json['ts']),
+      areaRadius: _num(json['area_radius']),
+      areaCeiling: _alt(json['area_ceiling']),
+      areaFloor: _alt(json['area_floor']),
+      classType: _code(json['class_type']),
+      catEu: _code(json['cat_eu']),
+      classEu: _code(json['class_eu']),
     );
   }
 }
@@ -269,13 +312,22 @@ class RidAuth {
   final int? pages;
   final String state;
 
-  const RidAuth({this.authType, this.length, this.pages, required this.state});
+  /// Page 0's timestamp, seconds since 2019-01-01 00:00 UTC ("auth_ts";
+  /// firmware 0.7+, once page 0 of the set held has arrived).
+  final int? authTs;
+
+  const RidAuth({this.authType, this.length, this.pages, required this.state, this.authTs});
+
+  /// [authTs] as a time.
+  DateTime? get signedAt =>
+      authTs == null || authTs! <= 0 ? null : DateTime.utc(2019).add(Duration(seconds: authTs!));
 
   factory RidAuth.fromJson(Map<String, dynamic> json) => RidAuth(
         authType: _int(json['type']),
         length: _int(json['len']),
         pages: _int(json['pages']),
         state: _str(json['state']) ?? AuthState.none,
+        authTs: _int(json['auth_ts']),
       );
 }
 
@@ -296,6 +348,11 @@ class RidMessage extends HostMessage {
   final RidOperatorId? operatorId;
   final RidAuth? auth;
 
+  /// Inside a TFR a host pushed (tfr_add), and which ("in_tfr", "tfr_id";
+  /// firmware 0.7+). Null when the detector has no TFRs, or no position.
+  final bool? inTfr;
+  final String? tfrId;
+
   const RidMessage({
     required this.src,
     required this.mac,
@@ -312,6 +369,8 @@ class RidMessage extends HostMessage {
     this.system,
     this.operatorId,
     this.auth,
+    this.inTfr,
+    this.tfrId,
   }) : super('rid');
 
   String? get primaryUasId {
@@ -354,6 +413,8 @@ class RidMessage extends HostMessage {
       system: sys == null ? null : RidSystem.fromJson(sys),
       operatorId: op == null ? null : RidOperatorId.fromJson(op),
       auth: auth == null ? null : RidAuth.fromJson(auth),
+      inTfr: _bool(json['in_tfr']),
+      tfrId: _str(json['tfr_id']),
     );
   }
 }
@@ -377,7 +438,18 @@ class LogRecordMessage extends HostMessage {
   final double? maxHeightM;
   final int? peakRssi;
   final String authState;
-  final bool inTfr;
+
+  /// Inside a pushed TFR at some point ("tfr").
+  final bool tfrEver;
+
+  /// Inside it at the end (live: now) ("in_tfr"; null from firmware before
+  /// 0.7), and the TFR's id ("tfr_id").
+  final bool? inTfrNow;
+  final String? tfrId;
+
+  /// The EU classification ("class_type", "cat_eu", "class_eu"), as in
+  /// [RidSystem].
+  final int? classType, catEu, classEu;
   final bool emergency;
   final int msgCount;
 
@@ -397,7 +469,12 @@ class LogRecordMessage extends HostMessage {
     this.maxHeightM,
     this.peakRssi,
     this.authState = AuthState.none,
-    this.inTfr = false,
+    this.tfrEver = false,
+    this.inTfrNow,
+    this.tfrId,
+    this.classType,
+    this.catEu,
+    this.classEu,
     this.emergency = false,
     this.msgCount = 0,
   }) : super('log');
@@ -427,7 +504,12 @@ class LogRecordMessage extends HostMessage {
       maxHeightM: _num(json['max_h']),
       peakRssi: _int(json['peak_rssi']),
       authState: auth is String ? auth : AuthState.none,
-      inTfr: _bool(json['tfr']) ?? false,
+      tfrEver: _bool(json['tfr']) ?? false,
+      inTfrNow: _bool(json['in_tfr']),
+      tfrId: _str(json['tfr_id']),
+      classType: _code(json['class_type']),
+      catEu: _code(json['cat_eu']),
+      classEu: _code(json['class_eu']),
       emergency: _bool(json['emerg']) ?? false,
       msgCount: _int(json['msgs']) ?? 0,
     );
@@ -583,6 +665,12 @@ class WifiStatusMessage extends HostMessage {
   final int? lastSyncUtc;
   final List<String> saved;
 
+  /// "phone" while a connected phone pauses the automatic Wi-Fi windows.
+  final String? paused;
+  final int? adsbKm; // the T5's ADS-B radius setting (5-30)
+  final int? tileKm; // its map area radius setting
+  final double? tileMaxKm; // the largest map radius its flash holds (from the last plan)
+
   const WifiStatusMessage({
     required this.state,
     this.reason,
@@ -596,7 +684,13 @@ class WifiStatusMessage extends HostMessage {
     this.syncing = false,
     this.lastSyncUtc,
     this.saved = const [],
+    this.paused,
+    this.adsbKm,
+    this.tileKm,
+    this.tileMaxKm,
   }) : super('wifi_status');
+
+  bool get pausedByPhone => paused == 'phone';
 
   factory WifiStatusMessage.fromJson(Map<String, dynamic> json) {
     final saved = <String>[];
@@ -619,8 +713,35 @@ class WifiStatusMessage extends HostMessage {
       syncing: _bool(json['syncing']) ?? false,
       lastSyncUtc: _int(json['last_sync']),
       saved: saved,
+      paused: _str(json['paused']),
+      adsbKm: _int(json['adsb_km']),
+      tileKm: _int(json['tile_km']),
+      tileMaxKm: _num(json['tile_max_km']),
     );
   }
+}
+
+/// A T5's broadcast Wi-Fi status line (net_sync.h "BROADCAST STATUS
+/// LINES"): {"type":"net","state":"paused","reason":"phone"} / "resumed" /
+/// "synced" (+ "map": "Map: 3 km z12-15; 0.8 MB of 11.9 MB", "tile_max_km")
+/// and others; only what the app shows is kept.
+class NetStatusMessage extends HostMessage {
+  final String state;
+  final String? reason;
+  final String? map;
+  final double? tileMaxKm;
+  final bool storageFull;
+
+  const NetStatusMessage({required this.state, this.reason, this.map, this.tileMaxKm, this.storageFull = false})
+      : super('net');
+
+  factory NetStatusMessage.fromJson(Map<String, dynamic> json) => NetStatusMessage(
+        state: _str(json['state']) ?? '',
+        reason: _str(json['reason']),
+        map: _str(json['map']),
+        tileMaxKm: _num(json['tile_max_km']),
+        storageFull: _bool(json['storage_full']) ?? false,
+      );
 }
 
 class GenericHostMessage extends HostMessage {

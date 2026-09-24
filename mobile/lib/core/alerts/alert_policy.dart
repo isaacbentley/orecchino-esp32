@@ -1,20 +1,25 @@
 // alert_policy.dart — which alerts become notifications, and their words
 // (plan §5.3 Alerts, §8.2 rate limits, §8.4 On the phone).
 //
-// - Traffic: one notification per alert (drone-aircraft pair, or aircraft
-//   for LOW / EMERGENCY) per 5 minutes; warnings are time-sensitive.
+// - Traffic (ADS-B conflict watch): one notification per alert (a
+//   drone-aircraft pair, or an aircraft for LOW) per 5 minutes; warnings are
+//   time-sensitive. The title is the action ("GIVE WAY: DESCEND AND LAND
+//   D9A11", "BE READY TO LAND DRONES"); the body the geometry, the rule's
+//   words, the aircraft and the data age. Aircraft never notify otherwise.
 // - Drones: EMERGENCY REPORTED and ID SIGNATURE INVALID, once per contact
 //   per 5 minutes, only while a detector is connected.
 // - "Mute 10 min" silences notifications, callouts and haptics (not the
 //   on-screen alert, which stays as long as the condition does).
-// Words: never "collision", "conflict", "safe", "clear" or "TCAS"; km and m
-// for distances, feet for aircraft altitude, always the data age.
+// Words: never "collision", "safe", "clear" (but the rules' "KEEP CLEAR OF"),
+// "conflict resolved" or "TCAS"; km and m for distances, feet for aircraft
+// altitude, always the data age.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import '../geo.dart';
 import '../live/contact_tracker.dart';
 import '../traffic/traffic_rules.dart';
+import '../traffic/traffic_words.dart';
 
 enum AlertSource { traffic, drone }
 
@@ -75,29 +80,30 @@ class AlertWords {
     return type.isEmpty ? name : '$type $name';
   }
 
-  static String title(TrafficAlert al) {
+  /// The rule in a sentence: 'Traffic near drone D9A11', 'Low traffic W
+  /// 2.4 km'.
+  static String rule(TrafficAlert al) {
     final id = TrafficRules.droneLabel(al.droneId);
-    switch (al.kind) {
-      case TrafficKind.near:
-        return 'Traffic near drone $id';
-      case TrafficKind.converging:
-        return 'Traffic converging with drone $id';
-      case TrafficKind.low:
-        final b = al.bearingDeg == null ? '' : ' ${TrafficRules.compass8(al.bearingDeg!)}';
-        return 'Low traffic$b ${al.horizM == null ? '' : '${TrafficRules.kmText(al.horizM!)} km'}'.trim();
-      case TrafficKind.emergency:
-        return al.text;
-    }
+    if (al.kind == TrafficKind.near) return 'Traffic near drone $id';
+    if (al.kind == TrafficKind.converging) return 'Traffic converging with drone $id';
+    final b = al.bearingDeg == null ? '' : ' ${TrafficRules.compass8(al.bearingDeg!)}';
+    return 'Low traffic$b ${al.horizM == null ? '' : '${TrafficRules.kmText(al.horizM!)} km'}'.trim();
   }
 
-  /// 'B738 UAL123 · 2,650 ft · 1.1 km NE of the drone · reported 6 s ago'
+  /// The notification's title: the action.
+  static String title(TrafficAlert al) => trafficAction(al);
+
+  /// 'AIRCRAFT 80 M ABOVE, 1.1 KM NE, CLOSEST IN 20 S · Traffic near drone
+  /// D9A11 · B738 UAL123 · 2,650 ft · 1.1 km NE of the drone · 80 m above
+  /// it · reported 6 s ago'
   static String body(TrafficAlert al, TrafficAircraft? a) {
-    final parts = <String>[aircraftName(a, al)];
+    final geometry = trafficGeometry(al);
+    final parts = <String>[if (geometry.isNotEmpty) geometry, rule(al), aircraftName(a, al)];
     final alt = altitudeFt(a);
     if (alt != null) parts.add(alt);
     if (al.horizM != null) {
       final dir = al.bearingDeg == null ? '' : ' ${TrafficRules.compass8(al.bearingDeg!)}';
-      final of = al.kind.isPair ? ' of the drone' : ' of you';
+      final of = al.droneId.isNotEmpty ? ' of the drone' : ' of you';
       parts.add('${TrafficRules.kmText(al.horizM!)} km$dir$of');
     }
     if (al.kind.isPair) {
@@ -107,6 +113,8 @@ class AlertWords {
         final v = al.vertM!.round();
         parts.add(v >= 0 ? '$v m above it' : '${-v} m below it');
       }
+    } else {
+      parts.add(al.vertM == null ? 'height unknown' : '${trafficAglM(al.vertM!)} m above ground');
     }
     if (al.kind == TrafficKind.converging && al.cpaS != null) {
       parts.add('closest in ${al.cpaS!.round()} s');
@@ -123,6 +131,14 @@ class AlertWords {
     final brg = Geo.bearingDeg(obsLat, obsLon, a.lat, a.lon);
     final d = Geo.distanceM(obsLat, obsLon, a.lat, a.lon);
     return '${Geo.clockWords(brg, headingDeg)} · ${TrafficRules.kmText(d)} km from you';
+  }
+
+  /// The action as it is said: 'Give way: descend and land D9A11.' (ids,
+  /// anything with a digit, keep their letters).
+  static String spokenAction(TrafficAlert al) {
+    final words = trafficAction(al).split(' ').map((w) => RegExp(r'\d').hasMatch(w) ? w : w.toLowerCase()).join(' ');
+    if (words.isEmpty) return '';
+    return '${words[0].toUpperCase()}${words.substring(1)}.';
   }
 
   /// 'Traffic, 2 o'clock, 1.1 kilometres, 2,600 feet, descending.'
@@ -187,9 +203,12 @@ class AlertPolicy {
         level: al.level,
         title: AlertWords.title(al),
         body: AlertWords.body(al, a),
-        spoken: (a != null && obsLat != null && obsLon != null && headingDeg != null)
-            ? AlertWords.spoken(a, obsLat, obsLon, headingDeg)
-            : null,
+        // The action first; then where to look, when the phone knows.
+        spoken: [
+          AlertWords.spokenAction(al),
+          if (a != null && obsLat != null && obsLon != null && headingDeg != null)
+            AlertWords.spoken(a, obsLat, obsLon, headingDeg),
+        ].join(' '),
         hex: al.hex,
         droneId: al.droneId.isEmpty ? null : al.droneId,
       ));

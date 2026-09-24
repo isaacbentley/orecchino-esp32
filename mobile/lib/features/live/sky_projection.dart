@@ -53,6 +53,20 @@ class SkyCamera {
         _focal = distance * ringRadius,
         _heightFactor = (tiltDeg / maxTiltDeg).clamp(0.0, 1.0);
 
+  /// Value equality: a rebuild with the same view repaints nothing.
+  @override
+  bool operator ==(Object other) =>
+      other is SkyCamera &&
+      other.size == size &&
+      other.tiltDeg == tiltDeg &&
+      other.yawDeg == yawDeg &&
+      other.rangeM == rangeM &&
+      other.center == center &&
+      other.ringRadius == ringRadius;
+
+  @override
+  int get hashCode => Object.hash(size, tiltDeg, yawDeg, rangeM, center, ringRadius);
+
   /// A camera fitted to [viewport] (the part of the screen the scene may
   /// use; the scene itself can bleed past it).
   factory SkyCamera.fit({
@@ -110,6 +124,21 @@ class SkyCamera {
     if (!distanceM.isFinite || distanceM > rangeM * (1 + slack)) return null;
     final (x, y) = ground(distanceM, bearingDeg);
     return projectXYZ(x, y, heightUnits(heightM, rangeM: rangeM));
+  }
+
+  /// Where a contact's mark goes: its projected top, or, beyond the range,
+  /// pinned to the outer ring at its true bearing at ground level
+  /// ([beyond] true; an edge marker). Null when behind the camera or the
+  /// distance is not a number.
+  ({SkyPoint point, bool beyond})? place(double distanceM, double bearingDeg, {double heightM = 0}) {
+    if (!distanceM.isFinite || !bearingDeg.isFinite) return null;
+    if (distanceM > rangeM) {
+      final (x, y) = ground(rangeM, bearingDeg);
+      final p = projectXYZ(x, y, 0);
+      return p == null ? null : (point: p, beyond: true);
+    }
+    final p = project(distanceM, bearingDeg, heightM: heightM);
+    return p == null ? null : (point: p, beyond: false);
   }
 
   /// A point on the ground at [r] units and [relDeg] clockwise from the
