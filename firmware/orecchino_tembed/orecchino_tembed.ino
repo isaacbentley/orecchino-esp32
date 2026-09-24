@@ -50,6 +50,8 @@ bool        txui_running() { return tx_running(); }
 void        txui_set_running(bool on) { tx_set_running(on); }
 bool        txui_emergency() { return tx_emergency(); }
 void        txui_set_emergency(bool on) { tx_set_emergency(on); }
+bool        txui_slow() { return tx_slow(); }
+void        txui_set_slow(bool on) { tx_set_slow(on); }
 
 void board_switch_mode(uint8_t mode) {
   rx_log_flush();   // the restart would lose records not yet saved

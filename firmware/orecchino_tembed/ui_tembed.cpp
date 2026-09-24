@@ -14,6 +14,8 @@
 
 // From the receiver core (rx_core.h, in the sketch's translation unit).
 void rx_log_flush();
+void rx_log_clear_all();                              // clear, save now, tell every host
+void rx_log_stats(int* held, uint32_t* oldest_age_s);
 
 #define W 320
 #define H 170
@@ -31,8 +33,18 @@ static View     s_view = V_SCOPE;
 static uint8_t  s_mode = UI_MODE_RX;
 static bool     s_night_mode = false;
 static uint32_t s_last_solar_eval = 0;
-static int      s_tx_sel = 0;     // row in the TX list (0 master, 1 emg, 2+ paths)
+static int      s_tx_sel = 0;     // row in the TX list (0 master, 1 emg, 2 rate, 3+ paths)
 static int      s_menu_sel = 0;
+// Menu rows: 0 Receiver, 1 Test beacon, 2 Brightness, 3 Clear history,
+// 4 Power off, 5 Back. Five fit on screen; the list scrolls to the choice.
+#define MENU_N       6
+#define MENU_CLEAR   3
+#define MENU_POWER   4
+#define MENU_BACK    5
+static bool     s_clear_ask = false;   // the "clear history?" step is showing
+static int      s_clear_sel = 0;       // 0 CANCEL (the default), 1 CLEAR
+static uint32_t s_cleared_ms = 0;      // when the menu cleared the history...
+static bool     s_cleared = false;     // ..."history cleared" shows for 5 s after (wrap-safe)
 static int      s_sel = 0;        // selected row (index into the ordered list)
 static UiSel    s_selid = {-1, 0}; // ...and the aircraft on it, which survives re-sorting
 static int      s_scroll = 0;
@@ -476,6 +488,15 @@ static void draw_spectrum() {
 
 
 // ---- test-beacon view: the ten transmit variants, each a toggle
+/// Keep the TX list's row on a row (0 master, 1 emergency, 2 rate, 3+
+/// paths): on every turn, so a click in the same pass never acts on a row
+/// that is not there.
+static void tx_sel_clamp() {
+  int total = txui_count() + 3;
+  if (s_tx_sel >= total) s_tx_sel = total - 1;
+  if (s_tx_sel < 0) s_tx_sel = 0;
+}
+
 static void draw_tx() {
   s_cv->fillScreen(C_BG);
   bool running = txui_running();
@@ -489,8 +510,8 @@ static void draw_tx() {
   small(W - 6 - strlen(hd) * 6, 7, running ? RGB565(0x5E,0x48,0x10) : C_MUTED, hd);
 
   const int ROWS_TX = 5, RH = 24, y0 = TOP + 2;   // leaves a band for the hint
-  int total = n + 2;                       // master + emergency + paths
-  if (s_tx_sel < 0) s_tx_sel = 0; if (s_tx_sel >= total) s_tx_sel = total - 1;
+  int total = n + 3;                       // master + emergency + rate + paths
+  tx_sel_clamp();
   static int scroll = 0;
   if (s_tx_sel < scroll) scroll = s_tx_sel;
   if (s_tx_sel >= scroll + ROWS_TX) scroll = s_tx_sel - ROWS_TX + 1;
@@ -508,8 +529,15 @@ static void draw_tx() {
       s_cv->fillRoundRect(W - 44, y + 4, 34, 15, 4, on ? (row == 0 ? RGB565(0x12,0x3A,0x20) : RGB565(0x4A,0x14,0x14)) : C_BAR);
       s_cv->drawRoundRect(W - 44, y + 4, 34, 15, 4, on ? hue : C_EDGE);
       small(W - 39, y + 8, on ? hue : C_MUTED, on ? "ON" : "off");
+    } else if (row == 2) {                 // rate: spec (Remote ID rates) or slow (5 s)
+      bool slow = txui_slow();
+      bold(10, y + 16, slow ? C_AMBER : C_TEXT, "RATE");
+      small(60, y + 9, C_MUTED, slow ? "each path every 5 s" : "Remote ID rates");
+      s_cv->fillRoundRect(W - 44, y + 4, 34, 15, 4, slow ? RGB565(0x4A,0x36,0x0C) : C_BAR);
+      s_cv->drawRoundRect(W - 44, y + 4, 34, 15, 4, slow ? C_AMBER : C_EDGE);
+      small(W - 39, y + 8, slow ? C_AMBER : C_TEXT, slow ? "SLOW" : "SPEC");
     } else {
-      int i = row - 2;
+      int i = row - 3;
       bool on = txui_enabled(i);
       uint16_t col = on ? (running ? C_OK : C_TEXT) : C_MUTED;
       // the variant's name (what tells the ten apart), its carrier, sent count
@@ -563,15 +591,56 @@ void tembed_power_off() {
 // selection box (y .. y + MENU_RH - 2), clear of its top and bottom edges.
 #define MENU_RH 29
 #define MENU_Y(i) (TOP + 2 + (i) * MENU_RH)
+/// The saved drone history in brief: "48 records, oldest 2 h ago".
+static void history_words(char* b, size_t n) {
+  if (s_mode != UI_MODE_RX) { snprintf(b, n, "in receiver mode"); return; }
+  if (s_cleared && s_now - s_cleared_ms < 5000) { snprintf(b, n, "history cleared"); return; }
+  int held = 0; uint32_t age = UINT32_MAX;
+  rx_log_stats(&held, &age);
+  if (!held) { snprintf(b, n, "no saved drone records"); return; }
+  if (age == UINT32_MAX) snprintf(b, n, "%d records", held);
+  else if (age < 3600) snprintf(b, n, "%d records, oldest %lu min ago", held, (unsigned long)(age / 60));
+  else if (age < 172800) snprintf(b, n, "%d records, oldest %lu h ago", held, (unsigned long)(age / 3600));
+  else snprintf(b, n, "%d records, oldest %lu days ago", held, (unsigned long)(age / 86400));
+}
+/// The confirmation: CANCEL is the default, the knob picks, a click acts,
+/// the side key backs out.
+static void draw_clear_ask() {
+  s_cv->fillScreen(C_BG);
+  s_cv->fillRect(0, 0, W, TOP, C_BAR);
+  bold(6, 15, C_DANGER, "CLEAR HISTORY?");
+  int held = 0; uint32_t age; rx_log_stats(&held, &age);
+  char b[48]; snprintf(b, sizeof(b), "Clear the %d saved drone record%s?", held, held == 1 ? "" : "s");
+  bold(12, 50, C_TEXT, b);
+  small(12, 62, C_MUTED, "This can't be undone. Connected apps are told.");
+  const char* lbl[2] = { "CANCEL", "CLEAR" };
+  for (int i = 0; i < 2; i++) {
+    int x = i ? W / 2 + 8 : 12, w = W / 2 - 20, y = 92, h = 40;
+    bool sel = i == s_clear_sel;
+    uint16_t edge = i ? C_DANGER : C_ACCENT;
+    if (sel) s_cv->fillRoundRect(x, y, w, h, 6, i ? C_DANGER : RGB565(0x06, 0x24, 0x22));
+    s_cv->drawRoundRect(x, y, w, h, 6, edge);
+    int tw = text_px(lbl[i], &FreeSansBold9pt7b);
+    bold(x + (w - tw) / 2, y + 26, sel ? C_TEXT : C_MUTED, lbl[i]);
+  }
+  small(12, H - 10, C_MUTED, "turn: choose  click: do it  side key: back");
+  present();
+}
 static void draw_menu() {
+  if (s_clear_ask) { draw_clear_ask(); return; }
   s_cv->fillScreen(C_BG);
   s_cv->fillRect(0, 0, W, TOP, C_BAR);
   bold(6, 15, C_TEXT, "MENU");
   char bl[24]; snprintf(bl, sizeof(bl), "Brightness  %s", s_bl == 0 ? "100%" : s_bl == 1 ? "43%" : "25%");
-  const char* names[5] = { "Receiver", "Test beacon (TX)", bl, "Power Off", "Back" };
-  const char* subs[5]  = { "listen for Remote ID", "transmit test signals", "click to cycle", "deep sleep (side btn wakes)", "return to the screen" };
-  for (int i = 0; i < 5; i++) {
-    int y = MENU_Y(i);
+  char hist[48]; history_words(hist, sizeof(hist));
+  const char* names[MENU_N] = { "Receiver", "Test beacon (TX)", bl, "Clear history", "Power Off", "Back" };
+  const char* subs[MENU_N]  = { "listen for Remote ID", "transmit test signals", "click to cycle", hist,
+                                "deep sleep (side btn wakes)", "return to the screen" };
+  int first = s_menu_sel > 4 ? s_menu_sel - 4 : 0;   // five rows on screen, the choice among them
+  char pos[24]; snprintf(pos, sizeof(pos), "%d/%d", s_menu_sel + 1, MENU_N);
+  small(W - 6 - 6 * (int)strlen(pos), 7, C_MUTED, pos);
+  for (int r = 0; r < 5; r++) {
+    int i = first + r, y = MENU_Y(r);
     bool sel = i == s_menu_sel, cur = i < 2 && i == s_mode;
     if (sel) { s_cv->fillRoundRect(6, y, W - 12, MENU_RH - 1, 5, C_BAR); s_cv->drawRoundRect(6, y, W - 12, MENU_RH - 1, 5, C_ACCENT); }
     bold(18, y + 14, sel ? C_TEXT : C_MUTED, names[i]);
@@ -633,8 +702,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     if (dt < 70 && abs(det) == 1 && s_view != V_MENU) {
       det *= 2; // quick turn acceleration for responsive list navigation
     }
-    if (s_view == V_MENU) { s_menu_sel = (s_menu_sel + det + 5) % 5; }
-    else if (s_view == V_TX) { s_tx_sel += det; }   // clamped in draw_tx
+    if (s_view == V_MENU && s_clear_ask) { s_clear_sel = det > 0 ? 1 : 0; }
+    else if (s_view == V_MENU) { s_menu_sel = ((s_menu_sel + det) % MENU_N + MENU_N) % MENU_N; }
+    else if (s_view == V_TX) { s_tx_sel += det; tx_sel_clamp(); }
     else if (s_view == V_SPECTRUM) s_mark = (s_mark + det + CC_SWEEP_BINS) % CC_SWEEP_BINS;
     else {
       if (s_n > 0) {
@@ -653,25 +723,34 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
   if (k && !k_held && now - k_down > 800 && s_view != V_MENU) {   // long hold -> menu
     k_held = true;
     if (s_view == V_SPECTRUM) spectrum_leave();
-    s_menu_sel = s_mode; s_view = V_MENU; s_dirty = true;
+    s_menu_sel = s_mode; s_clear_ask = false; s_view = V_MENU; s_dirty = true;
   }
   if (!k && k_was && !k_held && now - k_down > 40) {              // short click
-    if (s_view == V_MENU) {
-      if (s_menu_sel == 2) {                                     // Brightness: cycle
+    if (s_view == V_MENU && s_clear_ask) {                       // the confirmation
+      if (s_clear_sel == 1) {
+        rx_log_clear_all();   // under the core's lock; saved now; log_cleared to every host
+        s_cleared = true; s_cleared_ms = now;
+      }
+      s_clear_ask = false;
+    } else if (s_view == V_MENU) {
+      if (s_menu_sel == MENU_CLEAR) {                            // Clear history: ask first
+        if (s_mode == UI_MODE_RX) { s_clear_ask = true; s_clear_sel = 0; }
+      } else if (s_menu_sel == 2) {                              // Brightness: cycle
         s_bl = (s_bl + 1) % 3; s_dimmed = false;
         uint8_t bl_val = BL_LEVELS[s_bl];
         if (s_night_mode) bl_val = (uint8_t)(bl_val * 7 / 10);
         ledcWrite(PIN_LCD_BL, bl_val);
         s_bl_toast_until = now + 1200;
-      } else if (s_menu_sel == 3) {                              // Power Off
+      } else if (s_menu_sel == MENU_POWER) {                     // Power Off
         tembed_power_off();
-      } else if (s_menu_sel == 4 || s_menu_sel == s_mode) {        // Back / no change
+      } else if (s_menu_sel == MENU_BACK || s_menu_sel == s_mode) {  // Back / no change
         s_view = s_mode == UI_MODE_TX ? V_TX : V_SCOPE;
       } else board_switch_mode((uint8_t)s_menu_sel);               // saves + reboots
     } else if (s_view == V_TX) {
       if (s_tx_sel == 0) txui_set_running(!txui_running());
       else if (s_tx_sel == 1) txui_set_emergency(!txui_emergency());
-      else txui_set_enabled(s_tx_sel - 2, !txui_enabled(s_tx_sel - 2));
+      else if (s_tx_sel == 2) txui_set_slow(!txui_slow());   // saved in NVS
+      else txui_set_enabled(s_tx_sel - 3, !txui_enabled(s_tx_sel - 3));
     } else if (s_view == V_SPECTRUM) { spectrum_leave(); s_view = V_SCOPE; }
     else s_view = s_view == V_SCOPE ? V_DETAIL : V_SCOPE;
     s_dirty = true;
@@ -695,8 +774,9 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
   if (!u && u_was && !u_spec_fired && !u_off_fired && now - u_down > 30) {
     if (s_view == V_SPECTRUM) { spectrum_leave(); s_view = V_SCOPE; }
     else if (s_view == V_DETAIL) s_view = V_SCOPE;
+    else if (s_view == V_MENU && s_clear_ask) s_clear_ask = false;   // back out of the question
     else if (s_view == V_MENU) s_view = s_mode == UI_MODE_TX ? V_TX : V_SCOPE;
-    else if (s_view == V_TX) { s_menu_sel = 4; s_view = V_MENU; }     // beacon list -> menu
+    else if (s_view == V_TX) { s_menu_sel = MENU_BACK; s_view = V_MENU; }   // beacon list -> menu
     s_dirty = true;
   }
   u_was = u;

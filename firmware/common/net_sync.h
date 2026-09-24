@@ -32,6 +32,22 @@
 // joined. firmware/common/wifi_secrets.h (untracked, optional) supplies one
 // more when nothing is saved; forgetting it sets "nobuiltin".
 //
+// PHONE CONNECTED: while a phone is on an encrypted BLE link
+// (NetOps.phone_connected, ble_link_peer_secure() on the T5) no automatic
+// window starts; one in progress is dropped at once (join abandoned, fetch
+// cancelled, station left, hop released, the worker drains in NP_DRAIN) and
+// STAY lets go of the access point: "paused", then "idle". The drained
+// worker's report still follows as "synced", marked "phone":"cancelled" (the
+// jobs it cut short listed in "cancelled", not "failed", and not backed off)
+// or "phone":"completed before pause" (nothing was cut: only the report came
+// after the pause). The promiscuous sniffer and the hop never
+// stop. What a person asks for still runs (SCAN, CONNECT/wifi_join, SYNC NOW,
+// UPDATE MAP, a mode change that joins), then leaves. When the phone goes,
+// automatic windows resume after a 10 s grace (a window that fell due
+// meanwhile runs then). Shown as net_is_paused(), "Wi-Fi paused: phone
+// connected", "paused":"phone" in wifi_status, and net lines "paused"
+// (+"reason":"phone") / "resumed".
+//
 // HOST COMMANDS (net_host_line; replies go to the asking transport only)
 //   {"cmd":"wifi_status"}
 //       -> a wifi_status line (below)
@@ -45,8 +61,10 @@
 //          | timed out | could not connect | cancelled). Saved only on success.
 //   {"cmd":"wifi_forget","ssid":"Home"}                    -> wifi_status
 //   {"cmd":"wifi_mode","mode":"off|sync|stay","every_min":15}  -> wifi_status
+//   {"cmd":"wifi_config","adsb_km":10,"tile_km":3}  (either or both; clamped:
+//       ADS-B 5-30 km, map 1 km to what the flash holds) -> wifi_status
 //   A refused or malformed command: {"type":"wifi_err","cmd":"wifi_join","reason":"..."}
-//   wifi_join/forget/mode need a bonded BLE link, or USB while the board's
+//   wifi_join/forget/mode/config need a bonded BLE link, or USB while the board's
 //   SYSTEM screen has Wi-Fi setup open (net_serial_setup(); 5 min), so a USB
 //   cable alone cannot change the networks. Build with
 //   -DNET_SERIAL_PROVISIONING=1 to allow USB always (bench use).
@@ -54,15 +72,24 @@
 //   wifi_status: {"type":"wifi_status","state":"off|idle|connecting|connected|failed",
 //     "mode":"off|sync|stay","every_min":15,"ssid":"Home","ip":"192.168.1.5","ch":6,
 //     "rssi":-60,"reason":"wrong password","scanning":false,"syncing":false,
-//     "clock":true,"position":true,"tfr_n":3,"ac_n":14,"last_sync":1790000000,"adsb_age_s":12,
+//     "clock":true,"position":true,"tfr_n":3,"ac_n":14,"adsb_km":10,"tile_km":3,
+//     "tile_max_km":14.75,"paused":"phone",
+//     "last_sync":1790000000,"adsb_age_s":12,
 //     "saved":["Home","Hangar"]}
 //     (ssid/ip/ch/rssi only while connecting/connected; reason only when set;
-//     last_sync/adsb_age_s only when known.)
+//     paused only while a phone pauses automatic Wi-Fi; tile_max_km (the
+//     largest map radius the flash holds, from the last tile plan),
+//     last_sync, adsb_age_s only when known.)
 //
-// BROADCAST STATUS LINES (every transport): {"type":"net","state":"connecting",
+// BROADCAST STATUS LINES (every transport): {"type":"net","state":"paused",
+//   "reason":"phone"} / "resumed" / "connecting",
 //   "ssid":..} / "connected" (+ip, ch, rssi, clock) / "failed" (+reason) /
 //   "synced" (+ok, failed lists, tfr, ac, tiles, tiles_left, heap_int, heap_blk,
-//   heap_tls, position, err) / "lost" / "idle". heap_int/heap_blk: internal
+//   heap_tls, position, err; adsb_km when ADS-B was asked for; map (the plan,
+//   "Map: 3 km z12-15; 0.8 MB of 11.9 MB"), map_tiles, map_have, tile_max_km,
+//   storage_full when a tile job ran; "cancelled":[jobs] when a cancel cut
+//   jobs short; "phone":"cancelled" | "completed before pause" when a phone
+//   paused the window first) / "lost" / "idle". heap_int/heap_blk: internal
 //   heap free and its largest block before the first HTTPS request (or at the
 //   end of the fetch when none ran); heap_tls: free with a TLS session open
 //   (bytes; 0: no TLS ran). position false: no home position, so TFR, ADS-B
@@ -103,6 +130,7 @@
 #define NET_FETCH_GUARD_MS    120000u              // cancel a fetch (without tiles) running longer
 #define NET_DUE_SLACK_MS      60000u               // a 15-min job is due at 14 min (windows vary in length)
 #define NET_SERIAL_SETUP_MS   (5u * 60u * 1000u)
+#define NET_RESUME_GRACE_MS   10000u               // after the phone leaves, before an automatic window
 // Said once, wherever the sync status shows, when there is no home position
 // (no GPS fix, nothing from the app, nothing saved): TFR, ADS-B and tiles
 // all need one.
@@ -144,6 +172,8 @@ typedef struct {
   uint8_t  mode;
   uint8_t  every_min;
   bool     builtin_off;
+  uint8_t  adsb_km;      // ADS-B query radius around home (5-30; NVS "adsb_km")
+  uint8_t  tile_km;      // map area radius (1-30, shrunk to fit; NVS "tile_km")
 } NetConfig;
 
 typedef enum {
@@ -169,10 +199,13 @@ enum {
 typedef struct {
   uint32_t jobs;
   uint16_t tile_budget;   // new tiles at most; 0xFFFF: all (UPDATE MAP)
+  double   adsb_radius_m; // the ADS-B radius set (widened around far drones, <= 30 km)
+  double   tile_radius_m; // the map radius set (the plan shrinks it to fit)
 } NetJobReq;
 
 typedef struct {
   uint32_t ok, failed, skipped;   // NET_JOB_* bits
+  uint32_t cancelled;             // cut short or never started by a cancel: not failures (no back-off)
   uint32_t utc;                   // TIME: the server's time...
   uint32_t utc_at_ms;             // ...at this millis()
   uint16_t tfr_n, ac_n;
@@ -180,6 +213,11 @@ typedef struct {
   uint32_t heap_free, heap_block; // internal heap before the first HTTPS request (0 unknown)
   uint32_t heap_tls;              // internal heap free with a TLS session open (0: no TLS ran)
   bool     no_position;           // TFR/ADS-B/tiles skipped: no home position
+  double   adsb_lat, adsb_lon, adsb_radius_m;   // where ADS-B was asked for (radius 0: not)
+  bool     have_plan;             // TILES: the plan it worked to
+  TilePlan plan;
+  double   tile_max_m;            // the largest map radius this flash holds (z12-15)
+  bool     storage_full;          // TILES stopped at the 1 MB reserve
   char     err[64];               // the first failure (or skip) in words
 } NetJobResult;
 
@@ -203,9 +241,12 @@ typedef struct {
   uint32_t (*utc_now)(void);          // 0 when the clock is not set
   void     (*emit)(uint8_t dst, const char* line, size_t n);  // dst: HostSrc, 255 all
   bool     (*have_position)(void);    // a home position is known (GPS, app or saved)
+  bool     (*phone_connected)(void);  // a phone on an encrypted BLE link: pause automatic Wi-Fi
 } NetOps;
 
-enum { NP_IDLE = 0, NP_JOIN, NP_FETCH, NP_ONLINE };
+// NP_DRAIN: the station has left (phone connected) while the fetch worker
+// winds down to a safe point; the hop is already released.
+enum { NP_IDLE = 0, NP_JOIN, NP_FETCH, NP_ONLINE, NP_DRAIN };
 
 #define NET_DST_ALL 255
 
@@ -263,6 +304,17 @@ typedef struct {
   uint32_t heap_free, heap_block, heap_tls;
   bool     serial_setup;
   uint32_t serial_setup_until;
+  // phone pause
+  bool     paused;          // a phone is connected (encrypted BLE)
+  bool     resume_wait;     // the phone left: automatic windows wait until resume_at
+  uint32_t resume_at;
+  bool     win_manual;      // this window was asked for by a person (CONNECT, SYNC NOW...)
+  // the map
+  bool     have_plan;
+  TilePlan plan;
+  double   tile_max_m;      // 0 unknown
+  bool     storage_full;
+  double   adsb_radius_m;   // last ADS-B query radius (0 none yet)
 } NetSm;
 
 // Tile job progress, written by the fetch worker (net_fetch.h).
@@ -275,6 +327,8 @@ static inline NetSm net__initial() {
   memset(&g, 0, sizeof(g));
   g.cfg.mode = NET_MODE_SYNC;
   g.cfg.every_min = NET_EVERY_MIN_DEFAULT;
+  g.cfg.adsb_km = NET_ADSB_KM_DEFAULT;
+  g.cfg.tile_km = NET_TILE_KM_DEFAULT;
   g.state = NET_STATE_DISCONNECTED;
   return g;
 }
@@ -378,6 +432,13 @@ static inline size_t net__status_json(char* out, size_t n) {
                           g.scanning ? "true" : "false", g.phase == NP_FETCH ? "true" : "false",
                           g.clock_synced ? "true" : "false", g.no_position ? "false" : "true",
                           (unsigned)g.tfr_n, (unsigned)g.ac_n);
+  if (k < n)
+    k += (size_t)snprintf(out + k, n - k, ",\"adsb_km\":%u,\"tile_km\":%u", (unsigned)g.cfg.adsb_km,
+                          (unsigned)g.cfg.tile_km);
+  if (k < n && g.tile_max_m > 0)
+    k += (size_t)snprintf(out + k, n - k, ",\"tile_max_km\":%.2f", g.tile_max_m / 1000.0);
+  if (k < n && g.paused && g.cfg.mode != NET_MODE_OFF)
+    k += (size_t)snprintf(out + k, n - k, ",\"paused\":\"phone\"");
   if (k < n && g.last_sync_utc)
     k += (size_t)snprintf(out + k, n - k, ",\"last_sync\":%lu", (unsigned long)g.last_sync_utc);
   if (k < n && g.adsb_ok)
@@ -405,7 +466,7 @@ static inline void net__reply_err(uint8_t src, const char* cmd, const char* reas
 }
 
 static inline void net__broadcast(const char* state, const char* extra) {
-  char line[400], esc[6 * NET_MAX_SSID_LEN + 1];
+  char line[800], esc[6 * NET_MAX_SSID_LEN + 1];
   net_json_esc(esc, sizeof(esc), g_net.ssid);
   int n = snprintf(line, sizeof(line), "{\"type\":\"net\",\"state\":\"%s\",\"ssid\":\"%s\"%s}\n",
                    state, esc, extra ? extra : "");
@@ -495,7 +556,7 @@ static inline void net__scan_done(int r) {
       if (k >= 0) best = k;
     }
     if (best < 0 && g.cfg.n) best = g.rot % g.cfg.n;
-    if (best >= 0 && g.phase == NP_IDLE && !g.rq_join && !g.rq_leave)
+    if (best >= 0 && g.phase == NP_IDLE && !g.rq_join && !g.rq_leave && !(g.paused && !g.win_manual))
       net__join_begin(g.cfg.saved[best].ssid, g.cfg.saved[best].pass, false, 0);
   }
 }
@@ -535,6 +596,7 @@ static inline void net__leave() {
   NetSm& g = g_net;
   if (g.ops.leave) g.ops.leave();
   g.phase = NP_IDLE;
+  g.win_manual = false;   // the window a person asked for ends here
   if (g.state != NET_STATE_FAILED) g.state = NET_STATE_DISCONNECTED;
   g.ip[0] = 0;
   g.ch = 0;
@@ -648,6 +710,8 @@ static inline void net__fetch_begin(uint32_t jobs) {
   NetJobReq req;
   req.jobs = jobs;
   req.tile_budget = g.rq_tiles ? 0xFFFF : NET_TILE_BUDGET_AUTO;
+  req.adsb_radius_m = g.cfg.adsb_km * 1000.0;
+  req.tile_radius_m = g.cfg.tile_km * 1000.0;
   g.force_jobs = false;
   g.rq_sync = false;
   g.phase = NP_FETCH;
@@ -682,6 +746,7 @@ static inline void net__job_outcome(const NetJobResult* r, int k, uint32_t bit) 
 static inline void net__fetch_done(const NetJobResult* r) {
   NetSm& g = g_net;
   uint32_t now = g.now;
+  const bool drained = g.phase == NP_DRAIN;   // a phone paused this window: already left
   if ((r->ok & NET_JOB_TIME) && r->utc >= NET_UTC_MIN) {
     // Only a real server answer counts; the clock may have looked set already.
     uint32_t utc = r->utc + (now - r->utc_at_ms + 500u) / 1000u;
@@ -698,13 +763,24 @@ static inline void net__fetch_done(const NetJobResult* r) {
       g.rq_tiles = false;
     }
   }
-  if (r->failed & NET_JOB_TILES) g.rq_tiles = false;   // an UPDATE MAP that failed is reported, not retried forever
-  for (int k = 0; k < NET_JOB_COUNT; k++) net__job_outcome(r, k, 1u << k);
+  // A cancel is no failure (a phone, a new CONNECT, mode OFF: the jobs stay
+  // due, no back-off), except the fetch guard's: a fetch that hung that long failed.
+  NetJobResult o = *r;
+  if (g.fetch_cancel && !drained && !g.rq_join && !g.rq_leave) o.failed |= o.cancelled;
+  if (o.failed & NET_JOB_TILES) g.rq_tiles = false;   // an UPDATE MAP that failed is reported, not retried forever
+  for (int k = 0; k < NET_JOB_COUNT; k++) net__job_outcome(&o, k, 1u << k);
   if (r->heap_free) { g.heap_free = r->heap_free; g.heap_block = r->heap_block; }
   if (r->heap_tls) g.heap_tls = r->heap_tls;
   g.no_position = r->no_position;
+  if (r->have_plan) {
+    g.have_plan = true;
+    g.plan = r->plan;
+    if (r->tile_max_m > 0) g.tile_max_m = r->tile_max_m;
+    g.storage_full = r->storage_full;
+  }
+  if (r->adsb_radius_m > 0) g.adsb_radius_m = r->adsb_radius_m;
   // A failure, or a job skipped for a reason worth showing ("TFR: no position").
-  if (r->failed || r->skipped) net__copy(g.fetch_err, sizeof(g.fetch_err), r->err);
+  if (r->failed || r->skipped || r->cancelled) net__copy(g.fetch_err, sizeof(g.fetch_err), r->err);
   else g.fetch_err[0] = 0;
   if (r->ok && g.ops.utc_now) {
     uint32_t u = g.ops.utc_now();
@@ -712,11 +788,13 @@ static inline void net__fetch_done(const NetJobResult* r) {
   }
   // {"type":"net","state":"synced",...}
   static const char* const names[NET_JOB_COUNT] = { "time", "tfr", "adsb", "tiles" };
-  char extra[400], esc[100];
+  char extra[640], esc[100];
   size_t k = 0;
-  for (int pass = 0; pass < 2; pass++) {
-    uint32_t bits = pass == 0 ? r->ok : r->failed;
-    k += (size_t)snprintf(extra + k, sizeof(extra) - k, ",\"%s\":[", pass == 0 ? "ok" : "failed");
+  for (int pass = 0; pass < 3; pass++) {
+    uint32_t bits = pass == 0 ? r->ok : pass == 1 ? r->failed : r->cancelled;
+    if (pass == 2 && !bits) break;   // "cancelled" only when a cancel cut something
+    k += (size_t)snprintf(extra + k, sizeof(extra) - k, ",\"%s\":[",
+                          pass == 0 ? "ok" : pass == 1 ? "failed" : "cancelled");
     bool first = true;
     for (int j = 0; j < NET_JOB_COUNT && k < sizeof(extra); j++)
       if (bits & (1u << j)) {
@@ -732,7 +810,26 @@ static inline void net__fetch_done(const NetJobResult* r) {
              (unsigned)r->tfr_n, (unsigned)r->ac_n, (unsigned)r->tiles_new, (unsigned)r->tiles_left,
              (unsigned long)r->heap_free, (unsigned long)r->heap_block, (unsigned long)r->heap_tls,
              r->no_position ? "false" : "true", esc);
+  if (r->have_plan || r->adsb_radius_m > 0) {
+    size_t e = strlen(extra);
+    if (r->adsb_radius_m > 0 && e < sizeof(extra))
+      e += (size_t)snprintf(extra + e, sizeof(extra) - e, ",\"adsb_km\":%.1f", r->adsb_radius_m / 1000.0);
+    if (r->have_plan && e < sizeof(extra)) {
+      char map[96];
+      tile_plan_describe(&r->plan, map, sizeof(map));
+      snprintf(extra + e, sizeof(extra) - e, ",\"map\":\"%s\",\"map_tiles\":%u,\"map_have\":%u,\"tile_max_km\":%.2f%s",
+               map, (unsigned)r->plan.total, (unsigned)r->plan.present, r->tile_max_m / 1000.0,
+               r->storage_full ? ",\"storage_full\":true" : "");
+    }
+  }
+  if (drained) {   // the report comes after "paused": say what the pause did to it
+    size_t e = strlen(extra);
+    if (e < sizeof(extra))
+      snprintf(extra + e, sizeof(extra) - e, ",\"phone\":\"%s\"",
+               r->cancelled ? "cancelled" : "completed before pause");
+  }
   net__broadcast("synced", extra);
+  if (drained) { g.phase = NP_IDLE; return; }   // already left (phone connected)
   if (g.rq_join || g.rq_leave) { net__leave(); return; }
   net__after_window();
 }
@@ -751,8 +848,9 @@ static inline void net__fetch_poll() {
 
 static inline void net__after_window() {
   NetSm& g = g_net;
-  if (g.cfg.mode == NET_MODE_STAY && !g.rq_leave) {
+  if (g.cfg.mode == NET_MODE_STAY && !g.rq_leave && !g.paused) {
     g.phase = NP_ONLINE;
+    g.win_manual = false;   // STAY's own fetches from here on are automatic
     return;
   }
   net__leave();
@@ -761,7 +859,7 @@ static inline void net__after_window() {
 
 static inline void net__online_poll() {
   NetSm& g = g_net;
-  if (g.rq_join || g.rq_leave || g.cfg.mode != NET_MODE_STAY) {
+  if (g.rq_join || g.rq_leave || g.cfg.mode != NET_MODE_STAY || g.paused) {
     net__leave();
     net__broadcast("idle", NULL);
     return;
@@ -796,17 +894,21 @@ static inline void net__idle() {
   }
   if (g.rq_join) {
     g.rq_join = false;
+    g.win_manual = true;
     net__join_begin(g.rq_ssid, g.rq_pass, g.rq_new, g.rq_reply);
     g.rq_reply = 0;
     return;
   }
   if (g.rq_scan) { net__scan_begin(false); return; }
   if (!g.cfg.n) { g.rq_sync = g.rq_tiles = false; return; }   // nothing to join
+  if (g.resume_wait && !g.paused && (int32_t)(g.now - g.resume_at) >= 0) g.resume_wait = false;
   // SYNC: when the window is due. STAY: whenever not connected, unless
-  // saved networks are failing (then the back-off decides).
-  bool due = g.cfg.mode != NET_MODE_OFF &&
+  // saved networks are failing (then the back-off decides). Neither while a
+  // phone is connected, nor in the grace after it leaves.
+  bool due = g.cfg.mode != NET_MODE_OFF && !g.paused && !g.resume_wait &&
              ((g.cfg.mode == NET_MODE_STAY && g.fails == 0) || !g.sched || (int32_t)(g.now - g.next_try) >= 0);
   if (!due && !g.rq_sync) return;
+  g.win_manual = g.rq_sync;   // SYNC NOW / UPDATE MAP / a mode change: runs even with a phone connected
   g.rq_sync = false;
   if (g.cfg.n >= 2) net__scan_begin(true);   // pick the strongest saved network
   else net__join_begin(g.cfg.saved[0].ssid, g.cfg.saved[0].pass, false, 0);
@@ -826,7 +928,54 @@ static inline void net_sync_init(const NetOps* ops) {
   if (g_net.cfg.every_min < NET_EVERY_MIN_MIN || g_net.cfg.every_min > NET_EVERY_MIN_MAX)
     g_net.cfg.every_min = NET_EVERY_MIN_DEFAULT;
   if (g_net.cfg.n > NET_MAX_SAVED) g_net.cfg.n = NET_MAX_SAVED;
+  if (g_net.cfg.adsb_km < NET_ADSB_KM_MIN || g_net.cfg.adsb_km > NET_ADSB_KM_MAX) g_net.cfg.adsb_km = NET_ADSB_KM_DEFAULT;
+  if (g_net.cfg.tile_km < NET_TILE_KM_MIN || g_net.cfg.tile_km > NET_TILE_KM_MAX) g_net.cfg.tile_km = NET_TILE_KM_DEFAULT;
   if (g_net.ops.hop_hold) g_net.ops.hop_hold(false);
+}
+
+/// A phone connected (encrypted BLE) or left. Connected: automatic Wi-Fi
+/// stops at once (the sniffer and the hop carry on): a join is abandoned,
+/// a fetch is cancelled and the station leaves without waiting for the
+/// worker (NP_DRAIN; a tile in flight is a temp file, never renamed), STAY
+/// lets go of the access point. A window a person asked for runs to its end,
+/// then leaves. Left: automatic windows resume after NET_RESUME_GRACE_MS, at
+/// once if one fell due meanwhile.
+static inline void net__phone(bool on) {
+  NetSm& g = g_net;
+  if (on == g.paused) return;
+  g.paused = on;
+  if (!on) {
+    g.resume_wait = true;
+    g.resume_at = g.now + NET_RESUME_GRACE_MS;
+    if (g.cfg.mode != NET_MODE_OFF) net__broadcast("resumed", NULL);
+    return;
+  }
+  g.resume_wait = false;
+  if (g.cfg.mode != NET_MODE_OFF) net__broadcast("paused", ",\"reason\":\"phone\"");
+  switch (g.phase) {
+    case NP_JOIN:
+      if (!g.win_manual) {
+        net__leave();
+        g.state = NET_STATE_DISCONNECTED;
+        net__broadcast("idle", NULL);
+      }
+      break;
+    case NP_FETCH:
+      if (!g.win_manual) {
+        if (!g.fetch_cancel && g.ops.jobs_cancel) g.ops.jobs_cancel();
+        g.fetch_cancel = true;
+        net__leave();
+        g.phase = NP_DRAIN;
+        net__broadcast("idle", NULL);   // the worker's own report follows ("phone":...)
+      }
+      break;
+    case NP_ONLINE:
+      net__leave();
+      net__broadcast("idle", NULL);
+      break;
+    default:
+      break;
+  }
 }
 
 /// The state machine; call every loop iteration with millis().
@@ -834,24 +983,26 @@ static inline void net_tick(uint32_t now) {
   NetSm& g = g_net;
   g.now = now;
   if (!g.have_ops) return;
+  net__phone(g.ops.phone_connected && g.ops.phone_connected());
   if (g.serial_setup && (int32_t)(now - g.serial_setup_until) >= 0) g.serial_setup = false;
   if (g.no_position && g.ops.have_position && g.ops.have_position()) {
     // A position arrived (GPS fix, the app): fetch what needed one now.
     g.no_position = false;
     if (g.fetch_err[0] && !strcmp(g.fetch_err, NET_NO_POSITION_TEXT)) g.fetch_err[0] = 0;
     for (int k = 1; k < NET_JOB_COUNT; k++) if (!g.job_fails[k]) g.job_wait[k] = false;
-    if (g.cfg.mode != NET_MODE_OFF && g.phase == NP_IDLE) g.rq_sync = true;
+    if (g.cfg.mode != NET_MODE_OFF) g.sched = false;   // an automatic window, now
   }
   if (g.scanning) net__scan_poll();
   switch (g.phase) {
     case NP_JOIN:   net__join_poll(); break;
-    case NP_FETCH:  net__fetch_poll(); break;
+    case NP_FETCH:
+    case NP_DRAIN:  net__fetch_poll(); break;
     case NP_ONLINE: net__online_poll(); break;
     default: break;
   }
   if (g.phase == NP_ONLINE && g.rq_scan && !g.scanning) net__scan_begin(false);
   if (g.phase == NP_IDLE && !g.scanning) net__idle();
-  if (g.phase == NP_IDLE && !g.scanning) net__hold(false);
+  if ((g.phase == NP_IDLE || g.phase == NP_DRAIN) && !g.scanning) net__hold(false);
 }
 
 /// Start a scan of the networks around ("scanning, Remote ID Wi-Fi paused":
@@ -949,7 +1100,11 @@ static inline void net_set_mode(NetMode mode, uint8_t every_min = 0) {
   if (changed) net__store();
   if (mode == NET_MODE_OFF && (g.phase != NP_IDLE || g.scanning)) g.rq_leave = true;
   // From OFF, or into STAY: go now. STAY -> SYNC keeps the schedule.
-  if (mode != old && (old == NET_MODE_OFF || mode == NET_MODE_STAY)) { g.sched = false; g.fails = 0; }
+  if (mode != old && (old == NET_MODE_OFF || mode == NET_MODE_STAY)) {
+    g.sched = false;
+    g.fails = 0;
+    g.rq_sync = true;   // a person asked: runs even with a phone connected
+  }
 }
 
 static inline NetState net_get_state() { return g_net.state; }
@@ -978,6 +1133,47 @@ static inline uint8_t net_get_channel() { return g_net.state == NET_STATE_CONNEC
 static inline uint32_t net_get_last_sync() { return g_net.last_sync_utc; }
 /// True once an SNTP server answered (not merely a clock that looks set).
 static inline bool net_is_clock_synced() { return g_net.clock_synced; }
+/// ADS-B query radius around home, km (5-30, stored). A live drone more than
+/// 3 km out widens the query around it (net_adsb_area), up to 30 km.
+static inline uint8_t net_get_adsb_radius_km() { return g_net.cfg.adsb_km; }
+static inline void net_set_adsb_radius_km(uint8_t km) {
+  if (km < NET_ADSB_KM_MIN) km = NET_ADSB_KM_MIN;
+  if (km > NET_ADSB_KM_MAX) km = NET_ADSB_KM_MAX;
+  if (km != g_net.cfg.adsb_km) { g_net.cfg.adsb_km = km; net__store(); }
+}
+/// The largest map radius (km) this board's flash holds at z12-15, from the
+/// last tile plan; 0 until a tile sync has planned (then allow up to 30).
+static inline double net_get_tile_radius_max_km() { return g_net.tile_max_m / 1000.0; }
+/// Map area radius around home, km (1 to what fits, stored). UPDATE MAP and
+/// the automatic fills use it; a plan that does not fit shrinks z15 first.
+static inline uint8_t net_get_tile_radius_km() { return g_net.cfg.tile_km; }
+static inline void net_set_tile_radius_km(uint8_t km) {
+  uint8_t top = NET_TILE_KM_MAX;   // no plan yet: up to 30
+  if (g_net.tile_max_m > 0 && g_net.tile_max_m / 1000.0 < top) top = (uint8_t)(g_net.tile_max_m / 1000.0);
+  if (km > top) km = top;
+  if (km < NET_TILE_KM_MIN) km = NET_TILE_KM_MIN;
+  if (km != g_net.cfg.tile_km) { g_net.cfg.tile_km = km; net__store(); }
+}
+/// The last tile plan (per-zoom radius, tile counts, estimated bytes, flash
+/// total/free); false before the first tile sync.
+static inline bool net_tile_plan(TilePlan* out) {
+  if (g_net.have_plan && out) *out = g_net.plan;
+  return g_net.have_plan;
+}
+/// "Map: 6 km z12-14, 3 km z15; 2.9 MB of 5.0 MB" ("" before a plan); adds
+/// ", storage full" when the last sync stopped at the reserve.
+static inline void net_tile_plan_line(char* out, size_t n) {
+  if (!n) return;
+  out[0] = 0;
+  if (!g_net.have_plan) return;
+  tile_plan_describe(&g_net.plan, out, n);
+  size_t k = strlen(out);
+  if (g_net.storage_full && k < n) snprintf(out + k, n - k, ", storage full");
+}
+
+/// Automatic Wi-Fi is paused because a phone is connected over BLE (the
+/// phone's own data takes over; SCAN, CONNECT, SYNC NOW, UPDATE MAP still run).
+static inline bool net_is_paused() { return g_net.paused && g_net.cfg.mode != NET_MODE_OFF; }
 /// The last sync had no home position to fetch TFRs, ADS-B and tiles for.
 static inline bool net_no_position() { return g_net.no_position; }
 /// Seconds since this board's own ADS-B fetch last succeeded; NAN never.
@@ -1000,6 +1196,10 @@ static inline void net_status_line(char* out, size_t n) {
   char ssid[NET_MAX_SSID_LEN + 1];
   net__copy(ssid, sizeof(ssid), g.ssid);
   if (g.scanning && !g.scan_pick) { traffic_textf(out, n, "SCANNING, Remote ID Wi-Fi paused"); return; }
+  if (net_is_paused() && (g.phase == NP_IDLE || g.phase == NP_DRAIN) && !g.scan_pick) {
+    snprintf(out, n, "Wi-Fi paused: phone connected");
+    return;
+  }
   if (g.phase == NP_JOIN || g.scan_pick) {
     traffic_textf(out, n, "CONNECTING to %s", g.phase == NP_JOIN ? ssid : "saved network");
     return;
@@ -1036,6 +1236,10 @@ static inline void net_status_line(char* out, size_t n) {
     gmtime_r(&t, &tm);
     snprintf(when, sizeof(when), "%02d:%02dZ", tm.tm_hour, tm.tm_min);
   }
+  if (g.have_plan && (g.plan.shrunk || g.storage_full) && !g.fetch_err[0]) {
+    net_tile_plan_line(out, n);
+    return;
+  }
   if (g.cfg.mode == NET_MODE_SYNC) {
     if (!when[0]) traffic_textf(out, n, "SYNC every %u min, not yet", (unsigned)g.cfg.every_min);
     else if (g.fetch_err[0]) traffic_textf(out, n, "SYNC every %u min, last %s, %s", (unsigned)g.cfg.every_min, when, g.fetch_err);
@@ -1055,8 +1259,8 @@ static inline bool net_host_line(const char* cmd, const char* line, uint8_t src)
   if (!strcmp(cmd, "wifi_status")) { net__reply_status(mask); return true; }
   if (!strcmp(cmd, "wifi_scan")) { net_scan_request(mask); return true; }
   bool is_join = !strcmp(cmd, "wifi_join"), is_forget = !strcmp(cmd, "wifi_forget"),
-       is_mode = !strcmp(cmd, "wifi_mode");
-  if (!is_join && !is_forget && !is_mode) { net__reply_err(src, "wifi", "unknown command"); return true; }
+       is_mode = !strcmp(cmd, "wifi_mode"), is_config = !strcmp(cmd, "wifi_config");
+  if (!is_join && !is_forget && !is_mode && !is_config) { net__reply_err(src, "wifi", "unknown command"); return true; }
   if (!trusted) {
     net__reply_err(src, cmd, "refused over USB: open Wi-Fi setup on the board, or use a paired phone");
     return true;
@@ -1078,6 +1282,15 @@ static inline bool net_host_line(const char* cmd, const char* line, uint8_t src)
     const char* why = NULL;
     if (!net__request_join(ssid, has_psk ? psk : NULL, mask, &why)) { net__reply_err(src, cmd, why); return true; }
     return true;   // wifi_status connecting / connected / failed follow from net_tick
+  }
+  if (is_config) {   // {"cmd":"wifi_config","adsb_km":10,"tile_km":3}: either or both, clamped
+    double v = 0;
+    bool any = false;
+    if (net_json_get_num(line, "adsb_km", &v)) { net_set_adsb_radius_km((uint8_t)(v < 1 ? 1 : v > 255 ? 255 : v)); any = true; }
+    if (net_json_get_num(line, "tile_km", &v)) { net_set_tile_radius_km((uint8_t)(v < 1 ? 1 : v > 255 ? 255 : v)); any = true; }
+    if (!any) { net__reply_err(src, cmd, "nothing to set"); return true; }
+    net__reply_status(mask);
+    return true;
   }
   if (is_forget) {
     if (!net_json_get_str(line, "ssid", ssid, sizeof(ssid)) || !net_forget(ssid)) {
@@ -1263,6 +1476,8 @@ static inline void net_esp_load(NetConfig* c) {
     c->mode = p.getUChar("mode", NET_MODE_SYNC);
     c->every_min = p.getUChar("every", NET_EVERY_MIN_DEFAULT);
     c->builtin_off = p.getUChar("nobuiltin", 0) != 0;
+    c->adsb_km = p.getUChar("adsb_km", NET_ADSB_KM_DEFAULT);
+    c->tile_km = p.getUChar("tile_km", NET_TILE_KM_DEFAULT);
     uint8_t n = p.getUChar("n", 0);
     if (n > NET_MAX_SAVED) n = NET_MAX_SAVED;
     c->n = 0;
@@ -1295,6 +1510,8 @@ static inline void net_esp_store(const NetConfig* c) {
   p.putUChar("mode", c->mode);
   p.putUChar("every", c->every_min);
   p.putUChar("nobuiltin", c->builtin_off ? 1 : 0);
+  p.putUChar("adsb_km", c->adsb_km);
+  p.putUChar("tile_km", c->tile_km);
   uint8_t k = 0;
   for (uint8_t i = 0; i < c->n && i < NET_MAX_SAVED; i++) {
     if (c->saved[i].builtin) continue;

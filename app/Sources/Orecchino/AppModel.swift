@@ -477,7 +477,8 @@ final class AppModel {
             TrafficDrone(id: Self.trafficId(trackKey: t.id), lat: t.coordinate?.latitude,
                          lon: t.coordinate?.longitude, altGeoM: t.altGeo, speedMps: t.speed,
                          headingDeg: t.heading,
-                         live: t.coordinate != nil && now.timeIntervalSince(t.lastSeen) <= Self.staleAfter)
+                         live: t.coordinate != nil && now.timeIntervalSince(t.lastSeen) <= Self.staleAfter,
+                         heightM: t.height)
         }
     }
 
@@ -490,6 +491,16 @@ final class AppModel {
         let lat = drones.map(\.latitude).reduce(0, +) / Double(drones.count)
         let lon = drones.map(\.longitude).reduce(0, +) / Double(drones.count)
         return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+    /// The ADS-B query's circle: this Mac and the set radius, stretched to
+    /// cover live drones that are far away (AdsbArea).
+    var adsbArea: AdsbArea? {
+        AdsbArea.make(mac: location.current,
+                      liveDrones: tracks.values.filter { !isStale($0) }.compactMap(\.coordinate))
+    }
+    /// Where the receiver's map is centred: this Mac, else the drones.
+    var mapCenter: (lat: Double, lon: Double)? {
+        referencePoint.map { ($0.latitude, $0.longitude) }
     }
     var referencePoint: CLLocationCoordinate2D? {
         Self.reference(mac: location.current,
@@ -512,7 +523,7 @@ final class AppModel {
     func trafficTick() {
         let nowMs = TrafficRules.nowMs(now)
         if showTraffic && !demoMode {
-            if servicesOn { traffic.pollIfDue(nowMs: nowMs, reference: referencePoint) }
+            if servicesOn { traffic.pollIfDue(nowMs: nowMs, area: adsbArea) }
         } else if !demoMode {
             traffic.pause()
         }
@@ -539,12 +550,44 @@ final class AppModel {
         mapFocus = MapFocus(serial: focusSerial, coords: coords)
     }
 
-    /// The drone and aircraft of a traffic alert, whichever are on the map.
+    /// What an alert's aircraft is measured from: its drone; for traffic
+    /// near the user (no drone), this Mac, else the drone nearest to it.
+    func anchor(of alert: TrafficAlert) -> CLLocationCoordinate2D? {
+        if alert.fromObserver, let m = location.current { return m }
+        if !alert.droneId.isEmpty { return track(trafficId: alert.droneId)?.coordinate }
+        if let m = location.current { return m }
+        guard let a = traffic.aircraft.first(where: { $0.hex == alert.hex }) else { return nil }
+        return tracks.values.filter { !isStale($0) }.compactMap(\.coordinate)
+            .min { TrafficRules.distanceM($0.latitude, $0.longitude, a.lat, a.lon)
+                 < TrafficRules.distanceM($1.latitude, $1.longitude, a.lat, a.lon) }
+    }
+
+    /// The anchor and aircraft of a traffic alert, whichever are known.
     func coordinates(of alert: TrafficAlert) -> [CLLocationCoordinate2D] {
         var out: [CLLocationCoordinate2D] = []
-        if !alert.droneId.isEmpty, let c = track(trafficId: alert.droneId)?.coordinate { out.append(c) }
+        if let c = anchor(of: alert) { out.append(c) }
         if let a = traffic.aircraft.first(where: { $0.hex == alert.hex }) { out.append(a.coordinate) }
         return out
+    }
+
+    /// Aircraft the map draws: only those in an alert (UAS first; ADS-B is
+    /// for conflicts with the drones, not a traffic display).
+    var alertedAircraft: [TrafficAircraft] {
+        guard showTraffic else { return [] }
+        let hexes = Set(traffic.result.alerts.map(\.hex))
+        return traffic.aircraft.filter { hexes.contains($0.hex) }
+    }
+
+    /// The most urgent alert naming this drone.
+    func trafficAlert(forTrack t: DroneTrack) -> TrafficAlert? {
+        guard showTraffic else { return nil }
+        let id = Self.trafficId(trackKey: t.id)
+        return traffic.result.alerts.first { $0.droneId == id }
+    }
+
+    /// Clicking an alert opens its drone (the aircraft's card when it has none).
+    func select(alert: TrafficAlert) {
+        if let t = track(trafficId: alert.droneId) { selection = t.id } else { selectedTraffic = alert.hex }
     }
 
     /// Sidebar list selection over drones and aircraft.
@@ -608,7 +651,7 @@ final class AppModel {
             traffic.resetPush()
         case "rid":
             ingestRid(msg, demo: demo)
-        case "ack", "fs_ok", "fs_err", "fs_f", "fs_ls_done":
+        case "ack", "fs_ok", "fs_err", "fs_f", "fs_ls_done", "fs_stat":
             tileSync.handle(msg)
         case "log", "log_done", "log_cleared":
             deviceLog.handle(msg)

@@ -72,6 +72,7 @@ final class TrafficNotifier {
         for a in due {
             let c = UNMutableNotificationContent()
             c.title = (simulated ? "SIMULATED: " : "") + Self.title(a)
+            c.subtitle = a.text
             c.body = Self.body(a, aircraft: aircraft.first { $0.hex == a.hex })
             c.threadIdentifier = "traffic"
             c.interruptionLevel = a.level == .warning ? .timeSensitive : .active
@@ -82,8 +83,12 @@ final class TrafficNotifier {
         }
     }
 
-    /// The rule's own words, exactly as every other surface shows them.
-    nonisolated static func title(_ a: TrafficAlert) -> String { a.text.isEmpty ? "TRAFFIC" : a.text }
+    /// What to do with the drone, first ("GIVE WAY: DESCEND AND LAND D9A03");
+    /// the rule's words go in the subtitle.
+    nonisolated static func title(_ a: TrafficAlert) -> String {
+        let t = trafficAction(a)
+        return t.isEmpty ? "TRAFFIC" : t
+    }
 
     /// Metres as whole feet with a comma every three digits ("2,650").
     nonisolated static func feet(_ m: Double) -> String {
@@ -93,26 +98,19 @@ final class TrafficNotifier {
         return (v < 0 ? "-" : "") + digits + out
     }
 
-    /// "B738 UAL123 · 2,650 ft · 1.1 km NE of the drone · reported 6 s ago"
+    /// The geometry, then the aircraft and the data age: "AIRCRAFT 90 M
+    /// ABOVE, 1.1 KM NE · B738 UAL123 · 2,650 ft · reported 6 s ago".
     nonisolated static func body(_ a: TrafficAlert, aircraft ac: TrafficAircraft?) -> String {
-        var parts: [String] = []
+        var parts = [trafficGeometry(a)]
         let name = [ac?.type ?? "", ac?.callsign.isEmpty == false ? ac!.callsign : a.hex.uppercased()]
             .filter { !$0.isEmpty }.joined(separator: " ")
         parts.append(name)
-        if let b = ac?.altBaroM {
+        if ac?.onGround == true {
+            parts.append("on the ground")
+        } else if let b = ac?.altBaroM {
             parts.append("\(feet(b)) ft")
         } else if let g = ac?.altGeomM {
             parts.append("\(feet(g)) ft geometric")
-        }
-        if let h = a.horizM {
-            let dir = a.bearingDeg.map { " " + TrafficRules.compass8($0) } ?? ""
-            parts.append("\(TrafficRules.kmText(h)) km\(dir) of \(a.kind.isPair ? "the drone" : "here")")
-        }
-        if a.kind.isPair {
-            parts.append(a.vertM.map { v in
-                let i = Int(floor(v + 0.5))
-                return i >= 0 ? "\(i) m above it" : "\(-i) m below it"
-            } ?? "height unknown")
         }
         parts.append("reported \(Int(floor(a.ageS + 0.5))) s ago")
         return parts.joined(separator: " · ")

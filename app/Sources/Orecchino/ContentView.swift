@@ -37,8 +37,15 @@ struct ContentView: View {
                 Menu {
                     Button("Match Log…") { model.deviceLog.isPresented = true }
                     Divider()
-                    Button("Sync Map Tiles to Receiver") { model.tileSync.start() }
+                    // Plan first (the board's storage decides how much fits),
+                    // then send what the plan shows.
+                    Button("Plan Map for Receiver…") { model.tileSync.start() }
+                        .disabled(model.tileSync.running || !model.serialStatus.isConnected)
                     if let l = model.tileSync.phase.label { Text(l) }
+                    if case .planned = model.tileSync.phase {
+                        Button("Send Map to Receiver") { model.tileSync.send() }
+                    }
+                    SettingsLink { Text("Map and ADS-B Settings…") }
                 } label: {
                     Label("Device", systemImage: "square.and.arrow.down.on.square")
                 }
@@ -149,14 +156,12 @@ struct SidebarView: View {
     var body: some View {
         @Bindable var model = model
         // Native list selection: arrow keys walk the list, clicks select,
-        // and the selection pill takes each drone's identity color. One
-        // selection over drones and aircraft (SidebarItem), so an aircraft's
-        // address never becomes the drone selection.
+        // and the selection pill takes each drone's identity color. The list
+        // is drones: ADS-B appears only as alerts about them, action first.
         let alerts = model.showTraffic ? model.traffic.result.alerts : []
         List(selection: $model.sidebarSelection) {
-            // Traffic alerts in the rules' words, above the drones (§8.5).
             if !alerts.isEmpty {
-                Section("Traffic alerts — \(alerts.count)") {
+                Section("ADS-B alerts — \(alerts.count)") {
                     ForEach(alerts) { al in
                         TrafficAlertRow(alert: al)
                             .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
@@ -174,19 +179,10 @@ struct SidebarView: View {
                 }
             }
 
-            if model.showTraffic && !model.traffic.aircraft.isEmpty {
-                Section("ADS-B aircraft — \(model.traffic.aircraft.count)") {
-                    ForEach(model.traffic.aircraft) { tc in
-                        TrafficRow(aircraft: tc, alert: model.traffic.alert(forHex: tc.hex))
-                            .tag(SidebarItem.traffic(tc.hex))
-                    }
-                }
-            }
         }
         .listStyle(.sidebar)
         .overlay {
-            if model.trackList.isEmpty && alerts.isEmpty
-                && (!model.showTraffic || model.traffic.aircraft.isEmpty) {
+            if model.trackList.isEmpty && alerts.isEmpty {
                 ReceiverEmptyState()
             }
         }
@@ -262,15 +258,21 @@ struct DroneRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .opacity(dim)
-                    if let first = alerts.first {
+                    if let ta = model.trafficAlert(forTrack: track) {
+                        TrafficDroneTag(alert: ta)
+                            .fixedSize()
+                            .layoutPriority(1)
+                    } else if let first = alerts.first {
                         AlertTag(alert: first)
                             .fixedSize()
                             .layoutPriority(1)
                     }
                 }
-                if alerts.count > 1 {
+                // With an ADS-B tag up front, every drone alert goes below it.
+                let rest = model.trafficAlert(forTrack: track) == nil ? Array(alerts.dropFirst()) : alerts
+                if !rest.isEmpty {
                     TagFlow(spacing: 4) {
-                        ForEach(alerts.dropFirst(), id: \.self) { a in
+                        ForEach(rest, id: \.self) { a in
                             AlertTag(alert: a).fixedSize()
                         }
                     }
@@ -662,17 +664,19 @@ struct MapPane: View {
                         }
                     }
                     if model.showTraffic {
-                        // Before the drones, so a drone is drawn above an aircraft.
-                        ForEach(model.traffic.aircraft) { tc in
+                        // Only aircraft in an alert, drawn before the drones so
+                        // a drone is on top; each joined to what it threatens.
+                        ForEach(model.alertedAircraft) { tc in
                             if let p = trafficProjection(tc) {
                                 MapPolyline(coordinates: [tc.coordinate, p])
                                     .stroke(trafficColor(model.traffic.alert(forHex: tc.hex)?.level).opacity(0.8),
                                             style: StrokeStyle(lineWidth: 1.5, dash: [4, 6]))
                             }
                         }
-                        // One bridge per drone-aircraft pair alert, with that pair's numbers.
-                        ForEach(model.traffic.result.alerts.filter { $0.kind.isPair }) { al in
-                            if let dc = model.track(trafficId: al.droneId)?.coordinate,
+                        // One bridge per alert, from its drone (or this Mac, for
+                        // traffic near the user), with that alert's numbers.
+                        ForEach(model.traffic.result.alerts) { al in
+                            if let dc = model.anchor(of: al),
                                let ac = model.traffic.aircraft.first(where: { $0.hex == al.hex }) {
                                 MapPolyline(coordinates: [dc, ac.coordinate])
                                     .stroke(trafficColor(al.level).opacity(0.35),
@@ -684,7 +688,7 @@ struct MapPane: View {
                                 }
                             }
                         }
-                        ForEach(model.traffic.aircraft) { tc in
+                        ForEach(model.alertedAircraft) { tc in
                             Annotation("", coordinate: tc.coordinate, anchor: .top) {
                                 TrafficMarker(aircraft: tc,
                                               alert: model.traffic.alert(forHex: tc.hex),
@@ -967,9 +971,10 @@ struct DroneDetailCard: View {
         let age = model.age(of: track)
         let tid = AppModel.trafficId(trackKey: track.id)
         let trafficAlerts = model.showTraffic
-            ? model.traffic.result.alerts.filter { $0.kind.isPair && $0.droneId == tid } : []
+            ? model.traffic.result.alerts.filter { $0.droneId == tid } : []
+        // Only while this drone is in an alert: the aircraft nearest it.
         let nearest: NearestTraffic? = {
-            guard model.showTraffic, let c = track.coordinate else { return nil }
+            guard !trafficAlerts.isEmpty, let c = track.coordinate else { return nil }
             return NearestTraffic.find(lat: c.latitude, lon: c.longitude, altGeoM: track.altGeo,
                                        speedMps: track.speed, headingDeg: track.heading,
                                        aircraft: model.traffic.aircraft,
@@ -977,7 +982,7 @@ struct DroneDetailCard: View {
         }()
         // Header (+ alert strips) stays put; everything else scrolls.
         let chrome: CGFloat = 24 + 22 + 8 + (track.isAlerting ? 52 : 0)
-            + CGFloat(trafficAlerts.count) * 46
+            + CGFloat(trafficAlerts.count) * 78
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle().fill(track.color).frame(width: 9, height: 9)
@@ -1014,11 +1019,9 @@ struct DroneDetailCard: View {
                 VStack(alignment: .leading, spacing: 10) {
                     VitalsGrid(track: track, age: age, range: model.range(to: track))
 
-                    if model.showTraffic {
+                    if let nearest {
                         KVSection(title: "Nearest traffic") {
-                            KVRow(name: "ADS-B", value: nearest?.text
-                                    ?? (track.coordinate == nil ? "needs the drone's position"
-                                        : model.traffic.result.summary),
+                            KVRow(name: "ADS-B", value: nearest.text,
                                   ink: trafficAlerts.first.map { trafficColor($0.level) },
                                   help: "Nearest aircraft reported by ADS-B: distance from the drone, "
                                       + "height above (+) or below (−) it on the same (WGS-84) "

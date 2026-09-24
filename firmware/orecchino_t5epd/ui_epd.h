@@ -1,8 +1,8 @@
 // T5 E-Paper console: a 960x540 tactical board you can read in full sun.
 //
 // Two boards, cycled with the button: the tactical table, and an offline map
-// on the same tiles the SenseCAP uses — CARTO's dark style inverted into
-// sixteen greys, which reads like a printed street map in daylight. The map
+// of Esri's World Dark Gray tiles (older CARTO PNGs still draw) re-toned
+// into sixteen greys, which reads like a printed street map in daylight. The map
 // frames you and every live contact and redraws only when they move.
 //
 // Table: the contact table — one row per aircraft, ranked danger / active /
@@ -14,10 +14,14 @@
 // routine changes, a clean GC16 every ten updates, on alert changes, and
 // at least every ten minutes.
 //
-// ADS-B traffic (firmware/common/traffic.h, docs/plans/mobile-app-and-t5-wifi.md
-// §8.3): aircraft are outlined diamonds with a 60 s time ghost on the plot,
-// map and side view; while a warning lasts the plot panel is a traffic card;
-// a new warning flashes the panel (GC16) and pulses the front light. SYSTEM
+// Remote ID first: drones are the only contacts. ADS-B (firmware/common/
+// traffic.h) is for conflicts only: an aircraft is drawn only while it is in
+// an alert (a drone-aircraft conflict, or low traffic in the drones'
+// airspace), as an outlined diamond with a 60 s time ghost and a dashed line
+// to its drone (or the board). Every alert leads with its action ("GIVE WAY:
+// DESCEND AND LAND D9A03") in the header and, while a warning lasts, on a
+// card in the plot panel; a new warning flashes the panel (GC16) and pulses
+// the front light. The footer and SYSTEM say whether the conflict watch runs. SYSTEM
 // holds the Wi-Fi section (§4.3): networks, an on-screen keyboard refreshed
 // in fast DU partials, join results in words.
 #pragma once
@@ -54,4 +58,7 @@ bool        txui_running();
 void        txui_set_running(bool on);
 bool        txui_emergency();
 void        txui_set_emergency(bool on);
+/// Slow: every path once every 5 s (a quiet bench); else the spec rate.
+bool        txui_slow();
+void        txui_set_slow(bool on);
 void        board_switch_mode(uint8_t mode);

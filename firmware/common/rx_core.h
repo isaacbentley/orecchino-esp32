@@ -985,6 +985,26 @@ void rx_log_flush() {
   if (save) log_write(img);
 }
 
+/// Clear the match log (the host's log_clear, the T5 SYSTEM screen, the
+/// T-Embed menu): the records go at once and NVS is rewritten now, not at
+/// the next timed save, and every transport hears {"type":"log_cleared"} so
+/// a connected app resets its sync cursor. Loop task only.
+void rx_log_clear_all() {
+  RX_LOCK(); log_clear(); RX_UNLOCK();
+  rx_log_flush();
+  host_print("{\"type\":\"log_cleared\"}\n");
+}
+/// For a screen: records held, and seconds since the oldest was last heard
+/// (UINT32_MAX when the clock is not set or there are none).
+void rx_log_stats(int* held, uint32_t* oldest_age_s) {
+  RX_LOCK();
+  *held = s_log_n;
+  uint32_t now_utc = log_utc(millis());
+  uint32_t last = s_log_n ? log_at(0)->last_utc : 0;
+  RX_UNLOCK();
+  *oldest_age_s = (now_utc && last && now_utc >= last) ? now_utc - last : UINT32_MAX;
+}
+
 // The last home survives a reboot, so a board that has neither a GPS fix nor
 // the app yet (the T5's Wi-Fi fetches, every receiver's TFR checks) still has
 // a centre. Saved on the first fix and after a move of more than 500 m, at
@@ -1086,8 +1106,7 @@ void handle_host_line(char* line, uint32_t now, HostSrc src = SRC_SERIAL) {
     return;
   }
   if (!strcmp(cmd, "log_clear")) {
-    RX_LOCK(); log_clear(); RX_UNLOCK();
-    host_print_to(src, "{\"type\":\"log_cleared\"}\n");
+    rx_log_clear_all();   // every connected app hears log_cleared, not only the one asking
     return;
   }
   if (!strcmp(cmd, "set_home")) {

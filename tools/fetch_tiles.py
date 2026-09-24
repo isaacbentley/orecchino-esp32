@@ -1,71 +1,179 @@
 #!/usr/bin/env python3
-"""Fetch a small offline raster tile set for the SenseCAP Indicator's map.
+"""Fetch an offline raster tile set for a board's map (the SenseCAP's
+bundled LittleFS image, or a copy to push from the Mac app).
 
-Default coverage: City of San Francisco + 1 mile buffer, zooms 11-14,
-CARTO dark_all basemap (© OpenStreetMap contributors, © CARTO).
-Output tree: <out>/tiles/{z}/{x}/{y}.png — packed into LittleFS by pack_fs.sh.
+The area is a circle around a centre, zooms 12-15, planned the way the
+firmware plans it (firmware/common/tile_plan.h): a tile counts if any part
+of it is inside the circle, the estimate is 12 KB a tile on flash, 1 MB of
+the partition stays free, and a plan that does not fit shrinks the zoom-15
+radius first, then zoom 14, in 250 m steps. The plan is printed before
+anything is fetched; after fetching, the real sizes are checked again.
+
+    tools/fetch_tiles.py [--lat 37.7749 --lon -122.4194] [--radius-km 3]
+                         [--fs-mb 5.875] [--out firmware/orecchino_sensecap/data]
+
+Basemap: Esri World Dark Gray Canvas (JPEG, no API key; attribution "Esri,
+HERE, Garmin, © OpenStreetMap contributors"; Esri's terms apply: free for
+basemap use, an ArcGIS account may be required for production use). CARTO
+dark_all now needs a key and answers placeholders without one.
+Output tree: <out>/tiles/{z}/{x}/{y}.jpg — packed into LittleFS by pack_fs.sh.
+Esri's URLs are z/y/x (row before column); the stored tree is z/x/y.
 """
+import argparse
 import math
 import os
-import sys
 import time
 import urllib.request
 
-# SF city limits + ~1 mile buffer
-BBOX = (37.690, -122.527, 37.836, -122.343)  # south, west, north, east
-# Zooms overridable: fetch_tiles.py [out_dir] [zmin] [zmax]
-ZOOMS = (range(int(sys.argv[2]), int(sys.argv[3]) + 1)
-         if len(sys.argv) > 3 else range(11, 15))
-URL = "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
-UA = "orecchino-esp32/0.3 (personal offline device map; one-time fetch)"
-OUT = sys.argv[1] if len(sys.argv) > 1 else "firmware/orecchino_sensecap/data"
-DELAY = 0.35  # seconds between requests — be polite to the free tile CDN
+ZMIN, ZMAX = 12, 15
+RESERVE = 1024 * 1024          # TILE_PLAN_RESERVE
+DEFAULT_BYTES = 12288          # TILE_PLAN_DEFAULT_BYTES
+STEP_M = 250.0                 # TILE_PLAN_STEP_M
+EARTH_R = 6371000.0
+BLOCK = 4096                   # LittleFS block: a file takes whole blocks
+SENSECAP_FS = 0x5E0000         # orecchino_sensecap/partitions.csv littlefs
+
+URL = ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+       "World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}")   # note: z/y/x
+UA = "orecchino-esp32/0.7 (personal offline device map; one-time fetch; <= 3 tiles/s)"
+DELAY = 0.35                   # seconds between requests: under 4 a second, as the boards
 
 
-def deg2tile(lat, lon, z):
+def is_jpeg(data):
+    """A real tile starts FF D8 FF; an error page or a placeholder does not."""
+    return data[:3] == b"\xff\xd8\xff"
+
+
+def tile_lon(x, z):
+    return x / 2 ** z * 360.0 - 180.0
+
+
+def tile_lat(y, z):
+    n = math.pi * (1.0 - 2.0 * y / 2 ** z)
+    return math.degrees(math.atan(math.sinh(n)))
+
+
+def tile_of(lat, lon, z):
     n = 2 ** z
-    x = int((lon + 180.0) / 360.0 * n)
     rad = math.radians(lat)
+    x = int((lon + 180.0) / 360.0 * n)
     y = int((1.0 - math.log(math.tan(rad) + 1 / math.cos(rad)) / math.pi) / 2.0 * n)
-    return x, y
+    return min(max(x, 0), n - 1), min(max(y, 0), n - 1)
 
 
-def tile_list():
-    out = []
-    for z in ZOOMS:
-        x0, y0 = deg2tile(BBOX[2], BBOX[1], z)  # north-west corner
-        x1, y1 = deg2tile(BBOX[0], BBOX[3], z)  # south-east corner
-        for x in range(min(x0, x1), max(x0, x1) + 1):
-            for y in range(min(y0, y1), max(y0, y1) + 1):
-                out.append((z, x, y))
-    return out
+def dist_m(lat1, lon1, lat2, lon2):
+    dlon = lon2 - lon1
+    if dlon > 180:
+        dlon -= 360
+    elif dlon < -180:
+        dlon += 360
+    dx = math.radians(dlon) * math.cos(math.radians((lat1 + lat2) / 2)) * EARTH_R
+    dy = math.radians(lat2 - lat1) * EARTH_R
+    return math.hypot(dx, dy)
+
+
+def in_circle(lat, lon, r, z, x, y):
+    """tile_in_circle: the tile's nearest point to the centre is within r."""
+    if r < 0:
+        return False
+    w, e = tile_lon(x, z), tile_lon(x + 1, z)
+    n, s = tile_lat(y, z), tile_lat(y + 1, z)
+    plat = min(max(lat, s), n)
+    plon = min(max(lon, w), e)
+    return dist_m(lat, lon, plat, plon) <= r
+
+
+def circle_tiles(lat, lon, r, z):
+    if r < 0:
+        return []
+    dlat = math.degrees(r / EARTH_R)
+    dlon = math.degrees(r / (EARTH_R * max(math.cos(math.radians(lat)), 0.02)))
+    x0, y0 = tile_of(min(lat + dlat, 85.0), lon - dlon, z)
+    x1, y1 = tile_of(max(lat - dlat, -85.0), lon + dlon, z)
+    return [(z, x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)
+            if in_circle(lat, lon, r, z, x, y)]
+
+
+def plan(lat, lon, want_m, fs_bytes, avg_bytes=DEFAULT_BYTES):
+    """tile_plan_make for an empty filesystem: per-zoom radii that fit."""
+    capacity = max(fs_bytes - RESERVE, 0)
+    radius = {z: want_m for z in range(ZMIN, ZMAX + 1)}
+
+    def tiles():
+        return [t for z in range(ZMIN, ZMAX + 1) for t in circle_tiles(lat, lon, radius[z], z)]
+
+    shrunk = False
+    for z in range(ZMAX, ZMIN - 1, -1):          # zoom 15 first, then 14, ...
+        while len(tiles()) * avg_bytes > capacity and radius[z] >= 0:
+            radius[z] = radius[z] - STEP_M if radius[z] > STEP_M else (0 if radius[z] > 0 else -1)
+            shrunk = True
+        if len(tiles()) * avg_bytes <= capacity:
+            break
+    return radius, tiles(), capacity, shrunk
+
+
+def describe(radius):
+    parts, z = [], ZMIN
+    while z <= ZMAX:
+        z1 = z
+        while z1 + 1 <= ZMAX and radius[z1 + 1] == radius[z]:
+            z1 += 1
+        if radius[z] >= 0:
+            zs = f"z{z}" if z == z1 else f"z{z}-{z1}"
+            parts.append(f"{radius[z] / 1000:g} km {zs}")
+        z = z1 + 1
+    return ", ".join(parts) or "nothing"
+
+
+def on_flash(size):
+    return (size + BLOCK - 1) // BLOCK * BLOCK
 
 
 def main():
-    tiles = tile_list()
-    print(f"{len(tiles)} tiles for z{ZOOMS[0]}-{ZOOMS[-1]}; worst-case fetch "
-          f"~{len(tiles) * DELAY / 60:.0f} min at the polite rate limit")
-    fetched = 0
-    size = 0
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--lat", type=float, default=37.7749)
+    ap.add_argument("--lon", type=float, default=-122.4194)
+    ap.add_argument("--radius-km", type=float, default=3.0)
+    ap.add_argument("--fs-mb", type=float, default=SENSECAP_FS / 1048576,
+                    help="LittleFS partition size (default: the SenseCAP's)")
+    ap.add_argument("--out", default="firmware/orecchino_sensecap/data")
+    ap.add_argument("--dry-run", action="store_true", help="print the plan only")
+    a = ap.parse_args()
+
+    fs_bytes = int(a.fs_mb * 1048576)
+    radius, tiles, capacity, shrunk = plan(a.lat, a.lon, a.radius_km * 1000, fs_bytes)
+    est = len(tiles) * DEFAULT_BYTES
+    print(f"Map: {describe(radius)}; {len(tiles)} tiles, about {est / 1e6:.1f} MB "
+          f"of {capacity / 1e6:.1f} MB usable"
+          + (" (shrunk to fit)" if shrunk else ""))
+    if a.dry_run:
+        return
+
+    size = flash = fetched = 0
     for i, (z, x, y) in enumerate(tiles):
-        path = os.path.join(OUT, "tiles", str(z), str(x), f"{y}.png")
-        if os.path.exists(path):
-            size += os.path.getsize(path)
-            continue
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        req = urllib.request.Request(
-            URL.format(z=z, x=x, y=y), headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = r.read()
-        with open(path, "wb") as f:
-            f.write(data)
-        fetched += 1
-        size += len(data)
-        if fetched % 25 == 0:
-            print(f"  {i + 1}/{len(tiles)} checked, {fetched} fetched, "
-                  f"{size/1e6:.1f} MB")
-        time.sleep(DELAY)
-    print(f"tiles: {len(tiles)} ({fetched} newly fetched), {size/1e6:.2f} MB")
+        path = os.path.join(a.out, "tiles", str(z), str(x), f"{y}.jpg")
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            req = urllib.request.Request(URL.format(z=z, x=x, y=y), headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read()
+            if not is_jpeg(data):
+                raise SystemExit(f"z{z} x{x} y{y}: not a JPEG tile ({len(data)} bytes); stopping")
+            tmp = path + ".part"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+            fetched += 1
+            time.sleep(DELAY)
+        n = os.path.getsize(path)
+        size += n
+        flash += on_flash(n)
+        if fetched and fetched % 25 == 0:
+            print(f"  {i + 1}/{len(tiles)} checked, {fetched} fetched, {size / 1e6:.1f} MB")
+    print(f"tiles: {len(tiles)} ({fetched} newly fetched), {size / 1e6:.2f} MB, "
+          f"about {flash / 1e6:.2f} MB on flash of {capacity / 1e6:.1f} MB usable")
+    if flash > capacity:
+        raise SystemExit("too big for the partition: use a smaller --radius-km")
 
 
 if __name__ == "__main__":

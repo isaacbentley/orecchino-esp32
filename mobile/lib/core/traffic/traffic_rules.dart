@@ -1,4 +1,5 @@
-// traffic_rules.dart — ADS-B traffic alerts: manned aircraft near the drones.
+// traffic_rules.dart — ADS-B conflict watch: manned aircraft near the drones,
+// with a resolution advisory for each (14 CFR 107.37(a): the drone gives way).
 //
 // A line-for-line port of firmware/common/traffic.h (the reference; its
 // header comment holds the rules, every choice made where plan §8 left room,
@@ -8,7 +9,8 @@
 //
 // Unknown values are null here (NaN in C). Times are milliseconds on one
 // clock; use TrafficRules.nowMs() for wall-clock milliseconds.
-// Words: never "collision", "conflict", "safe", "clear" or "TCAS".
+// Words: never "collision", "safe", "clear" (other than the instruction
+// "KEEP CLEAR OF"), "conflict resolved" or "TCAS".
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -17,7 +19,6 @@ import 'dart:math' as math;
 
 enum TrafficLevel implements Comparable<TrafficLevel> {
   none,
-  advisory,
   caution,
   warning;
 
@@ -29,22 +30,24 @@ enum TrafficLevel implements Comparable<TrafficLevel> {
   bool operator <=(TrafficLevel other) => index <= other.index;
 }
 
+/// Drone-aircraft pairs, and LOW: an airborne aircraft in UAS airspace (one
+/// per aircraft). No emergency-squawk rule.
 enum TrafficKind {
   near,
   converging,
-  low,
-  emergency;
+  low;
 
-  TrafficLevel get level => switch (this) {
-        TrafficKind.near || TrafficKind.converging => TrafficLevel.warning,
-        TrafficKind.low => TrafficLevel.caution,
-        TrafficKind.emergency => TrafficLevel.advisory,
-      };
-  bool get isPair => this == TrafficKind.near || this == TrafficKind.converging;
+  TrafficLevel get level => this == TrafficKind.low ? TrafficLevel.caution : TrafficLevel.warning;
+  bool get isPair => this != TrafficKind.low;
 
-  /// A pair with an aircraft on the ground is a caution, not a warning.
-  TrafficLevel levelFor({required bool onGround}) => isPair && onGround ? TrafficLevel.caution : level;
+  /// A pair with an aircraft on the ground is a caution, not a warning; LOW is a caution.
+  TrafficLevel levelFor({required bool onGround}) =>
+      this == TrafficKind.low || onGround ? TrafficLevel.caution : TrafficLevel.warning;
 }
+
+/// Where the aircraft is relative to the drone (current vertical; level =
+/// within 30 m).
+enum TrafficVertical { unknown, above, level, below }
 
 /// One aircraft as reported by ADS-B. [squawk] is the four octal digits read
 /// as a decimal number (7700), 0 when unknown.
@@ -94,6 +97,7 @@ class TrafficDrone {
   final double? speedMps;
   final double? headingDeg;
   final bool live; // heard within 60 s with a position
+  final double? heightM; // height above take-off/ground (LOW's ground)
 
   const TrafficDrone({
     required this.id,
@@ -103,6 +107,7 @@ class TrafficDrone {
     this.speedMps,
     this.headingDeg,
     required this.live,
+    this.heightM,
   });
 }
 
@@ -120,27 +125,33 @@ class TrafficAlert {
   final TrafficKind kind;
   final bool held; // kept by hysteresis; the raise condition is false now
   final bool heightUnknown;
-  final bool approx;
   final bool onGround; // the aircraft is reported on the ground
   final int? droneIndex; // into this evaluation's drones
   final int? acIndex; // into this evaluation's aircraft (null: gone)
-  final String droneId; // '' for LOW / EMERGENCY
+  final String droneId;
   final String hex;
   final String callsign;
-  final double? horizM; // drone-aircraft (pairs) or observer-aircraft
-  final double? vertM; // aircraft minus drone (pairs), minus elevation (LOW)
-  final double? bearingDeg; // from the drone (pairs) / observer to the aircraft
+  final double? horizM; // drone to aircraft (always set for a pair)
+  final double? vertM; // aircraft minus drone
+  final double? bearingDeg; // from the drone to the aircraft (always set)
   final double? cpaS;
   final double? cpaM;
   final double ageS; // aircraft position age
-  final String text;
+  final String text; // 'TRAFFIC NEAR DRONE D9A03'
+  final TrafficVertical vertRel;
+  final String action; // 'GIVE WAY: DESCEND AND LAND D9A03'
+  final String resolution; // action + '; ' + the geometry
+  final bool approx; // LOW: barometric aircraft height used
+  final bool fromObserver; // LOW: horizM/bearingDeg from the observer (droneId '')
+
+  /// True above, false level or below, null unknown.
+  bool? get aircraftAbove => vertRel == TrafficVertical.unknown ? null : vertRel == TrafficVertical.above;
 
   const TrafficAlert({
     required this.level,
     required this.kind,
     this.held = false,
     this.heightUnknown = false,
-    this.approx = false,
     this.onGround = false,
     this.droneIndex,
     this.acIndex,
@@ -154,6 +165,11 @@ class TrafficAlert {
     this.cpaM,
     required this.ageS,
     this.text = '',
+    this.vertRel = TrafficVertical.unknown,
+    this.action = '',
+    this.resolution = '',
+    this.approx = false,
+    this.fromObserver = false,
   });
 
   String get id => '${kind.name}|$droneId|$hex';
@@ -166,13 +182,15 @@ class TrafficAlert {
     double? ageS,
     int? Function()? droneIndex,
     int? Function()? acIndex,
+    TrafficVertical? vertRel,
+    String? action,
+    String? resolution,
   }) =>
       TrafficAlert(
         level: level ?? this.level,
         kind: kind ?? this.kind,
         held: held ?? this.held,
         heightUnknown: heightUnknown,
-        approx: approx,
         onGround: onGround,
         droneIndex: droneIndex != null ? droneIndex() : this.droneIndex,
         acIndex: acIndex != null ? acIndex() : this.acIndex,
@@ -186,6 +204,11 @@ class TrafficAlert {
         cpaM: cpaM,
         ageS: ageS ?? this.ageS,
         text: text ?? this.text,
+        vertRel: vertRel ?? this.vertRel,
+        action: action ?? this.action,
+        resolution: resolution ?? this.resolution,
+        approx: approx,
+        fromObserver: fromObserver,
       );
 }
 
@@ -208,17 +231,13 @@ class TrafficResult {
   final bool haveData;
   final bool stale;
   final double? dataAgeS;
-  final int nearCount; // fresh airborne aircraft within 3 km of the observer
-  final int groundCount; // fresh aircraft on the ground within 3 km (not in nearCount)
-  final int aircraftCount; // aircraft present (<= 60 s)
+  final int aircraftCount; // aircraft present (<= 60 s); never shown as a count of threats
 
   const TrafficResult({
     this.alerts = const [],
     this.haveData = false,
     this.stale = false,
     this.dataAgeS,
-    this.nearCount = 0,
-    this.groundCount = 0,
     this.aircraftCount = 0,
   });
 
@@ -246,8 +265,11 @@ class TrafficRules {
   static const cpaMaxS = 60.0, cpaMissM = 500.0;
   static const holdHM = 1300.0, holdVM = 200.0;
   static const clearMs = 20000;
-  static const lowRM = 3000.0, lowAboveM = 460.0;
-  static const emergRM = 30000.0, keepRM = 30000.0, countRM = 3000.0;
+  static const levelBandM = 30.0, keepRM = 30000.0;
+  static const lowRM = 3000.0, lowAglM = 460.0;
+
+  /// LOW with the ground unknown: only aircraft below 3,500 m MSL (see traffic.h).
+  static const lowUnknownGroundMaxM = 3500.0;
   static const earthRM = 6371000.0;
   static const deg = math.pi / 180.0;
   static const ftToM = 0.3048;
@@ -352,21 +374,93 @@ class TrafficRules {
     return h < 0 ? -1 : (h > 0 ? 1 : 0);
   }
 
-  static String _pairText(TrafficAlert a, TrafficKind kind) {
-    final id = droneLabel(a.droneId);
-    final hu = a.onGround ? ', AIRCRAFT ON GROUND' : (a.heightUnknown ? ', HEIGHT UNKNOWN' : '');
-    if (kind == TrafficKind.near) return 'TRAFFIC NEAR DRONE $id$hu';
-    final t = a.cpaS;
-    if (t == null) return 'TRAFFIC CONVERGING WITH $id$hu';
-    return 'TRAFFIC CONVERGING WITH $id, ${(t + 0.5).floor()} S$hu';
+  /// The aircraft above / level / below the drone, from the current vertical.
+  static TrafficVertical vertRel(double? v) {
+    if (v == null || v.isNaN) return TrafficVertical.unknown;
+    if (v > levelBandM) return TrafficVertical.above;
+    if (v < -levelBandM) return TrafficVertical.below;
+    return TrafficVertical.level;
   }
 
-  /// Raise or refresh (mirrors traffic_apply).
-  static void _apply(TrafficState s, bool pair, TrafficAlert cand, bool raw, bool hold, int seenMs, int nowMs) {
+  /// The words, the action and the resolution for a pair (traffic_pair_words).
+  static TrafficAlert _pairWords(TrafficAlert a, TrafficKind kind) {
+    final id = droneLabel(a.droneId);
+    final hu = a.onGround ? ', AIRCRAFT ON GROUND' : (a.heightUnknown ? ', HEIGHT UNKNOWN' : '');
+    final t = a.cpaS;
+    final String text;
+    if (kind == TrafficKind.near) {
+      text = 'TRAFFIC NEAR DRONE $id$hu';
+    } else if (t == null) {
+      text = 'TRAFFIC CONVERGING WITH $id$hu';
+    } else {
+      text = 'TRAFFIC CONVERGING WITH $id, ${(t + 0.5).floor()} S$hu';
+    }
+    final vr = vertRel(a.vertM);
+    final brg = a.bearingDeg ?? 0.0;
+    final String action;
+    if (a.onGround) {
+      action = 'KEEP CLEAR OF AIRCRAFT ON GROUND';
+    } else if (vr == TrafficVertical.below) {
+      action = 'GIVE WAY: MOVE ${compass8((brg + 180.0) % 360.0)}, THEN LAND $id';
+    } else {
+      action = 'GIVE WAY: DESCEND AND LAND $id';
+    }
+    final v = a.vertM == null ? 0 : (a.vertM!.abs() + 0.5).floor();
+    final String vert;
+    if (a.onGround) {
+      vert = 'AIRCRAFT ON GROUND';
+    } else {
+      vert = switch (vr) {
+        TrafficVertical.above => 'AIRCRAFT $v M ABOVE',
+        TrafficVertical.below => 'AIRCRAFT $v M BELOW',
+        TrafficVertical.level => 'AIRCRAFT LEVEL WITHIN 30 M',
+        TrafficVertical.unknown => 'AIRCRAFT HEIGHT UNKNOWN',
+      };
+    }
+    final h = a.horizM ?? 0.0;
+    final hz = h < 1000.0 ? '${(h / 10.0 + 0.5).floor() * 10} M' : '${kmText(h)} KM';
+    final cpa = t == null ? '' : ', CLOSEST IN ${(t + 0.5).floor()} S';
+    return a.copyWith(text: text, vertRel: vr, action: action, resolution: '$action; $vert, $hz ${compass8(brg)}$cpa');
+  }
+
+  /// '800 M' to the nearest 10 m under 1 km, else '2.4 KM'.
+  static String distText(double m) => m < 1000.0 ? '${(m / 10.0 + 0.5).floor() * 10} M' : '${kmText(m)} KM';
+
+  /// LOW's words from its numbers (traffic_low_words).
+  static TrafficAlert _lowWords(TrafficAlert a) {
+    final dist = distText(a.horizM ?? 0.0);
+    final brg = compass8(a.bearingDeg ?? 0.0);
+    final suffix =
+        a.onGround ? ', AIRCRAFT ON GROUND' : (a.heightUnknown ? ', HEIGHT UNKNOWN' : (a.approx ? ', APPROX.' : ''));
+    final v = a.vertM == null ? 0 : (a.vertM! + 0.5).floor();
+    final ab = a.approx ? 'ABOUT ' : '';
+    final String vert;
+    if (a.onGround) {
+      vert = 'AIRCRAFT ON GROUND';
+    } else if (a.heightUnknown) {
+      vert = 'AIRCRAFT HEIGHT UNKNOWN';
+    } else if (v <= 0) {
+      vert = 'AIRCRAFT NEAR GROUND LEVEL'; // "near" is the approximation
+    } else {
+      vert = 'AIRCRAFT $ab$v M ABOVE GROUND';
+    }
+    const action = 'BE READY TO LAND DRONES';
+    return a.copyWith(
+      text: 'LOW TRAFFIC $brg $dist$suffix',
+      vertRel: a.vertM == null ? TrafficVertical.unknown : TrafficVertical.above,
+      action: action,
+      resolution: '$action; $vert, $dist $brg',
+    );
+  }
+
+  /// Raise or refresh an alert (mirrors traffic_apply): a pair keyed by
+  /// drone and aircraft, LOW by the aircraft alone.
+  static void _apply(TrafficState s, TrafficAlert cand, bool raw, bool hold, int seenMs, int nowMs) {
+    final low = cand.kind == TrafficKind.low;
     _Entry? e;
     for (final x in s._entries) {
       if (x.a.hex != cand.hex) continue;
-      if (pair ? (x.a.kind.isPair && x.a.droneId == cand.droneId) : x.a.kind == cand.kind) {
+      if (low ? x.a.kind == TrafficKind.low : (x.a.kind != TrafficKind.low && x.a.droneId == cand.droneId)) {
         e = x;
         break;
       }
@@ -374,9 +468,11 @@ class TrafficRules {
     var kind = cand.kind;
     if (e != null) {
       final old = e.a.kind;
-      if (!raw) {
+      if (low) {
+        kind = TrafficKind.low;
+      } else if (!raw) {
         kind = old;
-      } else if (pair && old == TrafficKind.near && hold) {
+      } else if (old == TrafficKind.near && hold) {
         kind = TrafficKind.near;
       }
     } else {
@@ -394,9 +490,8 @@ class TrafficRules {
       }
       e = fresh;
     }
-    var a = cand.copyWith(kind: kind, level: kind.levelFor(onGround: cand.onGround), held: !raw);
-    if (pair) a = a.copyWith(text: _pairText(a, kind));
-    e.a = a;
+    final a = cand.copyWith(kind: kind, level: kind.levelFor(onGround: cand.onGround), held: !raw);
+    e.a = low ? _lowWords(a) : _pairWords(a, kind);
     e.visited = true;
     e.seenMs = seenMs;
     if (raw || hold) {
@@ -410,55 +505,29 @@ class TrafficRules {
   static double? _opt(double v) => v.isNaN ? null : v;
 
   /// The rule function (traffic_evaluate). dataMs null: no ADS-B source.
+  /// [observer] only feeds LOW.
   static TrafficResult evaluate({
     required List<TrafficDrone> drones,
     required List<TrafficAircraft> aircraft,
-    required TrafficObserver observer,
+    TrafficObserver observer = TrafficObserver.unknown,
     required int? dataMs,
     required int nowMs,
     required TrafficState state,
   }) {
     final ac = aircraft;
-    final obs = observer;
     final st = state;
     final haveData = dataMs != null;
     final dataAge = dataMs != null ? ageS(dataMs, nowMs) : double.nan;
     final stale = haveData && !(dataAge <= staleS);
     final canRaise = haveData && !stale;
-    final obsPos = _known(obs.lat) && _known(obs.lon);
-    final obsElev = _altKnown(obs.elevM);
-    final olat = obs.lat ?? double.nan, olon = obs.lon ?? double.nan;
 
     for (final e in st._entries) {
       e.visited = false;
     }
 
     bool present(TrafficAircraft a) => ageS(a.seenMs, nowMs) <= presentS && a.lat.isFinite && a.lon.isFinite;
+    final aircraftCount = ac.where(present).length;
 
-    var aircraftCount = 0, nearCount = 0, groundCount = 0;
-    for (final a in ac) {
-      if (!present(a)) continue;
-      aircraftCount++;
-      if (!(ageS(a.seenMs, nowMs) < freshS)) continue;
-      var near = false;
-      if (obsPos) {
-        near = distanceM(olat, olon, a.lat, a.lon) <= countRM;
-      } else {
-        for (final d in drones) {
-          if (near) break;
-          if (_known(d.lat) && _known(d.lon)) near = distanceM(d.lat!, d.lon!, a.lat, a.lon) <= countRM;
-        }
-      }
-      if (near) {
-        if (a.onGround) {
-          groundCount++;
-        } else {
-          nearCount++;
-        }
-      }
-    }
-
-    // Pairs.
     for (var i = 0; i < drones.length; i++) {
       final d = drones[i];
       if (!_known(d.lat) || !_known(d.lon)) continue;
@@ -509,95 +578,97 @@ class TrafficRules {
           cpaM: _opt(cpaM),
           ageS: age,
         );
-        _apply(st, true, c, nearRaw || convRaw, hold, a.seenMs, nowMs);
+        _apply(st, c, nearRaw || convRaw, hold, a.seenMs, nowMs);
       }
     }
 
-    // Low traffic near the observer.
-    if (obsPos) {
-      for (var j = 0; j < ac.length; j++) {
-        final a = ac[j];
-        if (!present(a)) continue;
-        final age = ageS(a.seenMs, nowMs);
-        final o = _offset(olat, olon, a.lat, a.lon);
-        final horiz = math.sqrt(o.dx * o.dx + o.dy * o.dy);
-        final brg = _bearing(o.dx, o.dy);
-        var h = double.nan;
-        var approx = !obsElev;
-        if (_altKnown(a.altGeomM)) {
-          h = a.altGeomM!;
-        } else if (_altKnown(a.altBaroM)) {
-          h = a.altBaroM!;
-          approx = true;
+    // LOW: airborne aircraft in UAS airspace.
+    final obs = observer;
+    final obsPos = _known(obs.lat) && _known(obs.lon);
+    var ground = double.nan;
+    if (_altKnown(obs.elevM)) {
+      ground = obs.elevM!;
+    } else {
+      var lowest = double.nan;
+      for (final d in drones) {
+        if (!d.live || !_known(d.lat) || !_known(d.lon)) continue;
+        if (!_altKnown(d.altGeoM) || !_known(d.heightM)) continue;
+        if (lowest.isNaN || d.altGeoM! < lowest) {
+          lowest = d.altGeoM!;
+          ground = d.altGeoM! - d.heightM!;
         }
-        final thr = (obsElev ? obs.elevM! : 0.0) + lowAboveM;
-        final vert = (!h.isNaN && obsElev) ? h - obs.elevM! : double.nan;
-        final hu = h.isNaN;
-        final ap = approx && !hu;
-        final cond = !a.onGround && horiz <= lowRM && (h.isNaN || h < thr);
-        final text = 'LOW TRAFFIC ${compass8(brg)} ${kmText(horiz)} KM${a.onGround ? ', AIRCRAFT ON GROUND' : (hu ? ', HEIGHT UNKNOWN' : (ap ? ', APPROX.' : ''))}';
-        final c = TrafficAlert(
-          level: TrafficLevel.caution,
-          kind: TrafficKind.low,
-          heightUnknown: hu,
-          approx: ap,
-          onGround: a.onGround,
-          acIndex: j,
-          hex: a.hex,
-          callsign: a.callsign,
-          horizM: horiz,
-          vertM: _opt(vert),
-          bearingDeg: brg,
-          ageS: age,
-          text: text,
-        );
-        _apply(st, false, c, canRaise && age < freshS && cond, cond, a.seenMs, nowMs);
       }
     }
-
-    // Emergencies.
     for (var j = 0; j < ac.length; j++) {
       final a = ac[j];
       if (!present(a)) continue;
       final age = ageS(a.seenMs, nowMs);
-      final String? word = a.squawk == 7500
-          ? 'HIJACK'
-          : a.squawk == 7600
-              ? 'RADIO FAILURE'
-              : (a.squawk == 7700 || a.emergency)
-                  ? 'EMERGENCY'
-                  : null;
-      if (word == null) continue;
-      var horiz = double.nan, brg = double.nan;
+      var dx = double.nan, dy = double.nan, dist = double.nan;
+      int? anchor;
+      var fromObs = false, within = false;
       if (obsPos) {
-        final o = _offset(olat, olon, a.lat, a.lon);
-        horiz = math.sqrt(o.dx * o.dx + o.dy * o.dy);
-        brg = _bearing(o.dx, o.dy);
-      } else {
-        for (final d in drones) {
-          if (!_known(d.lat) || !_known(d.lon)) continue;
+        final o = _offset(obs.lat!, obs.lon!, a.lat, a.lon);
+        dx = o.dx;
+        dy = o.dy;
+        dist = math.sqrt(dx * dx + dy * dy);
+        fromObs = true;
+        within = dist <= lowRM;
+      }
+      if (!within) {
+        int? bi;
+        var bd = double.nan, bx = 0.0, by = 0.0;
+        for (var i = 0; i < drones.length; i++) {
+          final d = drones[i];
+          if (!d.live || !_known(d.lat) || !_known(d.lon)) continue;
           final o = _offset(d.lat!, d.lon!, a.lat, a.lon);
           final h = math.sqrt(o.dx * o.dx + o.dy * o.dy);
-          if (horiz.isNaN || h < horiz) {
-            horiz = h;
-            brg = _bearing(o.dx, o.dy);
+          if (bi == null || h < bd) {
+            bi = i;
+            bd = h;
+            bx = o.dx;
+            by = o.dy;
           }
         }
+        if (bi != null && (bd <= lowRM || !fromObs)) {
+          anchor = bi;
+          dist = bd;
+          dx = bx;
+          dy = by;
+          fromObs = false;
+          within = bd <= lowRM;
+        }
       }
-      final cond = horiz.isNaN || horiz <= emergRM;
+      if (!fromObs && anchor == null) continue;
+      var h = double.nan;
+      var approx = false;
+      if (_altKnown(a.altGeomM)) {
+        h = a.altGeomM!;
+      } else if (_altKnown(a.altBaroM)) {
+        h = a.altBaroM!;
+        approx = true;
+      }
+      final vert = (!h.isNaN && !ground.isNaN) ? h - ground : double.nan;
+      if (vert.isNaN) approx = false;
       final c = TrafficAlert(
-        level: TrafficLevel.advisory,
-        kind: TrafficKind.emergency,
+        level: TrafficLevel.caution,
+        kind: TrafficKind.low,
+        heightUnknown: vert.isNaN,
         onGround: a.onGround,
+        droneIndex: anchor,
         acIndex: j,
+        droneId: anchor == null ? '' : drones[anchor].id,
         hex: a.hex,
         callsign: a.callsign,
-        horizM: _opt(horiz),
-        bearingDeg: _opt(brg),
+        horizM: dist,
+        vertM: _opt(vert),
+        bearingDeg: _bearing(dx, dy),
         ageS: age,
-        text: '$word ${a.name}',
+        approx: approx,
+        fromObserver: fromObs,
       );
-      _apply(st, false, c, canRaise && age < freshS && cond, cond, a.seenMs, nowMs);
+      final low = !vert.isNaN ? vert < lowAglM : (h.isNaN || !ground.isNaN || h < lowUnknownGroundMaxM);
+      final cond = !a.onGround && within && low;
+      _apply(st, c, canRaise && age < freshS && cond, cond, a.seenMs, nowMs);
     }
 
     // Entries not seen are out of hold; expire after 20 s out.
@@ -613,40 +684,44 @@ class TrafficRules {
       }
       if (e.out && nowMs - e.outSinceMs >= clearMs) continue;
       kept.add(e);
-      int? di;
-      if (e.a.droneId.isNotEmpty) {
-        final k = drones.indexWhere((d) => d.id == e.a.droneId);
-        di = k < 0 ? null : k;
-      }
+      final di = e.a.droneId.isEmpty ? -1 : drones.indexWhere((d) => d.id == e.a.droneId);
       final ai = ac.indexWhere((x) => x.hex == e.a.hex && ageS(x.seenMs, nowMs) <= presentS);
-      alerts.add(e.a.copyWith(ageS: ageS(e.seenMs, nowMs), droneIndex: () => di, acIndex: () => ai < 0 ? null : ai));
+      alerts.add(e.a.copyWith(
+          ageS: ageS(e.seenMs, nowMs), droneIndex: () => di < 0 ? null : di, acIndex: () => ai < 0 ? null : ai));
     }
     st._entries
       ..clear()
       ..addAll(kept);
+    // A warning for an aircraft supersedes its LOW (kept, not shown).
+    final warned = {
+      for (final x in alerts)
+        if (x.kind != TrafficKind.low && x.level == TrafficLevel.warning) x.hex
+    };
+    alerts.removeWhere((x) => x.kind == TrafficKind.low && warned.contains(x.hex));
     alerts.sort(_cmp);
     return TrafficResult(
       alerts: alerts,
       haveData: haveData,
       stale: stale,
       dataAgeS: haveData ? dataAge : null,
-      nearCount: nearCount,
-      groundCount: groundCount,
       aircraftCount: aircraftCount,
     );
   }
 
-  /// One status line for every surface; never claims absence of traffic.
+  /// The conflict watch status, the one status line for every surface; it
+  /// never counts aircraft and never claims the airspace is empty.
   static String summary(TrafficResult r) {
-    if (!r.haveData) return 'no ADS-B source';
+    if (!r.haveData) return 'CONFLICT WATCH OFF: no ADS-B source';
     final age = r.dataAgeS;
     if (age == null) return 'TRAFFIC DATA STALE, data age unknown';
     final a = (age + 0.5).floor();
     if (r.stale) return 'TRAFFIC DATA STALE, data $a s old';
-    if (r.nearCount == 0) {
-      return 'no ${r.groundCount > 0 ? 'airborne ' : ''}ADS-B traffic reported within 3 km, data $a s old';
-    }
-    return '${r.nearCount} airborne aircraft within 3 km, data $a s old';
+    final n = r.alerts.length;
+    if (n == 0) return 'conflict watch on, no ADS-B conflicts, data $a s old';
+    final low = r.alerts.where((x) => x.kind == TrafficKind.low).length, conf = n - low;
+    final l = low > 0 ? '$low low aircraft, ' : '';
+    final c = conf > 0 ? '$conf ADS-B conflict${conf == 1 ? '' : 's'}, ' : '';
+    return 'conflict watch on, $l${c}data $a s old';
   }
 }
 

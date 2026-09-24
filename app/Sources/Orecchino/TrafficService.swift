@@ -65,8 +65,11 @@ public enum AdsbLol {
     /// Overridable with `defaults write dev.bentley.orecchino adsbURL <template>`
     /// ({lat} {lon} {radius} are substituted), plan §7 "keep it configurable".
     public static let defaultTemplate = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius}"
-    /// 17 NM = 31.5 km, just over the 30 km kept (TrafficRules.keepRM).
-    public static let radiusNM = 17
+    /// 6 NM = 11.1 km, covering the default 10 km area (AdsbArea).
+    public static let radiusNM = 6
+
+    /// A radius in metres as whole nautical miles, rounded up (>= 1).
+    public static func nm(forM m: Double) -> Int { max(1, Int(ceil(m / 1852.0 - 1e-9))) }
 
     public static var template: String {
         let t = UserDefaults.standard.string(forKey: "adsbURL") ?? ""
@@ -120,6 +123,58 @@ public enum AdsbLol {
             if let ac = TrafficWire.aircraft(from: w, nowMs: receivedMs) { out.append(ac) }
         }
         return out
+    }
+}
+
+// MARK: - Where to look
+
+/// The circle the ADS-B query covers (plan §8.5, conflict watch): this Mac
+/// and the user's radius (5-30 km, 10 by default); when a live drone is more
+/// than 3 km from the Mac, the centre moves and the radius grows so every
+/// live drone has at least 9 km around it covered, up to 30 km. Aircraft
+/// parsed beyond the radius are dropped.
+public struct AdsbArea: Equatable, Sendable {
+    public var lat: Double
+    public var lon: Double
+    public var radiusM: Double
+    public var radiusNM: Int { AdsbLol.nm(forM: radiusM) }
+
+    public static let radiusKey = "adsbRadiusKm"
+    public static let defaultKm = 10.0, minKm = 5.0, maxKm = 30.0
+    public static let droneFarM = 3000.0, droneCoverM = 9000.0
+
+    /// The user's setting, clamped to 5-30 km.
+    public static var settingKm: Double {
+        let v = UserDefaults.standard.double(forKey: radiusKey)
+        return v > 0 ? min(max(v, minKm), maxKm) : defaultKm
+    }
+
+    public static func make(mac: CLLocationCoordinate2D?, liveDrones: [CLLocationCoordinate2D],
+                            baseKm: Double = settingKm) -> AdsbArea? {
+        let base = min(max(baseKm, minKm), maxKm) * 1000
+        let cap = maxKm * 1000
+        if let m = mac, !liveDrones.contains(where: {
+            TrafficRules.distanceM(m.latitude, m.longitude, $0.latitude, $0.longitude) > droneFarM }) {
+            return AdsbArea(lat: m.latitude, lon: m.longitude, radiusM: base)
+        }
+        // Centre: the middle of the box around the Mac (when known) and the
+        // live drones, in local metres; radius: each drone plus 9 km.
+        let pts = (mac.map { [$0] } ?? []) + liveDrones
+        guard let o = pts.first else { return nil }
+        var minX = 0.0, maxX = 0.0, minY = 0.0, maxY = 0.0
+        for p in pts {
+            let d = TrafficRules.offsetM(o.latitude, o.longitude, p.latitude, p.longitude)
+            minX = min(minX, d.dx); maxX = max(maxX, d.dx); minY = min(minY, d.dy); maxY = max(maxY, d.dy)
+        }
+        let cx = (minX + maxX) / 2, cy = (minY + maxY) / 2
+        let lat = o.latitude + cy / TrafficRules.earthRM / TrafficRules.deg
+        var lon = o.longitude + cx / (TrafficRules.earthRM * cos(o.latitude * TrafficRules.deg)) / TrafficRules.deg
+        if lon > 180 { lon -= 360 } else if lon < -180 { lon += 360 }   // as the Dart port does
+        var r = base
+        for d in liveDrones {
+            r = max(r, TrafficRules.distanceM(lat, lon, d.latitude, d.longitude) + droneCoverM)
+        }
+        return AdsbArea(lat: lat, lon: lon, radiusM: min(r, cap))
     }
 }
 
@@ -202,10 +257,13 @@ public final class TrafficService {
         return min(intervalMs << Int64(shift), maxBackoffMs)
     }
 
-    /// Start a fetch when one is due. `reference`: where to look; nil (no
+    /// The area of the last fetch.
+    public private(set) var area: AdsbArea?
+
+    /// Start a fetch when one is due. `area`: where to look; nil (no
     /// position anywhere) fetches nothing.
-    public func pollIfDue(nowMs: Int64, reference: CLLocationCoordinate2D?) {
-        guard let ref = reference else {
+    public func pollIfDue(nowMs: Int64, area: AdsbArea?) {
+        guard let ref = area else {
             if status != .noPosition { status = .noPosition }
             return
         }
@@ -213,7 +271,7 @@ public final class TrafficService {
         guard !inFlight, nowMs >= nextFetchMs else { return }
         inFlight = true
         Task { @MainActor [weak self] in
-            await self?.fetchNow(reference: ref)
+            await self?.fetchNow(area: ref)
         }
     }
 
@@ -229,12 +287,13 @@ public final class TrafficService {
     /// One fetch, now. Success installs the set (merged with aircraft still
     /// under 60 s old that the answer left out) and schedules the next fetch
     /// 10 s on; a failure keeps the set and backs off.
-    public func fetchNow(reference ref: CLLocationCoordinate2D) async {
+    public func fetchNow(area ref: AdsbArea) async {
         inFlight = true
         defer { inFlight = false }
         let gen = generation
         let started = clock()
-        guard let url = AdsbLol.url(template: AdsbLol.template, lat: ref.latitude, lon: ref.longitude) else {
+        guard let url = AdsbLol.url(template: AdsbLol.template, lat: ref.lat, lon: ref.lon,
+                                    radiusNM: ref.radiusNM) else {
             status = .noPosition
             return
         }
@@ -243,7 +302,7 @@ public final class TrafficService {
             guard gen == generation else { return }
             let rx = clock()
             let fresh = try AdsbLol.parse(data, receivedMs: rx)
-            install(fresh, receivedMs: rx, reference: ref)
+            install(fresh, receivedMs: rx, area: ref)
             failures = 0
             nextFetchMs = rx + Self.intervalMs
             status = .ok
@@ -258,8 +317,10 @@ public final class TrafficService {
     }
 
     /// Keep the fresh answer, plus earlier aircraft it no longer lists while
-    /// their positions are under 60 s old; then the 32 nearest within 30 km.
-    func install(_ fresh: [TrafficAircraft], receivedMs rx: Int64, reference ref: CLLocationCoordinate2D) {
+    /// their positions are under 60 s old; then the 32 nearest within the
+    /// area's radius (anything beyond it is dropped).
+    func install(_ fresh: [TrafficAircraft], receivedMs rx: Int64, area ref: AdsbArea) {
+        area = ref
         var byHex: [String: TrafficAircraft] = [:]
         for a in aircraft where a.ageS(nowMs: rx) <= TrafficRules.presentS { byHex[a.hex] = a }
         for a in fresh {
@@ -268,8 +329,8 @@ public final class TrafficService {
         }
         var ranked: [(d: Double, a: TrafficAircraft)] = []
         for a in byHex.values {
-            let d = TrafficRules.distanceM(ref.latitude, ref.longitude, a.lat, a.lon)
-            if d <= TrafficRules.keepRM { ranked.append((d, a)) }
+            let d = TrafficRules.distanceM(ref.lat, ref.lon, a.lat, a.lon)
+            if d <= ref.radiusM { ranked.append((d, a)) }
         }
         ranked.sort { l, r in l.d != r.d ? l.d < r.d : l.a.hex < r.a.hex }
         let list: [TrafficAircraft] = ranked.prefix(TrafficRules.maxAircraft).map { $0.a }
@@ -283,6 +344,7 @@ public final class TrafficService {
         if aircraft.contains(where: { $0.ageS(nowMs: nowMs) > TrafficRules.presentS }) {
             aircraft.removeAll { $0.ageS(nowMs: nowMs) > TrafficRules.presentS }
         }
+        // (the observer feeds LOW: aircraft in UAS airspace)
         let r = TrafficRules.evaluate(drones: drones, aircraft: aircraft, observer: observer,
                                       dataMs: dataMs, nowMs: nowMs, state: &state)
         // Publish when an alert, the stale flag or a count changes, and
@@ -300,8 +362,8 @@ public final class TrafficService {
 
     /// What an evaluation says, less the ages and distances that move every tick.
     private static func shape(_ r: TrafficResult) -> [String] {
-        [r.haveData ? "d" : "-", r.stale ? "s" : "-", "\(r.nearCount)", "\(r.aircraftCount)"]
-            + r.alerts.map { "\($0.id)|\($0.level.rawValue)|\($0.held)|\($0.text)" }
+        [r.haveData ? "d" : "-", r.stale ? "s" : "-", "\(r.aircraftCount)"]
+            + r.alerts.map { "\($0.id)|\($0.level.rawValue)|\($0.held)|\($0.text)|\($0.action)" }
     }
 
     /// The `traffic` / `traffic_done` lines for a receiver, when a push is due:

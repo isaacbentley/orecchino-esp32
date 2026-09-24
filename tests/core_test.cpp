@@ -2,10 +2,11 @@
 // tests/host_shim. They pin the state transitions the unit tests in
 // odid_test.c cannot reach: one aircraft staying one contact across several
 // addresses, Authentication pages assembled across frames, the transmitter's
-// format fields reaching the encoder, and its off switches actually
-// silencing the BLE advertising sets. Also the host protocol: where each
-// line goes (USB, BLE), the match log's sync cursor, and what a host may
-// not do (paths out of /tiles, absurd numbers).
+// format fields reaching the encoder, its off switches actually silencing
+// the BLE advertising sets, and its transmit schedule replayed the way a
+// receiver sees it, against ASTM F3411-22a's rates. Also the host protocol:
+// where each line goes (USB, BLE), the match log's sync cursor, and what a
+// host may not do (paths out of /tiles, absurd numbers).
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 #define FW_BOARD "host"
@@ -61,7 +62,180 @@ static void test_tracker(void) {
 
 // ------------------------------------------------------------- tx_core.h
 
-static void run_ticks(int n) { for (int k = 0; k < n; k++) { g_millis += 7; tx_tick(g_millis); } }
+static void run_ticks(int n) { for (int k = 0; k < n; k++) { g_millis += 2; tx_tick(g_millis); } }
+static void run_ms(uint32_t ms) { run_ticks((int)(ms / 2)); }
+
+static int tx_pid_of(const uint8_t* addr, bool ble) {
+  for (int i = 0; i < P_COUNT; i++) {
+    uint8_t a[6];
+    memcpy(a, PATHS[i].mac, 6);
+    if (ble) a[0] |= 0xC0;
+    if (!memcmp(a, addr, 6)) return i;
+  }
+  return -1;
+}
+
+// Which ODID messages one payload carried, as bits: 0 Basic ID, 1 Location,
+// 2 Authentication, 3 Self ID, 4 System, 5 Operator ID.
+static unsigned odid_kinds(const uint8_t* d, int len, bool* ok, OdidUas* u) {
+  *ok = odid_decode_payload(d, len, u);
+  unsigned k = 0;
+  if (u->has_basic[0]) k |= 1u;
+  if (u->has_loc) k |= 2u;
+  if (u->has_auth) k |= 4u;
+  if (u->has_self) k |= 8u;
+  if (u->has_sys) k |= 16u;
+  if (u->has_op) k |= 32u;
+  return k;
+}
+
+// The longest wait for each message kind, per path, over a window: the gap
+// from the window's start to the first one and from the last to its end
+// count too, so a kind that never came reads as the whole window.
+struct TxGaps {
+  uint32_t last[P_COUNT][6], worst[P_COUNT][6];
+  int seen[P_COUNT];            // payloads that decoded
+  int bad[P_COUNT];             // payloads that did not
+  void start(uint32_t t0) {
+    for (int p = 0; p < P_COUNT; p++) { for (int k = 0; k < 6; k++) { last[p][k] = t0; worst[p][k] = 0; } seen[p] = bad[p] = 0; }
+  }
+  void add(int p, unsigned kinds, uint32_t at, bool ok) {
+    if (p < 0) return;
+    if (!ok) { bad[p]++; return; }
+    seen[p]++;
+    for (int k = 0; k < 6; k++)
+      if (kinds & (1u << k)) { worst[p][k] = std::max(worst[p][k], at - last[p][k]); last[p][k] = at; }
+  }
+  void finish(uint32_t t1) {
+    for (int p = 0; p < P_COUNT; p++) for (int k = 0; k < 6; k++) worst[p][k] = std::max(worst[p][k], t1 - last[p][k]);
+  }
+  uint32_t loc(int p) const { return worst[p][1]; }
+  uint32_t statics(int p) const { return std::max(std::max(worst[p][0], worst[p][3]), std::max(worst[p][4], worst[p][5])); }
+};
+
+// Every Wi-Fi frame captured in [t0, t1): the ODID payload of each beacon
+// or NAN service discovery frame, by path. Also checks the frames' own
+// fields: the Authentication variants verify (or, AUTHBAD, do not), and a
+// NAN SDF names the cluster its sync beacon announced.
+struct TxWifiScan { int frames[P_COUNT] = {0}; int sync = 0; int auth_ok = 0, auth_wrong = 0; bool cluster_ok = true; uint16_t beacon_tu[P_COUNT] = {0}; };
+static TxWifiScan tx_scan_wifi(TxGaps* g, uint32_t t0, uint32_t t1) {
+  TxWifiScan s;
+  uint8_t cluster[6] = {0};
+  for (size_t i = 0; i < g_wifi_tx.size(); i++) {
+    uint32_t at = g_wifi_tx_at[i];
+    if (at < t0 || at >= t1) continue;
+    const std::vector<uint8_t>& f = g_wifi_tx[i];
+    int pid = tx_pid_of(&f[10], false);
+    const uint8_t* odid = nullptr; int n = 0;
+    if (f[0] == 0x80) {
+      s.beacon_tu[pid < 0 ? 0 : pid] = (uint16_t)(f[32] | (f[33] << 8));
+      for (size_t o = 36; o + 2 <= f.size() && o + 2 + f[o + 1] <= f.size(); o += 2 + f[o + 1]) {
+        const uint8_t* ie = &f[o];
+        if (ie[0] != 0xDD) continue;
+        if (ie[1] >= 5 && ie[2] == 0xFA && ie[3] == 0x0B && ie[4] == 0xBC && ie[5] == 0x0D) { odid = ie + 7; n = ie[1] - 5; }
+        if (ie[1] >= 4 && ie[2] == 0x50 && ie[3] == 0x6F && ie[4] == 0x9A && ie[5] == 0x13) { s.sync++; memcpy(cluster, &f[16], 6); }
+      }
+    } else if (f[0] == 0xD0) {
+      if (memcmp(&f[16], cluster, 6) != 0) s.cluster_ok = false;
+      static const uint8_t SVC[6] = {0x88, 0x69, 0x19, 0x9D, 0x92, 0x09};
+      for (size_t o = 24; o + 12 < f.size(); o++)
+        if (!memcmp(&f[o], SVC, 6)) { n = f[o + 9] - 1; odid = &f[o + 11]; break; }
+    }
+    if (!odid) continue;
+    s.frames[pid]++;
+    bool ok; OdidUas u;
+    unsigned k = odid_kinds(odid, n, &ok, &u);
+    g->add(pid, k, at, ok);
+    if (pid == P_AUTH || pid == P_AUTHBAD) {
+      int want = pid == P_AUTH ? ODID_AUTH_TEST_KEY : ODID_AUTH_INVALID;
+      if (odid_verify_auth(&u) == want) s.auth_ok++; else s.auth_wrong++;
+    }
+  }
+  return s;
+}
+
+// Replay the advertising sets as a controller runs them: an event at start
+// and every interval after, carrying whatever data the set held then,
+// until it is stopped. Counts events per path into `events`.
+static void tx_scan_ble(TxGaps* g, uint32_t t0, uint32_t t1, int* events, int* legacy_bad) {
+  const std::vector<AdvLogRec>& L = NimBLEDevice::adv.log;
+  for (int inst = 0; inst < NimBLEExtAdvertising::N; inst++) {
+    bool on = false;
+    double next = 0, itvl = 1;
+    NimBLEExtAdvertisement cur;
+    auto emit_until = [&](double t) {
+      while (on && next < t) {
+        uint32_t at = (uint32_t)next;
+        if (at >= t0 && at < t1) {
+          int pid = tx_pid_of(cur.addr.v, true);
+          if (pid >= 0) events[pid]++;
+          if (cur.legacy && cur.data.size() != 31) (*legacy_bad)++;
+          bool ok = cur.data.size() > 6 && cur.data[1] == 0x16 && cur.data[2] == 0xFA && cur.data[3] == 0xFF && cur.data[4] == 0x0D;
+          OdidUas u;
+          unsigned k = ok ? odid_kinds(cur.data.data() + 6, (int)cur.data.size() - 6, &ok, &u) : 0;
+          g->add(pid, k, at, ok);
+        }
+        next += itvl;
+      }
+    };
+    for (const AdvLogRec& r : L) {
+      if (r.inst != inst) continue;
+      emit_until(r.at);
+      if (r.kind == 'S') { on = true; cur = r.adv; itvl = r.adv.itvl * 0.625; next = r.at; }
+      else if (r.kind == 'X') on = false;
+      else if (r.kind == 'D') cur.data = r.adv.data;
+    }
+    emit_until(t1);
+  }
+}
+
+// F3411-22a on one path: Location at least once a second, each static
+// message at least every 3 s, and every payload decodable.
+static bool tx_path_meets_spec(const TxGaps& g, int p) {
+  return g.seen[p] > 0 && g.bad[p] == 0 && g.loc(p) <= 1000 && g.statics(p) <= 3000;
+}
+
+// Run 30 s with every path on and check every path against the spec, the
+// way a receiver would see it. Prints the measured worst gaps.
+static void tx_check_spec_schedule(const char* label) {
+  for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, true);
+  run_ms(2000);                                   // settle: every set up
+  uint32_t t0 = g_millis, t1 = t0 + 30000;
+  g_wifi_tx.clear(); g_wifi_tx_at.clear();
+  NimBLEDevice::adv.log.clear();
+  uint32_t err0 = s_err_n;
+  // The sets already on air carry on: seed the replay with them.
+  for (int k = 0; k < NimBLEExtAdvertising::N; k++)
+    if (NimBLEDevice::adv.active[k]) NimBLEDevice::adv.log.push_back({t0, (uint8_t)k, 'S', NimBLEDevice::adv.inst_data[k]});
+  run_ms(30000);
+  TxGaps g; g.start(t0);
+  TxWifiScan w = tx_scan_wifi(&g, t0, t1);
+  int ev[P_COUNT] = {0}, legacy_bad = 0;
+  tx_scan_ble(&g, t0, t1, ev, &legacy_bad);
+  g.finish(t1);
+  bool all = true;
+  char name[96];
+  for (int p = 0; p < P_COUNT; p++) {
+    printf("     %-9s %-20s %5d payloads/30 s  Location max gap %4u ms  statics max gap %4u ms\n",
+           label, PATHS[p].uas_id, g.seen[p], (unsigned)g.loc(p), (unsigned)g.statics(p));
+    if (!tx_path_meets_spec(g, p)) all = false;
+  }
+  snprintf(name, sizeof name, "tx %s: every path decodes, Location every <= 1 s, each static message every <= 3 s", label);
+  CHECK(all, name);
+  snprintf(name, sizeof name, "tx %s: AUTH verifies under the test key in every frame, AUTHBAD never does", label);
+  CHECK(w.auth_ok > 200 && w.auth_wrong == 0, name);
+  snprintf(name, sizeof name, "tx %s: NAN sync beacon about twice a second, SDFs name its cluster", label);
+  CHECK(w.sync >= 55 && w.sync <= 65 && w.cluster_ok, name);
+  snprintf(name, sizeof name, "tx %s: Wi-Fi packs 4 Hz, SINGLE 8 Hz, NAN 4 Hz per path", label);
+  CHECK(w.frames[P_WIFI] >= 118 && w.frames[P_WIFI] <= 121 && w.frames[P_AUTH] >= 118 && w.frames[P_SINGLE] >= 238 &&
+        w.frames[P_SINGLE] <= 241 && w.frames[P_NAN] >= 118 && w.frames[P_NAN] <= 121, name);
+  snprintf(name, sizeof name, "tx %s: beacon interval field says what the path keeps (244 TU, SINGLE 122)", label);
+  CHECK(w.beacon_tu[P_WIFI] == 244 && w.beacon_tu[P_SINGLE] == 122, name);
+  snprintf(name, sizeof name, "tx %s: BLE4 is a 31-byte legacy advertisement, ~20 events/s", label);
+  CHECK(legacy_bad == 0 && ev[P_BLE4] >= 570 && ev[P_BLE4] <= 610, name);
+  snprintf(name, sizeof name, "tx %s: no transmit errors", label);
+  CHECK(s_err_n == err0, name);
+}
 
 static void test_tx(void) {
   odid_auth_init();
@@ -73,79 +247,153 @@ static void test_tx(void) {
   n = build_payload(P_DUAL, out, 5000);
   CHECK(odid_decode_payload(out, n, &u) && out[2] == 6 && u.has_basic[1] && u.id_type[1] == 2 &&
         !strcmp(u.uas_id[1], "CAA-REG-TEST-0001"), "tx: P_DUAL carries serial + CAA Basic IDs");
-  int fl = build_beacon(P_DUAL, out, n, 0);
+  int fl = build_beacon(P_DUAL, out, n, 0, 250);
   CHECK(fl > 0 && !memcmp(s_frame + 10, PATHS[P_DUAL].mac, 6) && !memcmp(s_frame + 16, PATHS[P_DUAL].mac, 6),
         "tx: beacon SA/BSSID use the path's own MAC");
+  CHECK(s_frame[34] == 0x20 && s_frame[35] == 0x04, "tx: beacon capability is short preamble + short slot, as the reference");
   n = build_payload(P_AUTH, out, 5000);
   CHECK(odid_decode_payload(out, n, &u) && odid_verify_auth(&u) == ODID_AUTH_TEST_KEY,
         "tx: P_AUTH pack verifies under the published test key -> test_key, never id_valid");
   n = build_payload(P_AUTHBAD, out, 5000);
   CHECK(odid_decode_payload(out, n, &u) && odid_verify_auth(&u) == ODID_AUTH_INVALID, "tx: P_AUTHBAD pack verifies invalid");
+  n = build_payload(P_AUTH, out, 6000);           // next second: a new signature, not the cached one
+  CHECK(odid_decode_payload(out, n, &u) && u.auth_ts == 6 && odid_verify_auth(&u) == ODID_AUTH_TEST_KEY,
+        "tx: the cached signature follows the timestamp");
 
-  tx_begin();
-  for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, i == P_BLE4);
-  NimBLEDevice::adv.starts.clear();
+  // ---- three advertising sets: each BLE path has its own
+  NimBLEDevice::adv.reset(3);
+  shim_nvs().erase("orecchino/tx_rate");
   g_millis = 10000;
-  run_ticks(60000 / 7);
-  bool seen[6] = {false}; int nb = 0;
-  for (auto& r : NimBLEDevice::adv.starts)
-    if (r.adv.data.size() > 6) { seen[(r.adv.data[6] >> 4) % 6] = true; nb++; }
-  const int per60 = 60000 / TX_PERIOD_MS;
-  CHECK(nb >= per60 - 1 && nb <= per60 + 1, "tx: BLE4 sent one advertisement per TX_PERIOD_MS over 60 s");
-  CHECK(seen[0] && seen[1] && seen[3] && seen[4] && seen[5], "tx: BLE4 rotated through Basic/Location/Self/System/Operator");
+  tx_begin();
+  CHECK(tx_ble_sets() == 3 && !tx_slow(), "tx: probe finds a third advertising set; spec rate by default");
+  tx_check_spec_schedule("3 sets");
+  CHECK(s_ble_restarts == 0 && NimBLEDevice::adv.stop_all_calls == 0,
+        "tx: 3 sets: payloads are swapped in place, no set is restarted");
+  {
+    size_t s0 = NimBLEDevice::adv.starts.size();
+    run_ms(10000);
+    CHECK(NimBLEDevice::adv.starts.size() == s0, "tx: 3 sets: no set is ever restarted while its path stays on");
+  }
 
-  for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, true);
-  uint32_t sent0[P_COUNT]; memcpy(sent0, s_tx, sizeof sent0);
-  size_t start0 = NimBLEDevice::adv.starts.size();
-  run_ticks(60000 / 7);
-  bool every_5s = true;
-  for (int i = 0; i < P_COUNT; i++) {
-    uint32_t d = s_tx[i] - sent0[i];
-    if (i == P_NAN) d /= 2;   // each NAN transmission is a sync beacon plus the SDF
-    if ((int)d < 60000 / TX_PERIOD_MS - 1 || (int)d > 60000 / TX_PERIOD_MS + 1) every_5s = false;
-  }
-  CHECK(every_5s && TX_PERIOD_MS == 5000, "tx: with every path on, each transmits once every TX_PERIOD_MS (5 s)");
-  // Set 1 carries coded and legacy in turn; each must keep it long enough to
-  // go out (on air, BLE4 retaking the set 2 ms after BLELR meant BLELR was
-  // never heard).
-  uint32_t shortest = UINT32_MAX;
-  for (size_t i = start0 + 1; i < NimBLEDevice::adv.starts.size(); i++) {
-    const AdvStartRec& a = NimBLEDevice::adv.starts[i];
-    if (a.inst != 1) continue;
-    for (size_t j = i; j-- > start0;) {
-      const AdvStartRec& p = NimBLEDevice::adv.starts[j];
-      if (p.inst != 1) continue;
-      if (p.adv.pri != a.adv.pri || p.adv.legacy != a.adv.legacy) shortest = std::min(shortest, a.at - p.at);
-      break;
-    }
-  }
-  CHECK(shortest != UINT32_MAX && shortest >= TX_PERIOD_MS / 2 - 50,
-        "tx: coded and legacy each hold the shared set for half a period");
-  run_ticks(400);
-  CHECK(NimBLEDevice::adv.active[0] && NimBLEDevice::adv.active[1], "tx: both advertising sets active while running");
+  // Pause: every set stops (NimBLE's stop-all refuses while a set runs, so
+  // each is stopped on its own), nothing radiates, and resume comes back
+  // without a single error.
+  uint32_t err0 = s_err_n;
   tx_set_running(false);
-  CHECK(!NimBLEDevice::adv.isAdvertising(), "tx: tx_set_running(false) stops both sets");
+  run_ticks(2);
+  CHECK(!NimBLEDevice::adv.isAdvertising(), "tx: pause stops every advertising set");
   size_t wifi_before = g_wifi_tx.size();
-  run_ticks(400);
+  run_ms(1000);
   CHECK(g_wifi_tx.size() == wifi_before && !NimBLEDevice::adv.isAdvertising(), "tx: nothing radiates while paused");
   tx_set_running(true);
-  run_ticks(400);
-  CHECK(NimBLEDevice::adv.active[0] && NimBLEDevice::adv.active[1], "tx: sets active again after resume");
+  run_ms(100);
+  CHECK(NimBLEDevice::adv.active[0] && NimBLEDevice::adv.active[1] && NimBLEDevice::adv.active[2] && s_err_n == err0,
+        "tx: resume brings all three sets back, no errors");
   tx_set_enabled(P_BLE5, false);
-  CHECK(!NimBLEDevice::adv.active[0], "tx: disabling BLE5 stops set 0");
-  run_ticks(400);
-  CHECK(!NimBLEDevice::adv.active[0] && NimBLEDevice::adv.active[1], "tx: set 0 stays down, set 1 keeps serving coded/legacy");
+  run_ticks(2);
+  CHECK(!NimBLEDevice::adv.active[0] && NimBLEDevice::adv.active[1] && NimBLEDevice::adv.active[2],
+        "tx: switching BLE5 off stops its set only");
   tx_set_enabled(P_BLELR, false);
-  run_ticks(400);
-  CHECK(NimBLEDevice::adv.active[1], "tx: set 1 still serves BLE4 after BLELR off");
   tx_set_enabled(P_BLE4, false);
-  CHECK(!NimBLEDevice::adv.active[1], "tx: disabling the last set-1 path stops set 1");
-  run_ticks(400);
+  run_ticks(2);
   CHECK(!NimBLEDevice::adv.isAdvertising(), "tx: no BLE advertising with all BLE paths off");
   for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, false);
   wifi_before = g_wifi_tx.size();
-  run_ticks(400);
+  run_ms(1000);
   CHECK(g_wifi_tx.size() == wifi_before, "tx: ALL OFF sends no Wi-Fi frames");
+
+  // ---- the driver refuses frames: counted, reported, retried
+  for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, i == P_WIFI);
+  run_ms(1000);
+  uint32_t werr = s_wifi_err, sent = s_tx[P_WIFI];
+  Serial.out.clear();
+  g_wifi_tx_refuse = 3;
+  run_ms(5100);
+  CHECK(s_wifi_err == werr + 3 && s_err[P_WIFI] >= 3, "tx: refused Wi-Fi frames are counted");
+  CHECK(Serial.out.find("\"op\":\"wifi_tx\",\"rc\":257") != std::string::npos &&
+        Serial.out.find("\"wifi_err\":" + std::to_string(werr + 3)) != std::string::npos,
+        "tx: ...reported as a tx_err line and on the status line");
+  CHECK(s_tx[P_WIFI] - sent >= 19, "tx: ...and retried 20 ms later, so the path keeps its rate");
+  g_wifi_channel = 11;
+  run_ms(1100);
+  CHECK(g_wifi_channel == WIFI_CHANNEL && s_ch_fix >= 1, "tx: a channel that drifted is put back on 6");
+
+  // ---- two advertising sets (the C3 controller): BLE4 keeps set 1, BLE5
+  // 1M and coded share set 0 in turns, and all three still meet the spec
+  NimBLEDevice::adv.reset(2);
+  ble_relayout(3);
+  CHECK(tx_ble_sets() == 2, "tx: probe falls back to two sets when the controller grants two");
+  tx_check_spec_schedule("2 sets");
+  {
+    // Coded and 1M each hold set 0 for share_ms before handing it over.
+    uint32_t shortest = UINT32_MAX; int prev = -1; uint32_t prev_at = 0;
+    for (const AdvStartRec& a : NimBLEDevice::adv.starts) {
+      if (a.inst != 0) continue;
+      int pid = tx_pid_of(a.adv.addr.v, true);
+      if (prev >= 0 && pid != prev) shortest = std::min(shortest, a.at - prev_at);
+      prev = pid; prev_at = a.at;
+    }
+    CHECK(shortest != UINT32_MAX && shortest >= TX_RATES[TX_RATE_SPEC].share_ms,
+          "tx: 2 sets: 1M and coded take set 0 in turns of 500 ms");
+  }
+
+  // ---- a controller that took the probe but then refuses the third set
+  NimBLEDevice::adv.reset(3);
+  ble_relayout(3);
+  for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, true);
+  run_ms(100);
+  tx_set_enabled(P_BLE4, false); run_ticks(2);
+  NimBLEDevice::adv.max_sets = 2;
+  tx_set_enabled(P_BLE4, true);
+  run_ms(1000);
+  CHECK(tx_ble_sets() == 2 && NimBLEDevice::adv.active[0] && NimBLEDevice::adv.active[1],
+        "tx: a third set refused at start falls back to the two-set layout");
+
+  // ---- slow: the old quiet bench rate, once every 5 s per path, saved
+  NimBLEDevice::adv.reset(3);
+  ble_relayout(3);
+  tx_set_slow(true);
+  CHECK(shim_nvs().count("orecchino/tx_rate") && shim_nvs()["orecchino/tx_rate"][0] == TX_RATE_SLOW,
+        "tx: the slow rate is saved in NVS");
+  s_rate = TX_RATE_SPEC;
+  tx_begin();
+  CHECK(tx_slow(), "tx: ...and restored at boot");
+  for (int i = 0; i < P_COUNT; i++) tx_set_enabled(i, true);
+  run_ms(10000);
+  {
+    uint32_t t0 = g_millis, t1 = t0 + 60000;
+    g_wifi_tx.clear(); g_wifi_tx_at.clear();
+    NimBLEDevice::adv.log.clear();
+    for (int k = 0; k < NimBLEExtAdvertising::N; k++)
+      if (NimBLEDevice::adv.active[k]) NimBLEDevice::adv.log.push_back({t0, (uint8_t)k, 'S', NimBLEDevice::adv.inst_data[k]});
+    run_ms(60000);
+    TxGaps g; g.start(t0);
+    TxWifiScan w = tx_scan_wifi(&g, t0, t1);
+    int ev[P_COUNT] = {0}, legacy_bad = 0;
+    tx_scan_ble(&g, t0, t1, ev, &legacy_bad);
+    g.finish(t1);
+    bool every5 = true;
+    for (int p = 0; p < P_COUNT; p++) {
+      int k = PATHS[p].carrier == C_BEACON || PATHS[p].carrier == C_NAN ? w.frames[p] : ev[p];
+      if (k < 11 || k > 13) every5 = false;
+      printf("     slow      %-20s %3d transmissions/min  Location max gap %5u ms\n", PATHS[p].uas_id, k, (unsigned)g.loc(p));
+    }
+    CHECK(every5, "tx: slow: every path transmits once every 5 s (11-13 a minute)");
+    CHECK(g.loc(P_WIFI) <= 5100 && g.loc(P_BLE5) <= 5100 && g.bad[P_BLE4] == 0, "tx: slow: a pack path's Location every 5 s");
+  }
+  tx_set_slow(false);
+  CHECK(!tx_slow() && shim_nvs()["orecchino/tx_rate"][0] == TX_RATE_SPEC, "tx: back to the spec rate, saved");
+  run_ms(100);
+  CHECK(NimBLEDevice::adv.inst_data[0].itvl == 160 && NimBLEDevice::adv.inst_data[2].itvl == 80,
+        "tx: a rate change reconfigures the sets' intervals (100 ms, BLE4 50 ms)");
+  // Console: `rate slow` / `rate spec`, `sets 2`.
+  Serial.in = "rate slow\nsets 2\n"; Serial.in_pos = 0;
+  run_ticks(1);
+  CHECK(tx_slow() && tx_ble_sets() == 2, "tx: console `rate slow` and `sets 2` take effect");
+  Serial.in = "rate spec\nsets 3\n"; Serial.in_pos = 0;
+  run_ticks(1);
+  CHECK(!tx_slow() && tx_ble_sets() == 3 && Serial.out.find("\"rate\":\"spec\"") != std::string::npos,
+        "tx: ...and `rate spec` / `sets 3` back, on the status line");
 }
 
 // ------------------------------------------------------------- rx_core.h
@@ -394,10 +642,19 @@ static void test_json_and_log(void) {
         "log: live contacts carry no seq, and next counts only ended records");
   CHECK(Serial.out.find("\"uas\":\"ORECCHINO-TX-AUTH\"") != std::string::npos && Serial.out.find("\"clock\":true") != std::string::npos,
         "log: records carry the ID, and log_done says the clock is set");
+  { int held = 0; uint32_t age = 0; rx_log_stats(&held, &age);
+    CHECK(held == 3 && age != UINT32_MAX, "log: a screen sees how many records there are and how old the oldest is"); }
   Serial.out.clear();
   Serial.in = "{\"cmd\":\"log_clear\"}\n"; Serial.in_pos = 0;
   rx_tick(s_rx_now);
-  CHECK(s_log_n == 0 && Serial.out.find("log_cleared") != std::string::npos, "log: log_clear empties it and says so");
+  CHECK(s_log_n == 0 && count_in(Serial.out, "\"type\":\"log_cleared\"") == 1, "log: log_clear empties it and says so");
+  CHECK(!s_log_dirty, "log: a clear is written to NVS at once, not at the next timed save");
+  log_load();
+  CHECK(s_log_n == 0 && s_log_total == 0, "log: after a reload the cleared log stays empty");
+  // The screens' CLEAR HISTORY (T5 SYSTEM, T-Embed menu) is the same call.
+  s_log_n = 1; s_log_dirty = true; Serial.out.clear();
+  rx_log_clear_all();
+  CHECK(s_log_n == 0 && !s_log_dirty && count_in(Serial.out, "log_cleared") == 1, "log: rx_log_clear_all clears, saves and broadcasts");
 }
 
 // ------------------------------------------------ host link: USB and BLE
@@ -543,10 +800,12 @@ static void test_host_input_limits(void) {
   CHECK(json_has("\"type\":\"log_done\""), "limits: log_get with an absurd cursor still answers");
 
   // Tile paths: only /tiles/<z>/<x>/<y>.png may be written.
-  CHECK(tile_path_ok("/tiles/14/2620/6332.png") && tile_path_ok("/tiles/0/0/0.png"), "tiles: z/x/y.png accepted");
+  CHECK(tile_path_ok("/tiles/14/2620/6332.png") && tile_path_ok("/tiles/0/0/0.png") &&
+        tile_path_ok("/tiles/14/2620/6332.jpg"), "tiles: z/x/y.png and .jpg accepted");
   const char* bad_paths[] = { "/tiles/../log/x", "/tiles/14/2620/../../x.png", "/tiles/14/2620/6332.png.bak",
                               "/tiles/123/1/1.png", "/tilesX/1/1/1.png", "/tiles/1/1/1.png/", "/tiles/a/1/1.png",
-                              "/tiles/1/1/.png", "tiles/1/1/1.png", "/log/records.bin", "" };
+                              "/tiles/1/1/.png", "tiles/1/1/1.png", "/log/records.bin", "/tiles/1/1/1.jpeg",
+                              "/tiles/1/1/1.l.png", "/tiles/.src", "" };
   bool none = true;
   for (const char* p : bad_paths) if (tile_path_ok(p)) { printf("     accepted %s\n", p); none = false; }
   CHECK(none, "tiles: traversal, extra suffixes and non-digits refused for writing");

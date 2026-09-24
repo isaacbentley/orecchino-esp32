@@ -441,6 +441,18 @@ static void test_single_message_rotation(void) {
     CHECK(n == ODID_MSG_SIZE, "single: one message");
     CHECK((m[0] >> 4) == want[i], "single: rotation order");
   }
+  // The transmit sequence: Location every other slot, each static message
+  // once in eight (F3411-22a: Location >= 1 Hz, statics every <= 3 s).
+  int last[6] = {-1, -1, -1, -1, -1, -1}, gap[6] = {0};
+  for (int slot = 0; slot < 3 * ODID_SINGLE_SEQ_LEN; slot++) {
+    odid_build_single(m, &s, 0, odid_single_seq((uint32_t)slot));
+    int t = m[0] >> 4;
+    if (last[t] >= 0 && slot - last[t] > gap[t]) gap[t] = slot - last[t];
+    last[t] = slot;
+  }
+  CHECK(gap[1] == 2, "single seq: Location every other slot");
+  CHECK(gap[0] == 8 && gap[3] == 8 && gap[4] == 8 && gap[5] == 8,
+        "single seq: Basic ID, Self ID, System and Operator ID once in eight slots");
 }
 
 // Standalone Authentication messages (e.g. from single-message rotation or individual frames)

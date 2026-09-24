@@ -1,11 +1,12 @@
 {
  "name": "outside",
- "description": "Nothing raised: 1.05 km away; 170 m above; next to a drone that is not live; a 31 s old position; a closest approach 80+ s away. Absence is reported only as no ADS-B traffic reported within 3 km, with the data age.",
+ "description": "No drone-aircraft conflict: 1.05 km away; 170 m above; next to a drone that is not live; a 31 s old position; a closest approach 80+ s away. Those still below 460 m above ground within 3 km of the live drone are LOW (UAS airspace), with no conflict counted.",
  "worked_example": [
   "UAL123 1050 m N of D9A03 (vert +50): beyond 1000 m -> no NEAR; flying away -> no CPA.",
   "N12345 600 m S at 320 m: vert +170 > 150 -> nothing. N9 200 m from DJI-1, which is not live -> nothing. N10 424 m away but 31 s old (not fresh) -> nothing.",
   "SKW9 5.2 km N heading S at 120 kt while D9A03 flies E at 5 m/s: t_cpa = 5200*61.73/(61.73^2+5^2) = 83.7 s > 60 -> nothing.",
-  "No fresh aircraft within 3 km of the observer (4 km S): 'no ADS-B traffic reported within 3 km, data 4 s old' - never 'clear' or 'no traffic'."
+  "Status: 'conflict watch on, 3 low aircraft, data 4 s old' - no drone-aircraft conflict is counted, and it never says 'clear', 'safe' or 'no traffic': not every aircraft broadcasts ADS-B.",
+  "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): b2c3d4 at t=0 'LOW TRAFFIC S 600 M' ('BE READY TO LAND DRONES; AIRCRAFT 300 M ABOVE GROUND, 600 M S'); a1b2c3 at t=0 'LOW TRAFFIC N 1.1 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.1 KM N'); c3d4e5 at t=0 'LOW TRAFFIC W 2.8 KM' ('BE READY TO LAND DRONES; AIRCRAFT 80 M ABOVE GROUND, 2.8 KM W'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
  ],
  "observer": {
   "lat": 37.7749,
@@ -96,12 +97,71 @@
    "expect": {
     "have_data": true,
     "stale": false,
-    "highest": "none",
-    "near_count": 0,
-    "ground_count": 0,
+    "highest": "caution",
     "aircraft_count": 5,
-    "summary": "no ADS-B traffic reported within 3 km, data 4 s old",
-    "alerts": []
+    "summary": "conflict watch on, 3 low aircraft, data 4 s old",
+    "alerts": [
+     {
+      "level": "caution",
+      "kind": "low",
+      "drone": "1581F20000D9A03",
+      "hex": "b2c3d4",
+      "text": "LOW TRAFFIC S 600 M",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "BE READY TO LAND DRONES",
+      "resolution": "BE READY TO LAND DRONES; AIRCRAFT 300 M ABOVE GROUND, 600 M S",
+      "horiz_m": 600.0078241737625,
+      "vert_m": 300.0,
+      "bearing_deg": 180.0,
+      "cpa_s": null,
+      "age_s": 4.0
+     },
+     {
+      "level": "caution",
+      "kind": "low",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "LOW TRAFFIC N 1.1 KM",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "BE READY TO LAND DRONES",
+      "resolution": "BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.1 KM N",
+      "horiz_m": 1050.013692304282,
+      "vert_m": 180.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 4.0
+     },
+     {
+      "level": "caution",
+      "kind": "low",
+      "drone": "1581F20000D9A03",
+      "hex": "c3d4e5",
+      "text": "LOW TRAFFIC W 2.8 KM",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "BE READY TO LAND DRONES",
+      "resolution": "BE READY TO LAND DRONES; AIRCRAFT 80 M ABOVE GROUND, 2.8 KM W",
+      "horiz_m": 2799.1980351223333,
+      "vert_m": 80.0,
+      "bearing_deg": 270.0,
+      "cpa_s": null,
+      "age_s": 4.0
+     }
+    ]
    }
   }
  ]

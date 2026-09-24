@@ -39,7 +39,7 @@ echo "== Solar position & sundown engine (C, NOAA algorithms)"
 cc -std=c11 -Wall -Wextra -O2 tests/solar_test.c -lm -o "$BIN/solar_test"
 "$BIN/solar_test"
 
-echo "== Radio cores (C++ against host shims: contact merge, auth assembly, TX off switches)"
+echo "== Radio cores (C++ against host shims: contact merge, auth assembly, TX off switches and schedule)"
 c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
   -I tests/host_shim -I firmware/common -I firmware/libraries/Monocypher/src \
   tests/core_test.cpp tests/host_shim/shim.cpp \
@@ -60,6 +60,20 @@ echo "== T5 Wi-Fi (C++: the real net_sync.h state machine on fake radio/clock/fe
 c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
   -I firmware/common tests/net_test.cpp -o "$BIN/net_test"
 "$BIN/net_test"
+
+echo "== Map tile plan (C++: circle of tiles, flash budget and shrinking, eviction, sync stopping at the reserve)"
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+  -I firmware/common tests/tile_plan_test.cpp -o "$BIN/tile_plan_test"
+"$BIN/tile_plan_test"
+
+echo "== Map tile images (C++: format sniffing, the vendored JPEGDEC to grey and RGB565, the T5's re-toning)"
+# JPEGDEC does deliberate unaligned loads (fine on the S3): its own object is
+# built without UBSan, the test with it.
+c++ -std=c++17 -g -O1 -fsanitize=address -w -c -I firmware/libraries/JPEGDEC/src \
+  firmware/libraries/JPEGDEC/src/JPEGDEC.cpp -o "$BIN/jpegdec.o"
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+  -I firmware/common -I firmware/libraries/JPEGDEC/src tests/tile_image_test.cpp "$BIN/jpegdec.o" -o "$BIN/tile_image_test"
+"$BIN/tile_image_test"
 
 echo "== T5 e-paper board render (C++ against host shims: fitted text, label placement, selection)"
 # The real font bitmaps come from the Adafruit GFX library in the Arduino

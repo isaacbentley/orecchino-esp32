@@ -239,3 +239,14 @@ static inline int odid_build_single(uint8_t* out, const OdidTxState* s,
   }
   return ODID_MSG_SIZE;
 }
+
+/// The order a single-message transmitter sends in, as odid_build_single
+/// indices: Location in every other slot, the four static messages in turn
+/// between them. Eight slots, so at one message every T the Location repeats
+/// every 2T and each static message every 8T -- F3411-22a wants Location at
+/// least once a second and each static message at least every 3 s.
+#define ODID_SINGLE_SEQ_LEN 8
+static inline int odid_single_seq(uint32_t slot) {
+  static const uint8_t SEQ[ODID_SINGLE_SEQ_LEN] = { 1, 0, 1, 2, 1, 3, 1, 4 };
+  return SEQ[slot % ODID_SINGLE_SEQ_LEN];
+}

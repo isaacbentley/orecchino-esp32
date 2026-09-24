@@ -1,4 +1,5 @@
-// TrafficRules.swift — ADS-B traffic alerts: manned aircraft near the drones.
+// TrafficRules.swift — ADS-B conflict watch: manned aircraft near the drones,
+// with a resolution advisory for each (14 CFR 107.37(a): the drone gives way).
 //
 // A line-for-line port of firmware/common/traffic.h (the reference; its
 // header comment holds the rules, every choice made where plan §8 left room,
@@ -8,7 +9,8 @@
 //
 // Unknown values are nil here (NaN in C). Times are milliseconds on one
 // clock (Int64); use TrafficRules.nowMs() for wall-clock milliseconds.
-// Words: never "collision", "conflict", "safe", "clear" or "TCAS".
+// Words: never "collision", "safe", "clear" (other than the instruction
+// "KEEP CLEAR OF"), "conflict resolved" or "TCAS".
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -16,24 +18,32 @@ import Foundation
 import CoreLocation
 
 public enum TrafficLevel: Int, Comparable, Sendable, CaseIterable {
-    case none = 0, advisory = 1, caution = 2, warning = 3
+    case none = 0, caution = 2, warning = 3          // (1 was the removed advisory)
     public static func < (a: TrafficLevel, b: TrafficLevel) -> Bool { a.rawValue < b.rawValue }
-    public var name: String { ["none", "advisory", "caution", "warning"][rawValue] }
-}
-
-public enum TrafficKind: Int, Sendable, CaseIterable {
-    case near = 0, converging = 1, low = 2, emergency = 3
-    public var name: String { ["near", "converging", "low", "emergency"][rawValue] }
-    public var level: TrafficLevel {
+    public var name: String {
         switch self {
-        case .near, .converging: return .warning
-        case .low: return .caution
-        case .emergency: return .advisory
+        case .none: return "none"
+        case .caution: return "caution"
+        case .warning: return "warning"
         }
     }
-    public var isPair: Bool { self == .near || self == .converging }
-    /// A pair with an aircraft on the ground is a caution, not a warning.
-    public func level(onGround: Bool) -> TrafficLevel { isPair && onGround ? .caution : level }
+}
+
+/// Drone-aircraft pairs, and LOW: an airborne aircraft in UAS airspace (one
+/// per aircraft). No emergency-squawk rule.
+public enum TrafficKind: Int, Sendable, CaseIterable {
+    case near = 0, converging = 1, low = 2
+    public var name: String { self == .near ? "near" : self == .converging ? "converging" : "low" }
+    public var level: TrafficLevel { self == .low ? .caution : .warning }
+    public var isPair: Bool { self != .low }
+    /// A pair with an aircraft on the ground is a caution, not a warning; LOW is a caution.
+    public func level(onGround: Bool) -> TrafficLevel { self == .low || onGround ? .caution : .warning }
+}
+
+/// Where the aircraft is relative to the drone (current vertical; level =
+/// within 30 m).
+public enum TrafficVertical: String, Sendable, CaseIterable {
+    case unknown, above, level, below
 }
 
 /// One aircraft as reported by ADS-B. `squawk` is the four octal digits read
@@ -79,11 +89,12 @@ public struct TrafficDrone: Sendable, Equatable {
     public var speedMps: Double?
     public var headingDeg: Double?
     public var live: Bool             // heard within 60 s with a position
+    public var heightM: Double?       // height above take-off/ground (LOW's ground)
 
     public init(id: String, lat: Double?, lon: Double?, altGeoM: Double? = nil,
-                speedMps: Double? = nil, headingDeg: Double? = nil, live: Bool) {
+                speedMps: Double? = nil, headingDeg: Double? = nil, live: Bool, heightM: Double? = nil) {
         self.id = id; self.lat = lat; self.lon = lon; self.altGeoM = altGeoM
-        self.speedMps = speedMps; self.headingDeg = headingDeg; self.live = live
+        self.speedMps = speedMps; self.headingDeg = headingDeg; self.live = live; self.heightM = heightM
     }
 }
 
@@ -101,20 +112,26 @@ public struct TrafficAlert: Sendable, Identifiable, Equatable {
     public var kind: TrafficKind
     public var held: Bool             // kept by hysteresis; the raise condition is false now
     public var heightUnknown: Bool
-    public var approx: Bool
     public var onGround: Bool = false // the aircraft is reported on the ground
     public var droneIndex: Int?       // into this evaluation's drones
     public var acIndex: Int?          // into this evaluation's aircraft (nil: gone)
-    public var droneId: String        // "" for LOW / EMERGENCY
+    public var droneId: String
     public var hex: String
     public var callsign: String
-    public var horizM: Double?        // drone-aircraft (pairs) or observer-aircraft
-    public var vertM: Double?         // aircraft minus drone (pairs), minus elevation (LOW)
-    public var bearingDeg: Double?    // from the drone (pairs) / observer to the aircraft
+    public var horizM: Double?        // drone to aircraft (always set for a pair)
+    public var vertM: Double?         // aircraft minus drone
+    public var bearingDeg: Double?    // from the drone to the aircraft (always set)
     public var cpaS: Double?
     public var cpaM: Double?
     public var ageS: Double           // aircraft position age
-    public var text: String
+    public var text: String           // "TRAFFIC NEAR DRONE D9A03"
+    public var vertRel: TrafficVertical = .unknown
+    public var action: String = ""        // "GIVE WAY: DESCEND AND LAND D9A03"
+    public var resolution: String = ""    // action + "; " + the geometry
+    /// True above, false level or below, nil unknown.
+    public var aircraftAbove: Bool? { vertRel == .unknown ? nil : vertRel == .above }
+    public var approx: Bool = false       // LOW: barometric aircraft height used
+    public var fromObserver: Bool = false // LOW: horizM/bearingDeg from the observer (droneId "")
 }
 
 /// Caller-owned hysteresis memory.
@@ -135,9 +152,7 @@ public struct TrafficResult: Sendable, Equatable {
     public var haveData = false
     public var stale = false
     public var dataAgeS: Double? = nil
-    public var nearCount = 0          // fresh airborne aircraft within 3 km of the observer
-    public var groundCount = 0        // fresh aircraft on the ground within 3 km (not in nearCount)
-    public var aircraftCount = 0      // aircraft present (<= 60 s)
+    public var aircraftCount = 0      // aircraft present (<= 60 s); never shown as a count of threats
     public var highest: TrafficLevel { alerts.first?.level ?? .none }
     public var summary: String { TrafficRules.summary(self) }
     public func alert(forHex hex: String) -> TrafficAlert? { alerts.first { $0.hex == hex } }
@@ -152,8 +167,10 @@ public enum TrafficRules {
     public static let cpaMaxS = 60.0, cpaMissM = 500.0
     public static let holdHM = 1300.0, holdVM = 200.0
     public static let clearMs: Int64 = 20000
-    public static let lowRM = 3000.0, lowAboveM = 460.0
-    public static let emergRM = 30000.0, keepRM = 30000.0, countRM = 3000.0
+    public static let levelBandM = 30.0, keepRM = 30000.0
+    public static let lowRM = 3000.0, lowAglM = 460.0
+    /// LOW with the ground unknown: only aircraft below 3,500 m MSL (see traffic.h).
+    public static let lowUnknownGroundMaxM = 3500.0
     public static let earthRM = 6371000.0
     public static let deg = Double.pi / 180.0
     public static let ftToM = 0.3048
@@ -237,26 +254,83 @@ public enum TrafficRules {
         return 0
     }
 
-    static func pairText(_ a: TrafficAlert, _ kind: TrafficKind) -> String {
-        let id = droneLabel(a.droneId)
-        let hu = a.onGround ? ", AIRCRAFT ON GROUND" : a.heightUnknown ? ", HEIGHT UNKNOWN" : ""
-        if kind == .near { return "TRAFFIC NEAR DRONE \(id)\(hu)" }
-        guard let t = a.cpaS else { return "TRAFFIC CONVERGING WITH \(id)\(hu)" }
-        return "TRAFFIC CONVERGING WITH \(id), \(Int(floor(t + 0.5))) S\(hu)"
+    /// The aircraft above / level / below the drone, from the current vertical.
+    static func vertRel(_ v: Double?) -> TrafficVertical {
+        guard let v, !v.isNaN else { return .unknown }
+        if v > levelBandM { return .above }
+        if v < -levelBandM { return .below }
+        return .level
     }
 
-    /// Raise or refresh (mirrors traffic_apply). `pair`: family of NEAR/CONVERGING.
-    static func apply(_ s: inout TrafficState, pair: Bool, _ cand: TrafficAlert, raw: Bool, hold: Bool,
+    /// The words, the action and the resolution for a pair (traffic_pair_words).
+    static func pairWords(_ a: inout TrafficAlert, _ kind: TrafficKind) {
+        let id = droneLabel(a.droneId)
+        let hu = a.onGround ? ", AIRCRAFT ON GROUND" : a.heightUnknown ? ", HEIGHT UNKNOWN" : ""
+        if kind == .near { a.text = "TRAFFIC NEAR DRONE \(id)\(hu)" }
+        else if let t = a.cpaS { a.text = "TRAFFIC CONVERGING WITH \(id), \(Int(floor(t + 0.5))) S\(hu)" }
+        else { a.text = "TRAFFIC CONVERGING WITH \(id)\(hu)" }
+
+        a.vertRel = vertRel(a.vertM)
+        let brg = a.bearingDeg ?? 0
+        if a.onGround { a.action = "KEEP CLEAR OF AIRCRAFT ON GROUND" }
+        else if a.vertRel == .below {
+            a.action = "GIVE WAY: MOVE \(compass8(fmod(brg + 180.0, 360.0))), THEN LAND \(id)"
+        } else { a.action = "GIVE WAY: DESCEND AND LAND \(id)" }
+
+        let v = a.vertM.map { Int(floor(abs($0) + 0.5)) } ?? 0
+        let vert: String
+        if a.onGround { vert = "AIRCRAFT ON GROUND" }
+        else {
+            switch a.vertRel {
+            case .above: vert = "AIRCRAFT \(v) M ABOVE"
+            case .below: vert = "AIRCRAFT \(v) M BELOW"
+            case .level: vert = "AIRCRAFT LEVEL WITHIN 30 M"
+            case .unknown: vert = "AIRCRAFT HEIGHT UNKNOWN"
+            }
+        }
+        let h = a.horizM ?? 0
+        let hz = h < 1000.0 ? "\(Int(floor(h / 10.0 + 0.5)) * 10) M" : "\(kmText(h)) KM"
+        let cpa = a.cpaS.map { ", CLOSEST IN \(Int(floor($0 + 0.5))) S" } ?? ""
+        a.resolution = "\(a.action); \(vert), \(hz) \(compass8(brg))\(cpa)"
+    }
+
+    /// "800 M" to the nearest 10 m under 1 km, else "2.4 KM".
+    static func distText(_ m: Double) -> String {
+        m < 1000.0 ? "\(Int(floor(m / 10.0 + 0.5)) * 10) M" : "\(kmText(m)) KM"
+    }
+
+    /// LOW's words from its numbers (traffic_low_words).
+    static func lowWords(_ a: inout TrafficAlert) {
+        let dist = distText(a.horizM ?? 0)
+        let brg = compass8(a.bearingDeg ?? 0)
+        a.text = "LOW TRAFFIC \(brg) \(dist)" + (a.onGround ? ", AIRCRAFT ON GROUND"
+            : a.heightUnknown ? ", HEIGHT UNKNOWN" : (a.approx ? ", APPROX." : ""))
+        a.vertRel = a.vertM == nil ? .unknown : .above
+        a.action = "BE READY TO LAND DRONES"
+        let v = a.vertM.map { Int(floor($0 + 0.5)) } ?? 0
+        let ab = a.approx ? "ABOUT " : ""
+        let vert: String
+        if a.onGround { vert = "AIRCRAFT ON GROUND" }
+        else if a.heightUnknown { vert = "AIRCRAFT HEIGHT UNKNOWN" }
+        else if v <= 0 { vert = "AIRCRAFT NEAR GROUND LEVEL" }   // "near" is the approximation
+        else { vert = "AIRCRAFT \(ab)\(v) M ABOVE GROUND" }
+        a.resolution = "\(a.action); \(vert), \(dist) \(brg)"
+    }
+
+    /// Raise or refresh an alert (mirrors traffic_apply): a pair keyed by
+    /// drone and aircraft, LOW by the aircraft alone.
+    static func apply(_ s: inout TrafficState, _ cand: TrafficAlert, raw: Bool, hold: Bool,
                       seenMs: Int64, nowMs: Int64) {
-        let idx = s.entries.firstIndex { e in
-            e.a.hex == cand.hex && (pair ? (e.a.kind.isPair && e.a.droneId == cand.droneId) : e.a.kind == cand.kind)
+        let low = cand.kind == .low
+        let idx = s.entries.firstIndex {
+            $0.a.hex == cand.hex && (low ? $0.a.kind == .low : ($0.a.kind != .low && $0.a.droneId == cand.droneId))
         }
         var kind = cand.kind
         var i: Int
         if let found = idx {
             i = found
             let old = s.entries[i].a.kind
-            if !raw { kind = old } else if pair && old == .near && hold { kind = .near }
+            if low { kind = .low } else if !raw { kind = old } else if old == .near && hold { kind = .near }
         } else {
             if !raw { return }
             let fresh = TrafficState.Entry(a: cand, seenMs: seenMs)
@@ -275,7 +349,7 @@ public enum TrafficRules {
         a.kind = kind
         a.level = kind.level(onGround: a.onGround)
         a.held = !raw
-        if pair { a.text = pairText(a, kind) }
+        if low { lowWords(&a) } else { pairWords(&a, kind) }
         s.entries[i].a = a
         s.entries[i].visited = true
         s.entries[i].seenMs = seenMs
@@ -288,7 +362,9 @@ public enum TrafficRules {
     }
 
     /// The rule function (traffic_evaluate). dataMs nil: no ADS-B source.
-    public static func evaluate(drones: [TrafficDrone], aircraft ac: [TrafficAircraft], observer obs: TrafficObserver,
+    /// `observer` only feeds LOW.
+    public static func evaluate(drones: [TrafficDrone], aircraft ac: [TrafficAircraft],
+                                observer obs: TrafficObserver = .unknown,
                                 dataMs: Int64?, nowMs: Int64, state st: inout TrafficState) -> TrafficResult {
         var out = TrafficResult()
         out.haveData = dataMs != nil
@@ -296,34 +372,14 @@ public enum TrafficRules {
         out.dataAgeS = dataMs == nil ? nil : dataAge
         out.stale = out.haveData && !(dataAge <= staleS)
         let canRaise = out.haveData && !out.stale
-        let obsPos = known(obs.lat) && known(obs.lon)
-        let obsElev = altKnown(obs.elevM)
-        let olat = obs.lat ?? .nan, olon = obs.lon ?? .nan
 
         for k in st.entries.indices { st.entries[k].visited = false }
 
         func present(_ a: TrafficAircraft) -> Bool {
             ageS(seenMs: a.seenMs, nowMs: nowMs) <= presentS && a.lat.isFinite && a.lon.isFinite
         }
+        out.aircraftCount = ac.filter(present).count
 
-        for a in ac {
-            guard present(a) else { continue }
-            out.aircraftCount += 1
-            guard ageS(seenMs: a.seenMs, nowMs: nowMs) < freshS else { continue }
-            var near = false
-            if obsPos {
-                near = distanceM(olat, olon, a.lat, a.lon) <= countRM
-            } else {
-                for d in drones where !near {
-                    if let dlat = d.lat, let dlon = d.lon, dlat.isFinite, dlon.isFinite {
-                        near = distanceM(dlat, dlon, a.lat, a.lon) <= countRM
-                    }
-                }
-            }
-            if near { if a.onGround { out.groundCount += 1 } else { out.nearCount += 1 } }
-        }
-
-        // Pairs.
         for (i, d) in drones.enumerated() {
             guard let dlat = d.lat, let dlon = d.lon, dlat.isFinite, dlon.isFinite else { continue }
             for (j, a) in ac.enumerated() {
@@ -356,67 +412,71 @@ public enum TrafficRules {
                 let hold = horiz <= holdHM && (vert.isNaN || abs(vert) <= holdVM)
                 let kind: TrafficKind = nearRaw ? .near : .converging
                 let c = TrafficAlert(level: kind.level(onGround: a.onGround), kind: kind, held: false,
-                                     heightUnknown: vert.isNaN, approx: false, onGround: a.onGround,
+                                     heightUnknown: vert.isNaN, onGround: a.onGround,
                                      droneIndex: i, acIndex: j,
                                      droneId: d.id, hex: a.hex, callsign: a.callsign, horizM: horiz,
                                      vertM: vert.isNaN ? nil : vert, bearingDeg: bearing(dx: o.dx, dy: o.dy),
                                      cpaS: cpaS.isNaN ? nil : cpaS, cpaM: cpaM.isNaN ? nil : cpaM,
                                      ageS: age, text: "")
-                apply(&st, pair: true, c, raw: nearRaw || convRaw, hold: hold, seenMs: a.seenMs, nowMs: nowMs)
+                apply(&st, c, raw: nearRaw || convRaw, hold: hold, seenMs: a.seenMs, nowMs: nowMs)
             }
         }
 
-        // Low traffic near the observer.
-        if obsPos {
-            for (j, a) in ac.enumerated() {
-                guard present(a) else { continue }
-                let age = ageS(seenMs: a.seenMs, nowMs: nowMs)
-                let o = offsetM(olat, olon, a.lat, a.lon)
-                let horiz = (o.dx * o.dx + o.dy * o.dy).squareRoot()
-                let brg = bearing(dx: o.dx, dy: o.dy)
-                var h = Double.nan
-                var approx = !obsElev
-                if altKnown(a.altGeomM) { h = a.altGeomM! } else if altKnown(a.altBaroM) { h = a.altBaroM!; approx = true }
-                let thr = (obsElev ? obs.elevM! : 0.0) + lowAboveM
-                let vert: Double = (!h.isNaN && obsElev) ? h - obs.elevM! : .nan
-                let hu = h.isNaN
-                let ap = approx && !hu
-                let cond = !a.onGround && horiz <= lowRM && (h.isNaN || h < thr)
-                let text = "LOW TRAFFIC \(compass8(brg)) \(kmText(horiz)) KM" + (a.onGround ? ", AIRCRAFT ON GROUND" : hu ? ", HEIGHT UNKNOWN" : (ap ? ", APPROX." : ""))
-                let c = TrafficAlert(level: .caution, kind: .low, held: false, heightUnknown: hu, approx: ap,
-                                     onGround: a.onGround, droneIndex: nil, acIndex: j, droneId: "", hex: a.hex, callsign: a.callsign,
-                                     horizM: horiz, vertM: vert.isNaN ? nil : vert, bearingDeg: brg,
-                                     cpaS: nil, cpaM: nil, ageS: age, text: text)
-                apply(&st, pair: false, c, raw: canRaise && age < freshS && cond, hold: cond, seenMs: a.seenMs, nowMs: nowMs)
+        // LOW: airborne aircraft in UAS airspace.
+        let obsPos = known(obs.lat) && known(obs.lon)
+        var ground = Double.nan
+        if altKnown(obs.elevM) {
+            ground = obs.elevM!
+        } else {
+            var lowest = Double.nan
+            for d in drones {
+                guard d.live, let la = d.lat, let lo = d.lon, la.isFinite, lo.isFinite else { continue }
+                guard altKnown(d.altGeoM), let h = d.heightM, h.isFinite else { continue }
+                if lowest.isNaN || d.altGeoM! < lowest { lowest = d.altGeoM!; ground = d.altGeoM! - h }
             }
         }
-
-        // Emergencies.
         for (j, a) in ac.enumerated() {
             guard present(a) else { continue }
             let age = ageS(seenMs: a.seenMs, nowMs: nowMs)
-            let word: String? = a.squawk == 7500 ? "HIJACK" : a.squawk == 7600 ? "RADIO FAILURE"
-                : (a.squawk == 7700 || a.emergency) ? "EMERGENCY" : nil
-            guard let word else { continue }
-            var horiz = Double.nan, brg = Double.nan
+            var dx = Double.nan, dy = Double.nan, dist = Double.nan
+            var anchor: Int? = nil
+            var fromObs = false, within = false
             if obsPos {
-                let o = offsetM(olat, olon, a.lat, a.lon)
-                horiz = (o.dx * o.dx + o.dy * o.dy).squareRoot()
-                brg = bearing(dx: o.dx, dy: o.dy)
-            } else {
-                for d in drones {
-                    guard let dlat = d.lat, let dlon = d.lon, dlat.isFinite, dlon.isFinite else { continue }
-                    let o = offsetM(dlat, dlon, a.lat, a.lon)
+                let o = offsetM(obs.lat!, obs.lon!, a.lat, a.lon)
+                dx = o.dx; dy = o.dy; dist = (dx * dx + dy * dy).squareRoot()
+                fromObs = true
+                within = dist <= lowRM
+            }
+            if !within {
+                var bi: Int? = nil
+                var bd = Double.nan, bx = 0.0, by = 0.0
+                for (i, d) in drones.enumerated() {
+                    guard d.live, let la = d.lat, let lo = d.lon, la.isFinite, lo.isFinite else { continue }
+                    let o = offsetM(la, lo, a.lat, a.lon)
                     let h = (o.dx * o.dx + o.dy * o.dy).squareRoot()
-                    if horiz.isNaN || h < horiz { horiz = h; brg = bearing(dx: o.dx, dy: o.dy) }
+                    if bi == nil || h < bd { bi = i; bd = h; bx = o.dx; by = o.dy }
+                }
+                if let bi, bd <= lowRM || !fromObs {
+                    anchor = bi; dist = bd; dx = bx; dy = by; fromObs = false
+                    within = bd <= lowRM
                 }
             }
-            let cond = horiz.isNaN || horiz <= emergRM
-            let c = TrafficAlert(level: .advisory, kind: .emergency, held: false, heightUnknown: false, approx: false,
-                                 onGround: a.onGround, droneIndex: nil, acIndex: j, droneId: "", hex: a.hex, callsign: a.callsign,
-                                 horizM: horiz.isNaN ? nil : horiz, vertM: nil, bearingDeg: brg.isNaN ? nil : brg,
-                                 cpaS: nil, cpaM: nil, ageS: age, text: "\(word) \(a.name)")
-            apply(&st, pair: false, c, raw: canRaise && age < freshS && cond, hold: cond, seenMs: a.seenMs, nowMs: nowMs)
+            if !fromObs && anchor == nil { continue }
+            var h = Double.nan
+            var approx = false
+            if altKnown(a.altGeomM) { h = a.altGeomM! } else if altKnown(a.altBaroM) { h = a.altBaroM!; approx = true }
+            let vert: Double = (!h.isNaN && !ground.isNaN) ? h - ground : .nan
+            if vert.isNaN { approx = false }
+            var c = TrafficAlert(level: .caution, kind: .low, held: false, heightUnknown: vert.isNaN,
+                                 onGround: a.onGround, droneIndex: anchor, acIndex: j,
+                                 droneId: anchor.map { drones[$0].id } ?? "", hex: a.hex, callsign: a.callsign,
+                                 horizM: dist, vertM: vert.isNaN ? nil : vert, bearingDeg: bearing(dx: dx, dy: dy),
+                                 cpaS: nil, cpaM: nil, ageS: age, text: "")
+            c.approx = approx
+            c.fromObserver = fromObs
+            let low = !vert.isNaN ? vert < lowAglM : (h.isNaN || !ground.isNaN || h < lowUnknownGroundMaxM)
+            let cond = !a.onGround && within && low
+            apply(&st, c, raw: canRaise && age < freshS && cond, hold: cond, seenMs: a.seenMs, nowMs: nowMs)
         }
 
         // Entries not seen are out of hold; expire after 20 s out.
@@ -435,20 +495,26 @@ public enum TrafficRules {
             out.alerts.append(o)
         }
         st.entries = kept
+        // A warning for an aircraft supersedes its LOW (kept, not shown).
+        let warned = Set(out.alerts.filter { $0.kind != .low && $0.level == .warning }.map(\.hex))
+        out.alerts.removeAll { $0.kind == .low && warned.contains($0.hex) }
         out.alerts.sort { cmp($0, $1) < 0 }
         return out
     }
 
-    /// One status line for every surface; never claims absence of traffic.
+    /// The conflict watch status, the one status line for every surface; it
+    /// never counts aircraft and never claims the airspace is empty.
     public static func summary(_ r: TrafficResult) -> String {
-        guard r.haveData else { return "no ADS-B source" }
+        guard r.haveData else { return "CONFLICT WATCH OFF: no ADS-B source" }
         guard let age = r.dataAgeS else { return "TRAFFIC DATA STALE, data age unknown" }
         let a = Int(floor(age + 0.5))
         if r.stale { return "TRAFFIC DATA STALE, data \(a) s old" }
-        if r.nearCount == 0 {
-            return "no \(r.groundCount > 0 ? "airborne " : "")ADS-B traffic reported within 3 km, data \(a) s old"
-        }
-        return "\(r.nearCount) airborne aircraft within 3 km, data \(a) s old"
+        let n = r.alerts.count
+        if n == 0 { return "conflict watch on, no ADS-B conflicts, data \(a) s old" }
+        let low = r.alerts.filter { $0.kind == .low }.count, conf = n - low
+        let l = low > 0 ? "\(low) low aircraft, " : ""
+        let c = conf > 0 ? "\(conf) ADS-B conflict\(conf == 1 ? "" : "s"), " : ""
+        return "conflict watch on, \(l)\(c)data \(a) s old"
     }
 }
 

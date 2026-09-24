@@ -11,7 +11,7 @@ __pycache__/
 # macOS
 .DS_Store
 
-# offline tile cache (fetched by tools/fetch_tiles.py; ~5 MB of PNGs)
+# offline tile cache (fetched by tools/fetch_tiles.py; about 1 MB at the 3 km default)
 firmware/orecchino_sensecap/data/tiles/
 
 # local Wi-Fi network for net_sync.h (see wifi_secrets.example.h)

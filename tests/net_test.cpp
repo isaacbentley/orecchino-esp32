@@ -87,6 +87,8 @@ static uint32_t f_utc_now() { return F.utc_now; }
 static void f_emit(uint8_t dst, const char* line, size_t n) { F.lines.push_back({dst, std::string(line, n)}); }
 static bool g_have_pos = true;
 static bool f_have_pos() { return g_have_pos; }
+static bool g_phone = false;
+static bool f_phone() { return g_phone; }
 
 static NetOps fake_ops() {
   NetOps o = {};
@@ -96,6 +98,7 @@ static NetOps fake_ops() {
   o.load = f_load; o.store = f_store;
   o.jobs_start = f_jobs_start; o.jobs_poll = f_jobs_poll; o.jobs_cancel = f_jobs_cancel;
   o.set_utc = f_set_utc; o.utc_now = f_utc_now; o.emit = f_emit; o.have_position = f_have_pos;
+  o.phone_connected = f_phone;
   return o;
 }
 
@@ -108,6 +111,8 @@ static NetSaved saved(const char* s, const char* p) {
 
 static void reset(uint8_t mode, std::vector<NetSaved> nets, uint8_t every = 15) {
   F = Fake();
+  g_phone = false;
+  g_have_pos = true;
   F.nvs.mode = mode;
   F.nvs.every_min = every;
   F.nvs.n = (uint8_t)nets.size();
@@ -610,6 +615,169 @@ static void test_no_position() {
         (NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES), "position: and it fetches TFR, ADS-B and tiles");
 }
 
+static void test_phone_pause() {
+  uint32_t t = 1000;
+  reset(NET_MODE_SYNC, {saved("Home", "password1")});
+  // Mid-join: the phone connects -> the join is dropped, the hop released.
+  net_tick(t);
+  CHECK(F.begins.size() == 1 && F.hold, "phone: (an automatic join under way)");
+  g_phone = true;
+  net_tick(t += 100);
+  CHECK(F.leaves == 1 && !F.hold && net_get_state() == NET_STATE_DISCONNECTED && net_is_paused(),
+        "phone: connecting drops an automatic join and releases the hop at once");
+  CHECK(has_line("{\"type\":\"net\",\"state\":\"paused\",\"ssid\":\"Home\",\"reason\":\"phone\"}"), "phone: a net paused line");
+  char line[120];
+  net_status_line(line, sizeof(line));
+  CHECK(!strcmp(line, "Wi-Fi paused: phone connected"), "phone: SYSTEM line");
+  F.lines.clear();
+  net_host_line("wifi_status", "{\"cmd\":\"wifi_status\"}", 1);
+  CHECK(has_line("\"paused\":\"phone\"", 1), "phone: wifi_status says paused:phone");
+  net_tick(t += 60 * 60000);
+  CHECK(F.begins.size() == 1 && !F.hold, "phone: no automatic window for an hour while connected");
+  // The phone leaves: 10 s grace, then the overdue window.
+  g_phone = false;
+  net_tick(t += 100);
+  CHECK(has_line("\"state\":\"resumed\"") && !net_is_paused(), "phone: resumed line on disconnect");
+  net_tick(t += 5000);
+  CHECK(F.begins.size() == 1, "phone: nothing inside the 10 s grace");
+  g_phone = true;               // a quick reconnect inside the grace
+  net_tick(t += 1000);
+  g_phone = false;
+  net_tick(t += 1000);
+  net_tick(t += 9000);
+  CHECK(F.begins.size() == 1, "phone: a quick reconnect restarts the grace");
+  net_tick(t += 1100);
+  CHECK(F.begins.size() == 2 && F.hold, "phone: after the grace the overdue window runs");
+  // Mid-fetch: cancelled, station left, hop released at once; the worker drains.
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.running, "phone: (a fetch under way)");
+  int leaves = F.leaves;
+  F.lines.clear();
+  g_phone = true;
+  net_tick(t += 100);
+  CHECK(F.cancels == 1 && F.leaves == leaves + 1 && !F.hold && net_get_state() == NET_STATE_DISCONNECTED,
+        "phone: a fetch is cancelled and the station leaves without waiting for the worker");
+  CHECK(F.lines.size() == 2 && F.lines[0].second.find("\"state\":\"paused\"") != std::string::npos &&
+        F.lines[1].second.find("\"state\":\"idle\"") != std::string::npos,
+        "phone: paused, then idle at once (the station has left)");
+  net_scan_start();   // a person asks meanwhile: waits for the worker
+  net_tick(t += 100);
+  CHECK(F.scan_starts == 0, "phone: nothing new until the worker has stopped");
+  // The worker stops at its next check: TIME had finished, TFR was cut, the
+  // rest never started. Cut jobs are reported as cancelled, not failed.
+  F.result = result_ok(NET_JOB_TIME, 1790000000, t);
+  F.result.cancelled = NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES;
+  snprintf(F.result.err, sizeof(F.result.err), "TFR: cancelled");
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(F.leaves == leaves + 1 && net_is_clock_synced(), "phone: the drained result is kept (clock), no second leave");
+  CHECK(has_line("\"ok\":[\"time\"],\"failed\":[],\"cancelled\":[\"tfr\",\"adsb\",\"tiles\"]") &&
+        has_line("\"phone\":\"cancelled\""), "phone: the late report says the pause cancelled the rest");
+  CHECK(!g_net.job_wait[1] && !g_net.job_wait[2] && !g_net.job_wait[3] && !g_net.job_fails[1],
+        "phone: cancelled jobs are not backed off as failures");
+  net_tick(t += 100);
+  CHECK(F.scan_starts == 1 && F.hold, "phone: a person's SCAN still runs while connected");
+  F.nets = {};
+  F.scan_result = 0;
+  net_tick(t += 100);
+  CHECK(!F.hold, "phone: and releases the hop when done");
+  // Manual SYNC NOW while connected: runs to its end, then leaves.
+  net_sync_now();
+  net_tick(t += 100);
+  CHECK(F.begins.size() == 3, "phone: SYNC NOW still joins while connected");
+  net_status_line(line, sizeof(line));
+  CHECK(!strcmp(line, "CONNECTING to Home"), "phone: the SYSTEM line shows the manual join");
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.running && F.hold, "phone: and fetches");
+  F.result = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB);
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(!F.hold && net_get_state() == NET_STATE_DISCONNECTED, "phone: then leaves");
+  // A phone wifi_join while connected runs too.
+  net_host_line("wifi_join", "{\"cmd\":\"wifi_join\",\"ssid\":\"Lab\",\"psk\":\"password9\"}", 1);
+  net_tick(t += 100);
+  CHECK(F.begins.back() == "Lab/password9", "phone: wifi_join from the phone runs while connected");
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  F.result = result_ok(NET_JOB_ADSB);
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(!F.hold && F.nvs.n == 2 && !strcmp(F.nvs.saved[0].ssid, "Lab"), "phone: joined, saved, left");
+
+  // STAY: the phone connecting lets go of the access point; leaving rejoins after the grace.
+  reset(NET_MODE_STAY, {saved("Desk", "password1")});
+  net_tick(t = 1000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  F.result = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES, 1790000000, t);
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(F.hold && F.leaves == 0, "stay+phone: (associated)");
+  g_phone = true;
+  net_tick(t += 100);
+  CHECK(F.leaves == 1 && !F.hold && net_get_state() == NET_STATE_DISCONNECTED, "stay+phone: the station disconnects, hop runs");
+  net_tick(t += 60000);
+  CHECK(F.begins.size() == 1, "stay+phone: no rejoin while the phone is there");
+  // A mode change from the phone (to STAY) still joins, then leaves again.
+  net_set_mode(NET_MODE_SYNC);
+  net_host_line("wifi_mode", "{\"cmd\":\"wifi_mode\",\"mode\":\"stay\"}", 1);
+  net_tick(t += 100);
+  CHECK(F.begins.size() == 2, "stay+phone: wifi_mode stay from the phone joins once");
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  F.result = result_ok(NET_JOB_ADSB);
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(!F.hold && F.leaves == 2, "stay+phone: and does not stay while the phone is connected");
+  g_phone = false;
+  net_tick(t += 100);
+  net_tick(t += 9000);
+  CHECK(F.begins.size() == 2, "stay+phone: grace after the phone leaves");
+  net_tick(t += 1100);
+  CHECK(F.begins.size() == 3 && F.hold, "stay+phone: then STAY rejoins");
+  // STAY after a person's CONNECT: the manual window ends when STAY goes
+  // online, so STAY's own 10 s ADS-B fetches are cancelled by a phone.
+  reset(NET_MODE_STAY, {saved("Desk", "password1")});
+  net_connect("Desk", NULL);
+  net_tick(t = 1000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  F.result = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES, 1790000000, t);
+  F.done = true;
+  net_tick(t += 100);
+  net_tick(t += NET_ADSB_EVERY_MS);
+  CHECK(F.running && F.job_reqs.size() == 2 && F.job_reqs[1] == NET_JOB_ADSB, "stay+phone: (STAY's own ADS-B fetch under way)");
+  g_phone = true;
+  net_tick(t += 100);
+  CHECK(F.cancels == 1 && !F.hold && F.leaves == 1, "stay+phone: that fetch is cancelled, not run to its end as the CONNECT's");
+  // The hardware case: the worker had finished just before the phone
+  // connected; its report is only read after the pause.
+  reset(NET_MODE_SYNC, {saved("Home", "password1")});
+  net_tick(t = 1000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  F.result = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES, 1790000000, t);
+  F.done = true;   // done, not yet polled
+  F.lines.clear();
+  g_phone = true;
+  net_tick(t += 100);
+  CHECK(F.lines.size() == 3 && F.lines[0].second.find("\"state\":\"paused\"") != std::string::npos &&
+        F.lines[1].second.find("\"state\":\"idle\"") != std::string::npos &&
+        F.lines[2].second.find("\"state\":\"synced\"") != std::string::npos &&
+        F.lines[2].second.find("\"phone\":\"completed before pause\"") != std::string::npos &&
+        F.lines[2].second.find("\"cancelled\"") == std::string::npos,
+        "phone: a fetch done before the pause is reported as completed before it");
+  CHECK(!F.hold && F.leaves == 1, "phone: (and the station left once)");
+  // Mode OFF: nothing to pause.
+  reset(NET_MODE_OFF, {saved("Home", "password1")});
+  g_phone = true;
+  net_tick(t += 100);
+  net_status_line(line, sizeof(line));
+  CHECK(!net_is_paused() && !strcmp(line, "OFF") && !has_line("paused"), "phone: mode OFF shows OFF, not paused");
+}
+
 // ---------------------------------------------------------------------------
 // net_parse.h
 
@@ -835,8 +1003,9 @@ static void test_tfr() {
   char url[400];
   net_url_tfr(url, sizeof(url), 37.7749, -122.4194);
   CHECK(strstr(url, "&bbox=-124.6949,35.9763,-120.1439,39.5735,EPSG:4326") != NULL, "tfr: bbox is lon,lat,lon,lat (the order the FAA accepts)");
-  net_url_adsb(url, sizeof(url), 37.62, -122.38);
-  CHECK(!strcmp(url, "https://api.adsb.lol/v2/point/37.6200/-122.3800/17"), "adsb: URL, radius 17 NM");
+  net_url_adsb(url, sizeof(url), 37.62, -122.38, 10000);
+  CHECK(!strcmp(url, "https://api.adsb.lol/v2/point/37.6200/-122.3800/6"), "adsb: URL, 10 km asks for 6 NM (rounded up)");
+  CHECK(net_adsb_nm(9260) == 5 && net_adsb_nm(9261) == 6 && net_adsb_nm(30000) == 17, "adsb: km to whole NM, rounded up");
 }
 
 static void test_ntp() {
@@ -864,27 +1033,113 @@ static void test_ntp() {
 }
 
 static void test_tiles() {
-  int32_t x, y;
-  net_deg2tile(37.7749, -122.4194, 15, &x, &y);
-  CHECK(x == 5241 && y == 12665, "tiles: deg2tile matches TileSync.swift");
-  uint32_t n = net_tile_count(37.7749, -122.4194, NET_TILE_RADIUS_M);
-  CHECK(n == 425, "tiles: 425 tiles within 8 km, zooms 11-15");
-  bool distinct = true, inrange = true;
-  std::vector<uint64_t> seen;
-  for (uint32_t k = 0; k < n; k++) {
-    int z;
-    int32_t tx, ty;
-    if (!net_tile_at(37.7749, -122.4194, NET_TILE_RADIUS_M, k, &z, &tx, &ty)) { inrange = false; break; }
-    seen.push_back(((uint64_t)z << 48) | ((uint64_t)tx << 24) | (uint64_t)ty);
-  }
-  std::sort(seen.begin(), seen.end());
-  distinct = std::adjacent_find(seen.begin(), seen.end()) == seen.end();
-  int z;
-  CHECK(inrange && distinct && !net_tile_at(37.7749, -122.4194, NET_TILE_RADIUS_M, n, &z, &x, &y),
-        "tiles: the list enumerates each tile once and ends");
   char url[128];
   net_url_tile(url, sizeof(url), 15, 5241, 12665);
-  CHECK(!strcmp(url, "https://basemaps.cartocdn.com/dark_all/15/5241/12665.png"), "tiles: CARTO dark_all URL");
+  CHECK(!strcmp(url, "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/15/12665/5241"),
+        "tiles: Esri World Dark Gray, z/y/x (row before column)");
+  // The defaults the fetch asks tile_plan.h for (tests/tile_plan_test.cpp has the rest).
+  CHECK(NET_TILE_KM_DEFAULT == 3 && TILE_PLAN_ZMIN == 12 && TILE_PLAN_ZMAX == 15, "tiles: 3 km, zooms 12-15 by default");
+}
+
+static void test_adsb_area() {
+  double home_lat = 37.8, home_lon = -122.4;
+  NetArea a = net_adsb_area(home_lat, home_lon, NULL, NULL, 0, 10000, 30000);
+  CHECK(a.lat == home_lat && a.lon == home_lon && a.radius_m == 10000, "area: no drones: home, the set radius");
+  double dl[3], dn[3];
+  // A drone 2 km out: still home.
+  dl[0] = home_lat + 2000 / 111195.0; dn[0] = home_lon;
+  a = net_adsb_area(home_lat, home_lon, dl, dn, 1, 10000, 30000);
+  CHECK(a.lat == home_lat && a.radius_m == 10000, "area: a drone within 3 km keeps home as the centre");
+  // A drone 8 km east: centre between them, radius so the drone has 9 km.
+  dl[0] = home_lat; dn[0] = home_lon + 8000 / (111195.0 * cos(home_lat * M_PI / 180));
+  a = net_adsb_area(home_lat, home_lon, dl, dn, 1, 10000, 30000);
+  double to_home = traffic_distance_m(a.lat, a.lon, home_lat, home_lon);
+  double to_drone = traffic_distance_m(a.lat, a.lon, dl[0], dn[0]);
+  CHECK(fabs(to_home - 4000) < 20 && fabs(to_drone - 4000) < 20, "area: a drone 8 km out moves the centre halfway");
+  CHECK(fabs(a.radius_m - 13000) < 20, "area: radius gives the drone 9 km (4 + 9 = 13 km)");
+  // Drones spread wide: capped at 30 km.
+  dl[1] = home_lat + 40000 / 111195.0; dn[1] = home_lon;
+  dl[2] = home_lat - 5000 / 111195.0; dn[2] = home_lon;
+  a = net_adsb_area(home_lat, home_lon, dl, dn, 3, 10000, 30000);
+  CHECK(a.radius_m == 30000, "area: never more than 30 km");
+  // A small setting with one far drone still covers the drone.
+  dl[0] = home_lat + 4000 / 111195.0; dn[0] = home_lon;
+  a = net_adsb_area(home_lat, home_lon, dl, dn, 1, 5000, 30000);
+  CHECK(traffic_distance_m(a.lat, a.lon, dl[0], dn[0]) + 9000 <= a.radius_m + 1, "area: every live drone has 9 km around it");
+  // Parsed aircraft outside the radius are dropped.
+  std::string body = read_file("tests/vectors/net/adsb_lol_point.json");
+  TrafficAircraft ac[16];
+  double dist[16];
+  NetAdsbSet set = {};
+  set.ac = ac; set.dist = dist; set.cap = 16; set.lat = 37.62; set.lon = -122.38; set.now_ms = 100000;
+  set.max_m = 10000;
+  char buf[2048];
+  NetJsonSplit sp;
+  net_split_init(&sp, "ac", buf, sizeof(buf), net_adsb_on_obj, &set);
+  net_split_feed(&sp, body.data(), body.size());
+  bool within = set.n > 0 && set.n < 11;
+  for (int i = 0; i < set.n; i++) within &= dist[i] <= 10000;
+  CHECK(within, "area: aircraft beyond the radius are not kept");
+}
+
+static void test_radius_config() {
+  reset(NET_MODE_SYNC, {saved("Home", "password1")});
+  CHECK(net_get_adsb_radius_km() == 10 && net_get_tile_radius_km() == 3, "config: defaults 10 km ADS-B, 3 km map");
+  net_set_adsb_radius_km(2);
+  CHECK(net_get_adsb_radius_km() == 5 && F.nvs.adsb_km == 5, "config: ADS-B clamped to 5 km and stored");
+  net_set_adsb_radius_km(99);
+  CHECK(net_get_adsb_radius_km() == 30, "config: ADS-B at most 30 km");
+  F.lines.clear();
+  net_host_line("wifi_config", "{\"cmd\":\"wifi_config\",\"adsb_km\":12,\"tile_km\":6}", 1);
+  CHECK(net_get_adsb_radius_km() == 12 && net_get_tile_radius_km() == 6 && F.nvs.tile_km == 6 &&
+        has_line("\"adsb_km\":12,\"tile_km\":6", 1), "config: wifi_config sets both and answers wifi_status");
+  net_host_line("wifi_config", "{\"cmd\":\"wifi_config\",\"tile_km\":4}", 0);
+  CHECK(net_get_tile_radius_km() == 6 && has_line("refused over USB", 0), "config: refused over plain USB");
+  // The window carries the radii; the plan's max radius caps the setting.
+  uint32_t t = 1000;
+  net_tick(t);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  NetJobResult r = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES, 1790000000, t);
+  r.adsb_radius_m = 13000;
+  r.have_plan = true;
+  tile_plan_make(&r.plan, 37.8, -122.4, 6000, 0x5E0000, 0, NULL, 0);
+  r.tile_max_m = 9000;
+  r.tiles_left = 0;
+  F.result = r;
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(has_line("\"adsb_km\":13.0") && has_line("\"map\":\"Map: 6 km z12-15; ") && has_line("\"tile_max_km\":9.00"),
+        "config: the synced line reports the ADS-B radius and the map plan");
+  TilePlan pl;
+  CHECK(net_tile_plan(&pl) && pl.total == r.plan.total && net_get_tile_radius_max_km() == 9.0, "config: net_tile_plan and the max radius");
+  net_set_tile_radius_km(20);
+  CHECK(net_get_tile_radius_km() == 9, "config: the map setting stops at what fits");
+  double keep_max = g_net.tile_max_m;
+  g_net.tile_max_m = 800;   // a plan on a nearly full flash: not even 1 km fits
+  net_set_tile_radius_km(5);
+  CHECK(net_get_tile_radius_km() == 1, "config: under 1 km of room the setting stays at 1 km, not 30");
+  g_net.tile_max_m = keep_max;
+  F.lines.clear();
+  net_host_line("wifi_status", "{\"cmd\":\"wifi_status\"}", 1);
+  CHECK(has_line("\"tile_max_km\":9.00", 1), "config: wifi_status carries tile_max_km");
+  // A shrunk plan / a full store shows on the SYSTEM line.
+  t += 16 * 60000;
+  net_tick(t);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  r = result_ok(NET_JOB_ADSB | NET_JOB_TILES);
+  r.have_plan = true;
+  tile_plan_make(&r.plan, 37.8, -122.4, 10000, 0x5E0000, 200 * 1024, NULL, 0);
+  r.storage_full = true;
+  r.tiles_left = 12;
+  F.result = r;
+  F.done = true;
+  net_tick(t += 100);
+  char line[140];
+  net_status_line(line, sizeof(line));
+  CHECK(!strncmp(line, "Map: 10 km z12-14, ", 19) && strstr(line, "storage full"), "config: SYSTEM line shows the shrunk map and a full store");
+  CHECK(has_line("\"storage_full\":true"), "config: the synced line says storage_full");
 }
 
 int main(void) {
@@ -899,6 +1154,9 @@ int main(void) {
   test_update_map_and_forget_builtin();
   test_forget_and_switch();
   test_no_position();
+  test_phone_pause();
+  test_adsb_area();
+  test_radius_config();
   test_json();
   test_split();
   test_adsb();

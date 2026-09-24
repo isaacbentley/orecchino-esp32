@@ -42,6 +42,8 @@ bool        txui_running() { return tx_running(); }
 void        txui_set_running(bool on) { tx_set_running(on); }
 bool        txui_emergency() { return tx_emergency(); }
 void        txui_set_emergency(bool on) { tx_set_emergency(on); }
+bool        txui_slow() { return tx_slow(); }
+void        txui_set_slow(bool on) { tx_set_slow(on); }
 
 void board_switch_mode(uint8_t mode) {
   rx_log_flush();   // the restart would lose records not yet saved
@@ -69,6 +71,7 @@ static void t5_net_begin(bool station) {
     net_esp_wifi_ops(&ops);
     net_fetch_ops(&ops);
     ops.set_utc = t5_net_set_utc;
+    ops.phone_connected = ble_link_peer_secure;   // a paired phone pauses automatic Wi-Fi
   } else {
     ops.load = net_esp_load;   // beacon mode: show the settings, never join or scan
   }
@@ -127,6 +130,11 @@ void setup() {
 
   if (g_mode == UI_MODE_RX) {
     tile_store_begin(ui_map_center);
+    // Once per basemap change: this board's .png tiles came from CARTO,
+    // which now serves "API KEY REQUIRED" placeholders; the map is Esri JPEG.
+    uint32_t gone = tile_store_check_source(true);
+    if (gone) Serial.printf("[ORECCHINO] tiles: removed %lu entries from the old basemap (now %s)\n",
+                            (unsigned long)gone, TILE_SOURCE_ID);
   }
   // LoRa and SD share SPI bus: pull CS lines high immediately to prevent bus contention
   gpio_hold_dis((gpio_num_t)PIN_LORA_RST);

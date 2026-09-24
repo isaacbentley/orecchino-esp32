@@ -27,6 +27,15 @@ struct RidMessage: Decodable {
     var n: Int? = nil
     var msg: String? = nil
     var total: Int? = nil
+    // fs_stat (tile_store.h): bytes, and the board's own plan limits
+    var used: Int? = nil
+    var free: Int? = nil
+    var reserve: Int? = nil
+    var tiles: Int? = nil
+    var tile_bytes: Int? = nil
+    var avg_tile: Int? = nil
+    var capacity: Int? = nil
+    var max_radius_km: Double? = nil
 
     // match log records (log / log_done), see DeviceLog. `seq`/`i` are null
     // for a contact still live; log_done's `next` is the cursor for the next

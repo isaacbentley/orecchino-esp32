@@ -4,7 +4,12 @@
 // list is a capability report; real Ed25519 Authentication with a published
 // test key (and one deliberately corrupted signature). A board sketch
 // includes this header and calls tx_begin() / tx_tick(); a UI drives the
-// per-path enable mask through the tx_* accessors at the end.
+// per-path enable mask and the rate through the tx_* accessors at the end.
+//
+// On the boards the radios are driven by a task of their own (tx_task), so a
+// screen that holds the loop -- an e-paper refresh takes up to 1.5 s --
+// never holds a transmission back. The loop only reads the serial console
+// and prints the status line.
 //
 // This is test equipment. It is not a compliant Remote ID transmitter, its
 // identities say so on the air, and it must only be run where you are
@@ -12,16 +17,23 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Preferences.h>
 #include <NimBLEDevice.h>
+#include <stdarg.h>
 #include "esp_wifi.h"
 #include "odid_build.h"
 #include "odid_auth.h"
+#if defined(ESP_PLATFORM)
+#include <sys/time.h>
+#include "esp_timer.h"
+#endif
 
 #define TX_NAME      "orecchino-tx"
-#define TX_VERSION   "0.3.0"
+#define TX_VERSION   "0.4.0"
 #define WIFI_CHANNEL 6      // Open Drone ID default / NAN social channel
-#define TX_PERIOD_MS 5000   // every path transmits once every 5 s
 #define ORBIT_M      50.0   // each aircraft's own little circle
+#define TX_WIFI_QDBM 80     // Wi-Fi TX power in 0.25 dBm: 20 dBm, the chip's maximum
+#define TX_BLE_DBM   20     // BLE TX power: +20 dBm, the ESP32-C3/S3 maximum
 
 // ---------------------------------------------------------------- paths
 
@@ -100,17 +112,93 @@ static const TxPath PATHS[P_COUNT] = {
     320.0, 195.0, {0x02, 0x00, 0x5E, 0x7E, 0x57, 0x0A} },
 };
 
+// ---------------------------------------------------------------- rates
+
+// ASTM F3411-22a asks a broadcast transmitter for the dynamic (Location)
+// message at least once a second and each static message (Basic ID, Self
+// ID, System, Operator ID) at least every 3 s, on every transport it uses.
+// SPEC is comfortably inside that, with headroom for a receiver that hops
+// channels (ours listens on channel 6 for 1.2 s of every 1.6) or scans BLE
+// 30 ms in 100. SLOW is the old quiet bench mode: every path once every 5 s.
+typedef struct {
+  uint16_t pack_ms;      // Wi-Fi beacon: one message pack per path
+  uint16_t single_ms;    // Wi-Fi SINGLE: one message per frame, odid_single_seq order
+  uint16_t nan_ms;       // Wi-Fi NAN service discovery frame (message pack)
+  uint16_t nan_sync_ms;  // NAN synchronisation beacon
+  uint16_t ext_itvl_ms;  // BLE5 1M advertising interval (a pack every event)
+  uint16_t lr_itvl_ms;   // BLE5 coded advertising interval
+  uint16_t ext_data_ms;  // a fresh pack (new Location) into a BLE5 set
+  uint16_t leg_itvl_ms;  // BLE4 legacy advertising interval
+  uint16_t leg_msg_ms;   // BLE4: how long each rotated message stays on air
+  uint16_t share_ms;     // BLE5 1M and coded sharing one set: each one's turn
+} TxRate;
+enum { TX_RATE_SPEC = 0, TX_RATE_SLOW = 1 };
+static const TxRate TX_RATES[2] = {
+  { 250, 125, 250, 500, 100, 150, 250, 50, 200, 500 },
+  { 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 2500 },
+};
+#define TX_SLOW_MS 5000
+
 // Flight sim defaults: Crissy Field.
 static double s_home_lat = 37.8039;
 static double s_home_lon = -122.4640;
 static double s_ring_m   = 201.0;   // 1/8 mile between the aircraft
 static double s_speed_ms = 8.0;
 
-static bool s_running   = true;
-static bool s_enabled[P_COUNT] = { true, true, true, true, true, true, true, true, true, true };
-static bool s_emergency = false;
-static uint8_t  s_counter[P_COUNT] = {0};
-static uint32_t s_tx[P_COUNT] = {0};
+// Written by the UI and the console, read by the radio task: single bytes,
+// so each read sees a whole value. The radio task reconciles the radios
+// with them within one pass (2 ms).
+static volatile bool    s_running   = true;
+static volatile bool    s_enabled[P_COUNT] = { true, true, true, true, true, true, true, true, true, true };
+static volatile bool    s_emergency = false;
+static volatile uint8_t s_rate      = TX_RATE_SPEC;
+
+static uint8_t  s_counter[P_COUNT] = {0};         // ODID message counter, per path
+static volatile uint32_t s_tx[P_COUNT]      = {0}; // payloads put on the air
+static volatile uint32_t s_err[P_COUNT]     = {0}; // failed attempts
+static volatile uint32_t s_last_ok[P_COUNT] = {0}; // millis() of the last success
+
+// Radio health, reported on the status line.
+static bool     s_txw_ok = false, s_txb_ok = false;
+static volatile uint32_t s_wifi_err = 0;          // esp_wifi_80211_tx refused a frame
+static volatile int      s_wifi_rc  = 0;          // ...and its last error code
+static volatile uint32_t s_wifi_done_ok = 0, s_wifi_done_fail = 0;  // driver's TX-done reports
+static volatile int      s_wifi_rate = -1;        // wifi_phy_rate_t of the last frame (0 = 1 Mbps)
+static volatile uint32_t s_nan_sync = 0;          // NAN sync beacons sent
+static volatile uint8_t  s_ch = 0;                // channel read back from the driver
+static volatile uint32_t s_ch_fix = 0;            // times it had drifted and was put back
+static volatile uint32_t s_ble_restarts = 0;      // in-place data updates that needed a restart
+static volatile uint32_t s_err_n = 0;             // every failure, all paths
+static char s_err_line[160] = {0};                // the last one, as a tx_err line
+
+// The radio task and the loop share the flight model (home, ring) and the
+// error line. On the host there is no task and the lock is a no-op.
+#if defined(ESP_PLATFORM)
+#define TX_TASK 1
+static SemaphoreHandle_t s_tx_mx = nullptr;
+static inline void tx_lock()   { if (s_tx_mx) xSemaphoreTake(s_tx_mx, portMAX_DELAY); }
+static inline void tx_unlock() { if (s_tx_mx) xSemaphoreGive(s_tx_mx); }
+#else
+#define TX_TASK 0
+static inline void tx_lock() {}
+static inline void tx_unlock() {}
+#endif
+static bool s_task_running = false;
+
+static void tx_note_err(int pid, const char* op, int rc) {
+  if (pid >= 0 && pid < P_COUNT) s_err[pid] += 1;
+  s_err_n += 1;
+  snprintf(s_err_line, sizeof(s_err_line),
+           "{\"type\":\"tx_err\",\"path\":\"%s\",\"op\":\"%s\",\"rc\":%d,\"errors\":%lu}\n",
+           (pid >= 0 && pid < P_COUNT) ? PATHS[pid].uas_id : "-", op, rc,
+           (unsigned long)s_err_n);
+}
+
+// Keep a fixed cadence: the next slot is one period after the last, unless
+// we have fallen more than a period behind, when it restarts from now.
+static inline void tx_advance(uint32_t* last, uint32_t period, uint32_t now) {
+  *last = (now - *last < 2 * period) ? *last + period : now;
+}
 
 // ------------------------------------------------------------ flight model
 
@@ -133,6 +221,19 @@ static uint32_t tx_wall_utc() {
 static uint32_t tx_odid_ts(uint32_t now_ms) {
   uint32_t utc = tx_wall_utc();
   return utc ? utc - ODID_EPOCH_UTC : now_ms / 1000;
+}
+// Location timestamp: seconds past the hour, to the tenth the message
+// carries (several Locations go out each second).
+static float tx_hour_s(uint32_t now_ms) {
+#if defined(ESP_PLATFORM)
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  if (tv.tv_sec > (time_t)(ODID_EPOCH_UTC + 86400))
+    return (float)(tv.tv_sec % 3600) + (float)tv.tv_usec / 1e6f;
+#else
+  if (s_tx_test_utc) return (float)(s_tx_test_utc % 3600);
+#endif
+  return (float)fmod(now_ms / 1000.0, 3600.0);
 }
 
 static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
@@ -159,8 +260,7 @@ static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
   s->speed_ms  = (float)s_speed_ms;
   s->vspeed_ms = (float)(0.5 * sin(ang * 2));
   s->dir_deg   = (float)fmod(360.0 + 90.0 - ang * 180.0 / M_PI, 360.0);
-  uint32_t utc = tx_wall_utc();          // Location time: seconds past the hour
-  s->ts_s      = utc ? (float)(utc % 3600) : (float)fmod(now_ms / 1000.0, 3600.0);
+  s->ts_s      = tx_hour_s(now_ms);
   s->self_desc = p->self_desc;
   s->op_lat    = s_home_lat;
   s->op_lon    = s_home_lon;
@@ -170,48 +270,53 @@ static void current_state(OdidTxState* s, uint32_t now_ms, int pid) {
 
 // The Authentication variants carry a real Ed25519 signature over the
 // Basic ID message plus the page-0 timestamp, made with a published test
-// key (see odid_auth.h). AUTHBAD corrupts it on purpose.
+// key (see odid_auth.h). AUTHBAD corrupts it on purpose. The Basic ID never
+// changes and the timestamp only once a second, so each path signs once a
+// second however often it transmits (a signature costs milliseconds).
+static uint8_t  s_sig[2][64];
+static uint32_t s_sig_ts[2];
+static bool     s_sig_ok[2] = { false, false };
+static const uint8_t* tx_auth_sig(int pid, const uint8_t* basic_id, uint32_t ts) {
+  int k = pid == P_AUTHBAD ? 1 : 0;
+  if (!s_sig_ok[k] || s_sig_ts[k] != ts) {
+    odid_auth_sign(s_sig[k], basic_id, ts);
+    if (pid == P_AUTHBAD) s_sig[k][0] ^= 0xFF;   // break it on purpose
+    s_sig_ts[k] = ts;
+    s_sig_ok[k] = true;
+  }
+  return s_sig[k];
+}
 
-static uint8_t s_single_idx[P_COUNT] = {0};
+static uint32_t s_single_idx[P_COUNT] = {0};
 
 // Build the ODID payload this path transmits: a message pack, optionally
-// with Authentication pages appended, or a single rotating message.
+// with Authentication pages appended, or the next single message of the
+// odid_single_seq rotation (Location every other one).
 static int build_payload(int pid, uint8_t* out, uint32_t now) {
   const TxPath* p = &PATHS[pid];
   OdidTxState s;
   current_state(&s, now, pid);
 
-  if (p->format == F_SINGLE) {
-    // Rotate through the message types, one per transmission.
-    return odid_build_single(out, &s, tx_odid_ts(now), s_single_idx[pid]++);
-  }
+  if (p->format == F_SINGLE)
+    return odid_build_single(out, &s, tx_odid_ts(now), odid_single_seq(s_single_idx[pid]++));
 
   int n = odid_build_pack(out, &s, tx_odid_ts(now));
   if (p->with_auth) {
     uint32_t ts = tx_odid_ts(now);
-    uint8_t sig[64];
-    odid_auth_sign(sig, out + 3, ts);          // out+3 is the Basic ID msg
-    if (pid == P_AUTHBAD) sig[0] ^= 0xFF;      // break it on purpose
+    const uint8_t* sig = tx_auth_sig(pid, out + 3, ts);   // out+3 is the Basic ID msg
     int count = out[2];
-    int pages = odid_auth_pages((int)sizeof(sig));
+    int pages = odid_auth_pages(64);
     // All pages or none: page 0 advertises LastPageIndex, so a truncated
-    // set promises pages that never arrive and can never verify.
+    // set promises pages that never arrive and can never verify. A path
+    // configured with both caa_id and with_auth lands here -- say so, in
+    // keeping with this tool never failing silently.
     if (count + pages > ODID_PACK_MAX_MESSAGES) {
-      // A path configured with both caa_id and with_auth lands here —
-      // say so, in keeping with this tool never failing silently.
-      static uint32_t last_note = 0;
-      if (now - last_note > 5000) {
-        last_note = now;
-        Serial.printf("{\"type\":\"tx_err\",\"path\":\"%s\","
-                      "\"msg\":\"pack full, auth pages skipped\"}\n",
-                      p->uas_id);
-      }
+      tx_note_err(pid, "pack_full_auth_skipped", 0);
       return n;
     }
     for (int pg = 0; pg < pages; pg++) {
       odid_build_auth_page(out + 3 + count * ODID_MSG_SIZE, &s,
-                           1 /* UAS ID signature */, pg, sig,
-                           (int)sizeof(sig), ts);
+                           1 /* UAS ID signature */, pg, sig, 64, ts);
       count++;
     }
     out[2] = (uint8_t)count;
@@ -224,8 +329,28 @@ static int build_payload(int pid, uint8_t* out, uint32_t now) {
 
 static uint8_t s_frame[320];
 
-// 802.11 beacon carrying the ODID vendor IE.
-static int build_beacon(int pid, const uint8_t* pack, int pack_len, uint8_t counter) {
+// NAN cluster ID, as opendroneid-core-c (wifi.c) uses it: the BSSID of the
+// synchronisation beacon and of the service discovery frame alike, so a
+// receiver that follows the cluster keeps the frames that carry the data.
+static const uint8_t NAN_CLUSTER[6] = {0x50, 0x6F, 0x9A, 0x01, 0x00, 0xFF};
+
+static uint64_t tx_tsf_us() {
+#if defined(ESP_PLATFORM)
+  return (uint64_t)esp_timer_get_time();
+#else
+  return (uint64_t)millis() * 1000ULL;
+#endif
+}
+static void put_tsf(uint8_t* f) {
+  uint64_t t = tx_tsf_us();
+  for (int k = 0; k < 8; k++) f[k] = (uint8_t)(t >> (8 * k));
+}
+
+// 802.11 beacon carrying the ODID vendor IE. Header fields as the
+// opendroneid reference sets them: a running TSF timestamp, the beacon
+// interval this path really keeps, short slot + short preamble capability.
+static int build_beacon(int pid, const uint8_t* pack, int pack_len, uint8_t counter,
+                        uint32_t interval_ms) {
   const TxPath* p = &PATHS[pid];
   static const char* SSID_STR = "ORECCHINO-TEST";
   uint8_t* f = s_frame;
@@ -235,10 +360,12 @@ static int build_beacon(int pid, const uint8_t* pack, int pack_len, uint8_t coun
   for (int k = 0; k < 6; k++) f[i++] = 0xFF; // DA broadcast
   memcpy(f + i, p->mac, 6); i += 6;          // SA
   memcpy(f + i, p->mac, 6); i += 6;          // BSSID
-  f[i++] = 0x00; f[i++] = 0x00;              // seq (driver fills)
-  memset(f + i, 0, 8); i += 8;               // timestamp
-  f[i++] = 0x64; f[i++] = 0x00;              // beacon interval
-  f[i++] = 0x00; f[i++] = 0x00;              // capability
+  f[i++] = 0x00; f[i++] = 0x00;              // seq (tx_wifi_frame numbers it)
+  put_tsf(f + i); i += 8;                    // timestamp
+  uint32_t tu = interval_ms * 1000 / 1024;
+  if (tu > 0xFFFF) tu = 0xFFFF;
+  f[i++] = (uint8_t)(tu & 0xFF); f[i++] = (uint8_t)(tu >> 8);   // beacon interval
+  f[i++] = 0x20; f[i++] = 0x04;              // capability: short preamble, short slot
   int slen = strlen(SSID_STR);
   f[i++] = 0x00; f[i++] = (uint8_t)slen;
   memcpy(f + i, SSID_STR, slen); i += slen;
@@ -260,10 +387,8 @@ static int build_nan(const uint8_t* pack, int pack_len, uint8_t counter) {
   const TxPath* p = &PATHS[P_NAN];
   // Destination is the NAN SDF *multicast* address — 0x51, not 0x50. The
   // unicast form is filtered out by receiving MAC hardware even in
-  // promiscuous mode. BSSID is the NAN cluster ID. Both verified against
-  // opendroneid/wireshark-dissector's odid_wifi_sample.pcap.
-  static const uint8_t NAN_DA[6]      = {0x51, 0x6F, 0x9A, 0x01, 0x00, 0x00};
-  static const uint8_t NAN_CLUSTER[6] = {0x50, 0x6F, 0x9A, 0x01, 0x01, 0x79};
+  // promiscuous mode. BSSID is the NAN cluster ID.
+  static const uint8_t NAN_DA[6] = {0x51, 0x6F, 0x9A, 0x01, 0x00, 0x00};
   // SHA-256("org.opendroneid.remoteid")[0..5]
   static const uint8_t SVC_ID[6] = {0x88, 0x69, 0x19, 0x9D, 0x92, 0x09};
   uint8_t* f = s_frame;
@@ -294,19 +419,14 @@ static int build_nan(const uint8_t* pack, int pack_len, uint8_t counter) {
   return i;
 }
 
-// Sequence numbers matter twice over: repeating seq 0 from one address
-// invites 802.11 duplicate filtering, but letting the driver assign them
-// (en_sys_seq) also lets it rewrite header fields — including the source
-// address, which would collapse our per-path identities onto one MAC. So
-// we number the frames ourselves and hand the driver an untouched header.
 // NAN synchronisation beacon. The reference transmitter emits this
 // alongside the service discovery frame so receivers can find and track the
 // NAN cluster; ESP32 projects that send only the action frame produce
 // traffic some receivers never latch onto. Constants from
 // opendroneid-core-c wifi.c: cluster ID 50:6F:9A:01:00:FF, WFA OUI with
-// NAN OUI type 0x13, master preference 0xFE, random factor 0xEA.
+// NAN OUI type 0x13, master preference 0xFE, random factor 0xEA, interval
+// 512 TU.
 static int build_nan_sync_beacon(uint8_t counter) {
-  static const uint8_t CLUSTER_ID[6] = {0x50, 0x6F, 0x9A, 0x01, 0x00, 0xFF};
   const TxPath* p = &PATHS[P_NAN];
   uint8_t* f = s_frame;
   int i = 0;
@@ -314,11 +434,11 @@ static int build_nan_sync_beacon(uint8_t counter) {
   f[i++] = 0x00; f[i++] = 0x00;                    // duration
   for (int k = 0; k < 6; k++) f[i++] = 0xFF;       // DA broadcast
   memcpy(f + i, p->mac, 6); i += 6;                // SA
-  memcpy(f + i, CLUSTER_ID, 6); i += 6;            // BSSID = cluster ID
+  memcpy(f + i, NAN_CLUSTER, 6); i += 6;           // BSSID = cluster ID
   f[i++] = 0x00; f[i++] = 0x00;                    // seq
-  memset(f + i, 0, 8); i += 8;                     // timestamp
+  put_tsf(f + i); i += 8;                          // timestamp
   f[i++] = 0x00; f[i++] = 0x02;                    // beacon interval 512 TU
-  f[i++] = 0x00; f[i++] = 0x00;                    // capability
+  f[i++] = 0x20; f[i++] = 0x04;                    // capability, as the reference
   f[i++] = 0xDD;                                   // vendor IE
   int ie_len_at = i++;                             // length patched below
   f[i++] = 0x50; f[i++] = 0x6F; f[i++] = 0x9A;     // WFA OUI
@@ -335,7 +455,7 @@ static int build_nan_sync_beacon(uint8_t counter) {
   int cl_len_at = i;
   i += 2;                                          // length patched below
   int cl_start = i;
-  memcpy(f + i, CLUSTER_ID, 6); i += 6;
+  memcpy(f + i, NAN_CLUSTER, 6); i += 6;
   f[i++] = 0xFE; f[i++] = 0xEA;                    // anchor master rank
   for (int k = 0; k < 6; k++) f[i++] = 0x00;       // (rank is 8 bytes)
   f[i++] = 0x00;                                   // hop count
@@ -353,39 +473,101 @@ static int build_nan_sync_beacon(uint8_t counter) {
   return i;
 }
 
-static void tx_wifi_frame(int pid, int len) {
-  if (len <= 0) return;
+// Sequence numbers matter twice over: repeating seq 0 from one address
+// invites 802.11 duplicate filtering, but letting the driver assign them
+// (en_sys_seq) also lets it rewrite header fields — including the source
+// address, which would collapse our per-path identities onto one MAC. So
+// we number the frames ourselves and hand the driver an untouched header.
+// A refused frame (no free TX buffer, driver not started) is counted and
+// reported, never silently dropped.
+static bool tx_wifi_frame(int pid, int len) {
+  if (len <= 0) return false;
   static uint16_t seq[P_COUNT] = {0};
   uint16_t s = (uint16_t)(++seq[pid] & 0x0FFF);
   s_frame[22] = (uint8_t)(s << 4);          // seq ctrl: frag 0, seq low
   s_frame[23] = (uint8_t)(s >> 4);          // seq high
-  if (esp_wifi_80211_tx(WIFI_IF_STA, s_frame, len, false) == ESP_OK)
-    s_tx[pid]++;
+  esp_err_t rc = esp_wifi_80211_tx(WIFI_IF_STA, s_frame, len, false);
+  if (rc == ESP_OK) return true;
+  s_wifi_err += 1;
+  s_wifi_rc = (int)rc;
+  tx_note_err(pid, "wifi_tx", (int)rc);
+  return false;
+}
+
+// The driver's own report for each frame it put on the air (Wi-Fi task).
+static void tx_wifi_done(const esp_80211_tx_info_t* info) {
+  if (!info) return;
+  if (info->tx_status == WIFI_SEND_SUCCESS) s_wifi_done_ok += 1;
+  else s_wifi_done_fail += 1;
+  s_wifi_rate = (int)info->rate;
+}
+
+static void tx_path_sent(int pid, uint32_t now) {
+  s_tx[pid] += 1;
+  s_counter[pid]++;
+  s_last_ok[pid] = now;
+}
+
+// One Wi-Fi transmission for a beacon or NAN path. True when it went out.
+static bool wifi_send(int pid, uint32_t now) {
+  const TxRate* r = &TX_RATES[s_rate];
+  uint8_t payload[240];
+  int n = build_payload(pid, payload, now);
+  if (PATHS[pid].carrier == C_NAN) {
+    // The sync beacon keeps its own, slower cadence (its advertised
+    // interval is 512 TU); the service discovery frame carries the data.
+    static uint32_t last_sync = 0;
+    static bool synced = false;
+    if (!synced || now - last_sync >= r->nan_sync_ms) {
+      if (tx_wifi_frame(pid, build_nan_sync_beacon(s_counter[pid]))) {
+        s_nan_sync += 1;
+        if (!synced) last_sync = now; else tx_advance(&last_sync, r->nan_sync_ms, now);
+        synced = true;
+      }
+    }
+    if (!tx_wifi_frame(pid, build_nan(payload, n, s_counter[pid]))) return false;
+  } else {
+    uint32_t every = PATHS[pid].format == F_SINGLE ? r->single_ms : r->pack_ms;
+    if (!tx_wifi_frame(pid, build_beacon(pid, payload, n, s_counter[pid], every))) return false;
+  }
+  tx_path_sent(pid, now);
+  return true;
 }
 
 // ----------------------------------------------------------------- BLE TX
 
 #if !CONFIG_BT_NIMBLE_EXT_ADV
-#error "orecchino_tx needs CONFIG_BT_NIMBLE_EXT_ADV=1 (see build_opt.h)"
+#error "tx_core.h needs CONFIG_BT_NIMBLE_EXT_ADV=1 (see build_opt.h)"
 #endif
 
+// Advertising sets. With three, each BLE path has its own and is never
+// stopped while it is on: the controller repeats it at its interval and
+// the payload is swapped in place (a new Location, the next BLE4 message).
+// The ESP32-C3's precompiled controller has been seen to grant only two
+// (hardware, 2026-09); tx_begin probes, and then BLE4 keeps set 1 to itself
+// -- a rotating single-message path needs to be on air all the time -- while
+// BLE5 1M and coded, which carry a whole pack every event, take set 0 in
+// turns of share_ms.
+#define TX_BLE_SETS_MAX 3
+typedef struct {
+  int8_t   path;       // the path this set is carrying, -1 idle
+  bool     active;     // started, as far as NimBLE has told us
+  uint8_t  rate;       // the rate its interval was configured for
+  uint32_t since_ms;   // when this path took the set
+  uint32_t data_ms;    // last payload load
+  uint32_t retry_ms;   // after a failure: not before this
+} TxBleSet;
 static NimBLEExtAdvertising* s_adv = nullptr;
-// Which path each advertising set is carrying right now, -1 when quiet. A
-// started set repeats its last payload for ever (duration 0), so whoever
-// switches a path off has to stop its set as well -- see tx_set_enabled().
-static int s_inst_path[2] = {-1, -1};
-static uint32_t s_inst_ms[2] = {0, 0};   // when each set last started
-// The precompiled BLE controller only grants two advertising sets, so the
-// three BLE flavours time-share them: 1M keeps set 0, while coded (long
-// range) and legacy alternate on set 1. Each transmission fully
-// reconfigures its set, so a receiver still sees all three.
-static const uint8_t INST[3] = {0, 1, 1};   // BLE5 1M, BLE5 coded, BLE4 legacy
-static const int     INST_PATH[3] = {P_BLE5, P_BLELR, P_BLE4};
+static TxBleSet s_set[TX_BLE_SETS_MAX] = { {-1, false, 0, 0, 0, 0}, {-1, false, 0, 0, 0, 0}, {-1, false, 0, 0, 0, 0} };
+static uint8_t  s_ble_sets = 0;   // 3, 2, or 0 without BLE
+static const int BLE_PATHS[3] = { P_BLE5, P_BLELR, P_BLE4 };
 
-static void ble_begin() {
-  NimBLEDevice::init("");
-  NimBLEDevice::setPower(9);
-  s_adv = NimBLEDevice::getAdvertising();
+static int ble_set_of(int pid) {
+  if (s_ble_sets >= 3) return pid == P_BLE5 ? 0 : pid == P_BLELR ? 1 : 2;
+  return pid == P_BLE4 ? 1 : 0;
+}
+static uint16_t ble_itvl_ms(int pid, const TxRate* r) {
+  return pid == P_BLE4 ? r->leg_itvl_ms : pid == P_BLELR ? r->lr_itvl_ms : r->ext_itvl_ms;
 }
 
 // Service Data AD: [len][0x16][FA][FF][0x0D][counter][ODID...]
@@ -400,81 +582,296 @@ static int build_ble_ad(uint8_t* out, const uint8_t* odid, int odid_len,
   memcpy(out + 6, odid, odid_len);
   return 2 + payload;
 }
+static int ble_payload(int pid, uint8_t* ad, uint32_t now) {
+  uint8_t odid[240];
+  int n = build_payload(pid, odid, now);
+  return build_ble_ad(ad, odid, n, s_counter[pid]);
+}
 
-static void tx_ble(int pid, const uint8_t* payload, int payload_len,
-                   uint32_t now) {
-  // Set 0 belongs to the 1M flavour; coded and legacy share set 1.
-  const uint8_t inst = (pid == P_BLE5) ? 0 : 1;
-  const TxPath* p = &PATHS[pid];
-  uint8_t ad[6 + 160];
-  int ad_len;
-
-  NimBLEExtAdvertisement adv(
-      pid == P_BLELR ? BLE_HCI_LE_PHY_CODED : BLE_HCI_LE_PHY_1M,
-      pid == P_BLELR ? BLE_HCI_LE_PHY_CODED : BLE_HCI_LE_PHY_1M);
+// Configure set k for a path: PHYs, interval, address, legacy or not, data.
+static bool ble_configure(int k, int pid, const uint8_t* ad, int len) {
+  const TxRate* r = &TX_RATES[s_rate];
+  const uint8_t phy = pid == P_BLELR ? BLE_HCI_LE_PHY_CODED : BLE_HCI_LE_PHY_1M;
+  NimBLEExtAdvertisement adv(phy, phy);
   adv.setConnectable(false);
   adv.setScannable(false);
-  // The set repeats its payload on its own between updates; at the same
-  // interval (units of 0.625 ms) it adds no transmissions of its own.
-  adv.setMinInterval(TX_PERIOD_MS * 8 / 5);
-  adv.setMaxInterval(TX_PERIOD_MS * 8 / 5);
+  uint32_t itvl = (uint32_t)ble_itvl_ms(pid, r) * 8 / 5;   // 0.625 ms units
+  adv.setMinInterval(itvl);
+  adv.setMaxInterval(itvl);
+  adv.setTxPower(TX_BLE_DBM);
   // Each aircraft advertises from its own address, like real hardware.
   // Random *static* addresses need their top two bits set; NimBLE takes
   // the bytes LSB-first, so mac[0] is the significant end.
   uint8_t bda[6];
-  memcpy(bda, p->mac, 6);
+  memcpy(bda, PATHS[pid].mac, 6);
   bda[0] |= 0xC0;
   adv.setAddress(NimBLEAddress(bda, BLE_ADDR_RANDOM));
-
   // Legacy advertising caps the payload at 31 bytes: 6 of ODID overhead
   // leaves exactly one 25-byte message, never a pack.
   if (pid == P_BLE4) adv.setLegacyAdvertising(true);
-  ad_len = build_ble_ad(ad, payload, payload_len, s_counter[pid]);
-  adv.setData(ad, ad_len);
+  adv.setData(ad, (size_t)len);
+  return s_adv->setInstanceData((uint8_t)k, adv);
+}
 
-  // A live set must stop before it can be reconfigured; a cleared one must
-  // not be told to (NimBLE logs an error for an unconfigured instance).
-  if (s_inst_path[inst] >= 0) s_adv->stop(inst);
-  bool set_ok = s_adv->setInstanceData(inst, adv);
-  bool start_ok = set_ok && s_adv->start(inst);
-  if (start_ok) {
-    s_inst_path[inst] = pid;
-    s_inst_ms[inst] = now;
-    s_tx[pid]++;
-    s_counter[pid]++;
-  } else {
-    // Report rather than fail silently — a dead path is the whole point
-    // of this tool being able to tell you something is wrong.
-    static uint32_t last_err = 0;
-    if (now - last_err > 5000) {
-      last_err = now;
-      Serial.printf("{\"type\":\"tx_err\",\"path\":\"%s\",\"inst\":%u,"
-                    "\"set_data\":%s,\"start\":%s}\n",
-                    p->uas_id, inst, set_ok ? "true" : "false",
-                    start_ok ? "true" : "false");
+// Swap the payload of a running set without stopping it: the controller
+// takes new data for a set that is advertising (one HCI command, <= 251
+// bytes; our largest is 134), so the set never goes quiet.
+static bool ble_set_data(int k, const uint8_t* ad, int len) {
+  struct os_mbuf* m = ble_hs_mbuf_from_flat(ad, (uint16_t)len);
+  if (!m) return false;
+  return ble_gap_ext_adv_set_data((uint8_t)k, m) == 0;   // consumes m
+}
+
+static bool ble_stop_set(int k) {
+  TxBleSet* S = &s_set[k];
+  if (!S->active) return true;
+  if (!s_adv->stop((uint8_t)k)) return false;
+  S->active = false;
+  return true;
+}
+
+// Give set k to a path: stop it, reconfigure, start. `ad` is its payload.
+static void ble_take(int k, int pid, uint32_t now, const uint8_t* ad, int len) {
+  TxBleSet* S = &s_set[k];
+  if (!ble_stop_set(k)) {
+    tx_note_err(pid, "ble_stop", k);
+    S->retry_ms = now + 200;
+    return;
+  }
+  bool cfg = ble_configure(k, pid, ad, len);
+  if (!cfg) {             // NimBLE may still hold it running: stop, try once more
+    s_adv->stop((uint8_t)k);
+    cfg = ble_configure(k, pid, ad, len);
+  }
+  bool on = cfg && s_adv->start((uint8_t)k);
+  S->path = (int8_t)pid;
+  S->since_ms = now;
+  S->data_ms = now;
+  S->rate = s_rate;
+  if (on) {
+    S->active = true;
+    tx_path_sent(pid, now);
+    return;
+  }
+  S->active = false;
+  S->retry_ms = now + 500;
+  tx_note_err(pid, cfg ? "ble_start" : "ble_config", k);
+  if (k == 2 && s_ble_sets == 3) {
+    // The controller will not run a third set after all: fall back to two.
+    s_ble_sets = 2;
+    s_set[2].path = -1;
+    tx_note_err(pid, "ble_sets_fallback_2", k);
+  }
+}
+
+// Put a fresh payload into a running set, or restart it if that fails.
+static void ble_refresh(int k, int pid, uint32_t now, uint32_t every) {
+  TxBleSet* S = &s_set[k];
+  uint8_t ad[6 + 240];
+  int len = ble_payload(pid, ad, now);
+  if (ble_set_data(k, ad, len)) {
+    tx_advance(&S->data_ms, every, now);
+    tx_path_sent(pid, now);
+    return;
+  }
+  s_ble_restarts += 1;
+  ble_take(k, pid, now, ad, len);
+}
+
+// One pass over the advertising sets: who should be on each, and whether
+// their payload is due.
+static void ble_service(uint32_t now) {
+  if (!s_adv) return;
+  const TxRate* r = &TX_RATES[s_rate];
+  for (int k = 0; k < s_ble_sets; k++) {
+    TxBleSet* S = &s_set[k];
+    int want[3], nw = 0;
+    if (s_running)
+      for (int j = 0; j < 3; j++)
+        if (s_enabled[BLE_PATHS[j]] && ble_set_of(BLE_PATHS[j]) == k) want[nw++] = BLE_PATHS[j];
+    if (nw == 0) {                          // nobody: this set goes quiet
+      if (S->active && (int32_t)(now - S->retry_ms) >= 0 && !ble_stop_set(k)) {
+        tx_note_err(S->path, "ble_stop", k);
+        S->retry_ms = now + 200;
+      }
+      if (!S->active) S->path = -1;
+      continue;
+    }
+    if ((int32_t)(now - S->retry_ms) < 0) continue;
+    int cur = -1;
+    for (int i = 0; i < nw; i++) if (want[i] == S->path) cur = i;
+    int pid = cur < 0 ? want[0]
+            : (nw > 1 && now - S->since_ms >= r->share_ms) ? want[(cur + 1) % nw]
+            : S->path;
+    if (pid != S->path || !S->active || S->rate != s_rate) {
+      uint8_t ad[6 + 240];
+      int len = ble_payload(pid, ad, now);
+      ble_take(k, pid, now, ad, len);
+      continue;
+    }
+    uint32_t every = pid == P_BLE4 ? r->leg_msg_ms : r->ext_data_ms;
+    if (now - S->data_ms >= every) ble_refresh(k, pid, now, every);
+  }
+}
+
+// How many sets the controller will run: configure and start a third with
+// a real BLE4 advertisement (one event), then stop it again.
+static uint8_t ble_probe_sets() {
+  uint8_t ad[6 + 240];
+  int len = ble_payload(P_BLE4, ad, millis());
+  bool ok = ble_configure(2, P_BLE4, ad, len);
+  if (ok) {
+    ok = s_adv->start(2, 0, 1);
+    s_adv->stop(2);
+  }
+  return ok ? 3 : 2;
+}
+
+// Stop every set (one at a time: NimBLE's stop-all refuses while any set is
+// running) and choose the layout again: 2 forces the shared layout, anything
+// else probes.
+static void ble_relayout(int want) {
+  if (!s_adv) return;
+  for (int k = 0; k < TX_BLE_SETS_MAX; k++) {
+    if (s_set[k].active || k < s_ble_sets) s_adv->stop((uint8_t)k);
+    s_set[k].active = false;
+    s_set[k].path = -1;
+    s_set[k].retry_ms = 0;
+  }
+  s_ble_sets = want == 2 ? 2 : ble_probe_sets();
+}
+
+static void ble_begin() {
+  s_txb_ok = NimBLEDevice::init("");
+  if (!s_txb_ok) { s_ble_sets = 0; return; }
+  NimBLEDevice::setPower(TX_BLE_DBM);
+  s_adv = NimBLEDevice::getAdvertising();
+  s_ble_sets = s_adv ? ble_probe_sets() : 0;
+}
+
+// ---------------------------------------------------------------- the pass
+
+// One pass of the transmitter: at most one Wi-Fi path's frame (round-robin,
+// so the shared 2.4 GHz front end is never asked for a burst), then the BLE
+// sets. Runs every 2 ms on the radio task (tx_task), or from tx_tick on the
+// host.
+static void tx_step(uint32_t now) {
+  static uint32_t last[P_COUNT] = {0};
+  static int rr = 0;
+  if (s_running && s_txw_ok) {
+    const TxRate* r = &TX_RATES[s_rate];
+    for (int k = 0; k < P_COUNT; k++) {
+      int pid = (rr + k) % P_COUNT;
+      uint8_t c = PATHS[pid].carrier;
+      if (!s_enabled[pid] || (c != C_BEACON && c != C_NAN)) continue;
+      uint32_t every = c == C_NAN ? r->nan_ms
+                     : PATHS[pid].format == F_SINGLE ? r->single_ms : r->pack_ms;
+      if (now - last[pid] < every) continue;
+      rr = (pid + 1) % P_COUNT;
+      if (wifi_send(pid, now)) tx_advance(&last[pid], every, now);
+      else last[pid] = now - every + 20;        // refused: try again in 20 ms
+      break;
+    }
+  }
+  ble_service(now);
+
+  // The channel is ours alone in beacon mode; check it stays that way.
+  static uint32_t last_ch = 0;
+  if (s_txw_ok && now - last_ch >= 1000) {
+    last_ch = now;
+    uint8_t ch = 0;
+    wifi_second_chan_t sc;
+    if (esp_wifi_get_channel(&ch, &sc) == ESP_OK) {
+      s_ch = ch;
+      if (ch != WIFI_CHANNEL) {
+        esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+        s_ch_fix += 1;
+      }
     }
   }
 }
 
+#if TX_TASK
+// Above every application task and the e-paper feeders (19, which spin
+// through a whole refresh), below the radio stacks (NimBLE host 21,
+// esp_timer 22, Wi-Fi and the BT controller 23). It sleeps 2 ms a pass.
+// It lives on core 0 with the radio stacks, not on the loop's core: there,
+// waking every 2 ms above the core-1 e-paper feeder, it starved every
+// refresh into a "line buffer underrun" (the T5 in test beacon mode kept
+// repainting). On the single-core C3 core 0 is the only core anyway.
+#ifndef TX_TASK_PRIO
+#define TX_TASK_PRIO 20
+#endif
+#ifndef TX_TASK_CORE
+#define TX_TASK_CORE 0
+#endif
+static void tx_task(void*) {
+  for (;;) {
+    tx_lock();
+    tx_step(millis());
+    tx_unlock();
+    vTaskDelay(pdMS_TO_TICKS(2) > 0 ? pdMS_TO_TICKS(2) : 1);
+  }
+}
+#endif
+
 // ---------------------------------------------------------------- control
 
+static int tx_cat(char* b, int n, int cap, const char* fmt, ...) {
+  if (n >= cap - 1) return n;
+  va_list ap;
+  va_start(ap, fmt);
+  int k = vsnprintf(b + n, (size_t)(cap - n), fmt, ap);
+  va_end(ap);
+  if (k < 0) return n;
+  return n + k < cap ? n + k : cap - 1;
+}
+
 static void print_status() {
+  static char b[2600];
   uint32_t now = millis();
-  Serial.printf("{\"type\":\"tx_status\",\"fw\":\"%s\",\"ver\":\"%s\","
-                "\"running\":%s,\"emergency\":%s,\"home\":[%.6f,%.6f],"
-                "\"ring_m\":%.0f,\"ch\":%d,\"paths\":[",
-                TX_NAME, TX_VERSION, s_running ? "true" : "false",
-                s_emergency ? "true" : "false", s_home_lat, s_home_lon,
-                s_ring_m, WIFI_CHANNEL);
+  int n = 0;
+  int8_t pwr = 0;
+  esp_wifi_get_max_tx_power(&pwr);
+  tx_lock();
+  n = tx_cat(b, n, sizeof(b),
+             "{\"type\":\"tx_status\",\"fw\":\"%s\",\"ver\":\"%s\","
+             "\"running\":%s,\"emergency\":%s,\"rate\":\"%s\",\"home\":[%.6f,%.6f],"
+             "\"ring_m\":%.0f,\"ch\":%u,\"ch_fix\":%lu,\"wifi\":%s,\"wifi_dbm\":%.1f,"
+             "\"wifi_err\":%lu,\"wifi_rc\":%d,\"wifi_done\":[%lu,%lu],\"wifi_rate\":%d,"
+             "\"nan_sync\":%lu,\"ble\":%s,\"ble_sets\":%u,\"ble_on\":[%d,%d,%d],"
+             "\"ble_restarts\":%lu,\"errors\":%lu,\"sched\":\"%s\",\"paths\":[",
+             TX_NAME, TX_VERSION, s_running ? "true" : "false",
+             s_emergency ? "true" : "false", s_rate == TX_RATE_SLOW ? "slow" : "spec",
+             s_home_lat, s_home_lon, s_ring_m, (unsigned)s_ch, (unsigned long)s_ch_fix,
+             s_txw_ok ? "true" : "false", pwr / 4.0, (unsigned long)s_wifi_err, (int)s_wifi_rc,
+             (unsigned long)s_wifi_done_ok, (unsigned long)s_wifi_done_fail, (int)s_wifi_rate,
+             (unsigned long)s_nan_sync, s_txb_ok ? "true" : "false", (unsigned)s_ble_sets,
+             s_set[0].active ? s_set[0].path : -1, s_set[1].active ? s_set[1].path : -1,
+             s_set[2].active ? s_set[2].path : -1, (unsigned long)s_ble_restarts,
+             (unsigned long)s_err_n, s_task_running ? "task" : "loop");
   for (int i = 0; i < P_COUNT; i++) {
     OdidTxState s;
     current_state(&s, now, i);
-    Serial.printf("%s{\"uas_id\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,"
-                  "\"height\":%.0f,\"tx\":%lu}",
-                  i ? "," : "", PATHS[i].uas_id, s.lat, s.lon,
-                  (double)s.height_m, (unsigned long)s_tx[i]);
+    long age = s_last_ok[i] ? (long)(now - s_last_ok[i]) : -1;
+    n = tx_cat(b, n, sizeof(b),
+               "%s{\"uas_id\":\"%s\",\"on\":%s,\"lat\":%.6f,\"lon\":%.6f,"
+               "\"height\":%.0f,\"tx\":%lu,\"err\":%lu,\"age_ms\":%ld}",
+               i ? "," : "", PATHS[i].uas_id, s_enabled[i] ? "true" : "false", s.lat, s.lon,
+               (double)s.height_m, (unsigned long)s_tx[i], (unsigned long)s_err[i], age);
   }
-  Serial.println("]}");
+  tx_unlock();
+  n = tx_cat(b, n, sizeof(b), "]}\n");
+  Serial.write((const uint8_t*)b, (size_t)n);
+}
+
+static void tx_set_rate(uint8_t rate) {
+  s_rate = rate == TX_RATE_SLOW ? TX_RATE_SLOW : TX_RATE_SPEC;
+  Preferences p;
+  if (p.begin("orecchino", false)) {
+    p.putUChar("tx_rate", s_rate);
+    p.end();
+  }
 }
 
 static void handle_line(char* line) {
@@ -485,26 +882,35 @@ static void handle_line(char* line) {
     s_running = true;
     Serial.println("{\"type\":\"tx_evt\",\"msg\":\"transmitting\"}");
   } else if (!strcmp(line, "stop")) {
-    s_running = false;
-    if (s_adv) s_adv->stop();
-    s_inst_path[0] = -1;
-    s_inst_path[1] = -1;
+    s_running = false;       // the radio task silences every set within a pass
     Serial.println("{\"type\":\"tx_evt\",\"msg\":\"paused\"}");
   } else if (!strcmp(line, "e")) {
     s_emergency = !s_emergency;
     Serial.printf("{\"type\":\"tx_evt\",\"emergency\":%s}\n",
                   s_emergency ? "true" : "false");
+  } else if (!strcmp(line, "rate slow") || !strcmp(line, "rate spec")) {
+    tx_set_rate(line[5] == 's' && line[6] == 'l' ? TX_RATE_SLOW : TX_RATE_SPEC);
+    print_status();
+  } else if (!strncmp(line, "sets ", 5)) {
+    tx_lock();
+    ble_relayout(atoi(line + 5));
+    tx_unlock();
+    print_status();
   } else if (line[0] == 'h' && line[1] == ' ') {
     double la, lo;
     if (sscanf(line + 2, "%lf %lf", &la, &lo) == 2) {
+      tx_lock();
       s_home_lat = la;
       s_home_lon = lo;
+      tx_unlock();
       print_status();
     }
   } else if (line[0] == 'r' && line[1] == ' ') {
     double r = atof(line + 2);
     if (r >= 10 && r <= 20000) {
+      tx_lock();
       s_ring_m = r;
+      tx_unlock();
       print_status();
     }
   }
@@ -530,14 +936,29 @@ static void poll_serial() {
 // ----------------------------------------------------------------- sketch
 
 static void tx_begin() {
-  WiFi.mode(WIFI_STA);
+  {
+    Preferences p;
+    uint8_t r = TX_RATE_SPEC;
+    if (p.begin("orecchino", true)) { r = p.getUChar("tx_rate", TX_RATE_SPEC); p.end(); }
+    s_rate = r == TX_RATE_SLOW ? TX_RATE_SLOW : TX_RATE_SPEC;
+  }
+
+  // Station mode, never joined and never scanning: the radio stays on our
+  // channel. Power save off before the driver starts too -- Arduino applies
+  // its own sleep setting from the STA_START event, after we would have.
+  WiFi.setSleep(false);
+  s_txw_ok = WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.disconnect();
   esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_max_tx_power(TX_WIFI_QDBM);
   delay(100);
   esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_register_80211_tx_cb(tx_wifi_done);
+  s_ch = WIFI_CHANNEL;
 
-  ble_begin();
   odid_auth_init();
+  ble_begin();
 
   // Self-test: sign and verify before claiming to transmit signatures, and
   // publish the public key so a receiver can check us independently.
@@ -555,103 +976,76 @@ static void tx_begin() {
   for (int i = 0; i < 32; i++) snprintf(pub_hex + i * 2, 3, "%02x", pub[i]);
   pub_hex[64] = 0;
 
+#if TX_TASK
+  if (!s_task_running) {
+    s_tx_mx = xSemaphoreCreateMutex();
+    if (s_tx_mx &&
+        xTaskCreatePinnedToCore(tx_task, "tx_radio", 8192, nullptr, TX_TASK_PRIO, nullptr,
+                                TX_TASK_CORE) == pdPASS)
+      s_task_running = true;
+  }
+#endif
+
   Serial.printf("{\"type\":\"tx_boot\",\"fw\":\"%s\",\"ver\":\"%s\","
-                "\"paths\":%d,\"selftest\":{\"sign\":%s,\"reject\":%s},"
+                "\"paths\":%d,\"rate\":\"%s\",\"wifi\":%s,\"ble\":%s,\"ble_sets\":%u,"
+                "\"sched\":\"%s\",\"selftest\":{\"sign\":%s,\"reject\":%s},"
                 "\"auth_pubkey\":\"%s\",\"note\":\"TEST BEACON - not a "
                 "compliant Remote ID transmitter\"}\n",
-                TX_NAME, TX_VERSION, P_COUNT,
+                TX_NAME, TX_VERSION, P_COUNT, s_rate == TX_RATE_SLOW ? "slow" : "spec",
+                s_txw_ok ? "true" : "false", s_txb_ok ? "true" : "false",
+                (unsigned)s_ble_sets, s_task_running ? "task" : "loop",
                 sig_ok ? "true" : "false", rej_ok ? "true" : "false", pub_hex);
   print_status();
 }
 
-
+// The loop's share: the serial console, the status line every 5 s and any
+// new failure (at most one tx_err line per 5 s, with the running count).
+// Without the radio task (host tests) it also runs the transmitter pass.
 static void tx_tick(uint32_t now) {
   poll_serial();
-
-  // One aircraft per loop pass, round-robin, so the shared 2.4 GHz front
-  // end is never asked to serve two paths at once. Each path goes out once
-  // every TX_PERIOD_MS: a message pack carries Location every time, while
-  // the single-message paths (SINGLE, BLE4) need five transmissions to
-  // cycle through Basic ID, Location, Self ID, System and Operator ID.
-  static uint32_t last_tx_ms[P_COUNT] = {0};
-  static int rr = 0;
-  if (s_running) {
-    uint8_t payload[240];
-    for (int k = 0; k < P_COUNT; k++) {
-      int pid = (rr + k) % P_COUNT;
-      if (!s_enabled[pid] || now - last_tx_ms[pid] < TX_PERIOD_MS) continue;
-      // Coded and legacy share advertising set 1. Taking it straight after
-      // the other started would cut that one off before its first packet
-      // (the set only repeats once a period), so each holds it for half a
-      // period; the two settle half a period apart.
-      if ((pid == P_BLELR || pid == P_BLE4) && s_inst_path[1] >= 0 && s_inst_path[1] != pid &&
-          now - s_inst_ms[1] < TX_PERIOD_MS / 2)
-        continue;
-      last_tx_ms[pid] = now;
-      rr = (pid + 1) % P_COUNT;
-
-      int n = build_payload(pid, payload, now);
-      switch (PATHS[pid].carrier) {
-        case C_BEACON:
-          tx_wifi_frame(pid, build_beacon(pid, payload, n, s_counter[pid]++));
-          break;
-        case C_NAN:
-          // The reference transmitter emits a sync beacon alongside the
-          // action frame; receivers that track NAN clusters need it.
-          tx_wifi_frame(pid, build_nan_sync_beacon(s_counter[pid]));
-          tx_wifi_frame(pid, build_nan(payload, n, s_counter[pid]++));
-          break;
-        default:
-          tx_ble(pid, payload, n, now);
-          break;
-      }
-      break;  // one path per pass
-    }
+  if (!s_task_running) {
+    tx_lock();
+    tx_step(now);
+    tx_unlock();
   }
 
-  static uint32_t last_status = 0;
+  static uint32_t last_status = 0, last_err = 0, err_seen = 0;
   if (now - last_status >= 5000) {
     last_status = now;
     print_status();
+  }
+  if (s_err_n != err_seen && (err_seen == 0 || now - last_err >= 5000)) {
+    char line[sizeof(s_err_line)];
+    tx_lock();
+    memcpy(line, s_err_line, sizeof(line));
+    err_seen = s_err_n;
+    tx_unlock();
+    last_err = now;
+    line[sizeof(line) - 1] = 0;
+    Serial.print(line);
   }
 }
 
 // ------------------------------------------------------------------- API
 // Everything a board UI needs to drive the beacon without knowing how a
-// frame is built.
+// frame is built. The setters only record what is wanted; the radio task
+// switches sets on and off to match within a pass.
 static inline int         tx_path_count() { return P_COUNT; }
 static inline const char* tx_path_id(int i) { return PATHS[i].uas_id; }
 static inline const char* tx_path_desc(int i) { return PATHS[i].self_desc; }
-static inline bool        tx_enabled(int i) { return s_enabled[i]; }
-// Switching a BLE path off must also silence its advertising set: the
-// scheduler merely stops refreshing it, and NimBLE keeps repeating the last
-// payload. Set 0 is BLE5's own; set 1 is shared, so it only goes quiet when
-// it is carrying the path just switched off, or when neither coded nor
-// legacy wants it any more.
-static inline void        tx_set_enabled(int i, bool on) {
-  s_enabled[i] = on;
-  if (on || !s_adv) return;
-  if (i == P_BLE5 && s_inst_path[0] >= 0) {
-    s_adv->stop(0);
-    s_inst_path[0] = -1;
-  } else if ((i == P_BLELR || i == P_BLE4) && s_inst_path[1] >= 0 &&
-             (s_inst_path[1] == i || (!s_enabled[P_BLELR] && !s_enabled[P_BLE4]))) {
-    s_adv->stop(1);
-    s_inst_path[1] = -1;
-  }
-}
+static inline bool        tx_enabled(int i) { return i >= 0 && i < P_COUNT && s_enabled[i]; }
+static inline void        tx_set_enabled(int i, bool on) { if (i >= 0 && i < P_COUNT) s_enabled[i] = on; }
 static inline uint32_t    tx_count(int i) { return s_tx[i]; }
+static inline uint32_t    tx_errors(int i) { return s_err[i]; }
 static inline bool        tx_running() { return s_running; }
-static inline void        tx_set_running(bool on) {
-  s_running = on;
-  if (!on && s_adv) {      // pause clears every set, like the serial `stop`
-    s_adv->stop();
-    s_inst_path[0] = -1;
-    s_inst_path[1] = -1;
-  }
-}
+static inline void        tx_set_running(bool on) { s_running = on; }
 static inline bool        tx_emergency() { return s_emergency; }
 static inline void        tx_set_emergency(bool on) { s_emergency = on; }
+/// SLOW: every path once every 5 s (a quiet bench). Otherwise the spec
+/// rate. Saved in NVS, so it survives a restart.
+static inline bool        tx_slow() { return s_rate == TX_RATE_SLOW; }
+static inline void        tx_set_slow(bool on) { tx_set_rate(on ? TX_RATE_SLOW : TX_RATE_SPEC); }
+static inline uint8_t     tx_ble_sets() { return s_ble_sets; }
 /// Carrier label for a path: "Wi-Fi", "NAN", "BLE5", "BLE LR", "BLE4".
 static inline const char* tx_path_carrier(int i) {
   switch (PATHS[i].carrier) {

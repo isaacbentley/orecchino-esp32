@@ -12,8 +12,11 @@
 //          (the plan's lat-first order returns an ORA-13200 error page).
 //   ADS-B  https://api.adsb.lol/v2/point/<lat>/<lon>/<radius NM>. Verified
 //          2026-09-23: the radius is in nautical miles (17 NM returned
-//          aircraft out to 31.2 km); 82 aircraft around SFO = 35 KB.
-//   Tiles  CARTO dark_all, TileSync.swift's URL, stored as /tiles/z/x/y.png.
+//          aircraft out to 31.2 km); 82 aircraft around SFO = 35 KB at 17 NM,
+//          a few KB at the default 6 NM (10 km).
+//   Tiles  Esri World Dark Gray Canvas base (JPEG, no key; z/y/x in the URL),
+//          TileSync.swift's source, stored as /tiles/z/x/y.jpg. CARTO dark_all
+//          now needs a key and answers placeholders without one.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
@@ -26,6 +29,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include "traffic.h"
+#include "tile_plan.h"
+#include "tile_path.h"
 
 #ifndef NET_TFR_URL
 #define NET_TFR_URL "https://tfr.faa.gov/geoserver/TFR/ows?service=WFS&version=1.1.0" \
@@ -35,13 +40,25 @@
 #define NET_ADSB_URL "https://api.adsb.lol/v2/point/%.4f/%.4f/%d"   // lat, lon, radius NM
 #endif
 #ifndef NET_TILE_URL
-#define NET_TILE_URL "https://basemaps.cartocdn.com/dark_all/%d/%d/%d.png"
+#define NET_TILE_URL TILE_BASE_URL   // tile_path.h: Esri World Dark Gray, z/y/x
 #endif
 #define NET_TFR_RADIUS_KM  200     // TFRs within this of home (the Mac's 200 km)
-#define NET_ADSB_RADIUS_NM 17      // 31.5 km: covers traffic.h's 30 km horizon
-#define NET_TILE_RADIUS_M  8000    // ±8 km, zooms 11-15 (plan §4.5)
-#define NET_TILE_ZMIN      11
-#define NET_TILE_ZMAX      15
+// ADS-B is only for drone-aircraft conflicts (NEAR within 1 km, CONVERGING
+// within 60 s), so the query is small: 10 km around home by default
+// (5-30 km, NVS). A live drone more than 3 km out moves the centre to the
+// middle of home and the drones and widens the radius until every live
+// drone has 9 km around it, up to 30 km (net_adsb_area).
+#define NET_ADSB_KM_DEFAULT   10
+#define NET_ADSB_KM_MIN       5
+#define NET_ADSB_KM_MAX       30
+#define NET_ADSB_DRONE_FAR_M  3000.0   // a drone this far from home moves the centre
+#define NET_ADSB_DRONE_COVER_M 9000.0  // ...and gets this much around it
+// Map tiles: 3 km around home by default, zooms 12-15 (tile_plan.h). The
+// setting runs from 1 km to what fits this board's flash (the plan's max
+// radius; 30 km before a plan exists), and a sync shrinks the plan to fit.
+#define NET_TILE_KM_DEFAULT   3
+#define NET_TILE_KM_MIN       1
+#define NET_TILE_KM_MAX       30
 
 // ---------------------------------------------------------------------------
 // JSON: small, allocation-free helpers
@@ -394,12 +411,52 @@ static inline bool net_adsb_parse_ac(const char* obj, uint32_t now_ms, TrafficAi
   return true;
 }
 
-/// A bounded set of aircraft that keeps the `cap` nearest to (lat, lon).
+/// Where to ask adsb.lol: home and base_m, unless a live drone is more than
+/// 3 km from home; then the centre of the box around home and the live
+/// drones, and a radius giving every live drone 9 km (at least base_m, at
+/// most max_m). drone_lat/lon: live drones with a position.
+typedef struct { double lat, lon, radius_m; } NetArea;
+
+static inline NetArea net_adsb_area(double home_lat, double home_lon, const double* drone_lat,
+                                    const double* drone_lon, int nd, double base_m, double max_m) {
+  NetArea a = { home_lat, home_lon, base_m };
+  bool far = false;
+  for (int i = 0; i < nd; i++)
+    if (traffic_distance_m(home_lat, home_lon, drone_lat[i], drone_lon[i]) > NET_ADSB_DRONE_FAR_M) far = true;
+  if (far) {
+    // The box in metres east/north of home (antimeridian-safe), its centre.
+    double x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    for (int i = 0; i < nd; i++) {
+      double dx, dy;
+      traffic_offset_m(home_lat, home_lon, drone_lat[i], drone_lon[i], &dx, &dy);
+      x0 = fmin(x0, dx); x1 = fmax(x1, dx); y0 = fmin(y0, dy); y1 = fmax(y1, dy);
+    }
+    double cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    a.lat = home_lat + cy / (TRAFFIC_EARTH_R_M * TRAFFIC_DEG);
+    double k = cos(home_lat * TRAFFIC_DEG);
+    a.lon = home_lon + cx / (TRAFFIC_EARTH_R_M * TRAFFIC_DEG * (k < 0.01 ? 0.01 : k));
+    if (a.lon > 180) a.lon -= 360;
+    else if (a.lon < -180) a.lon += 360;
+    for (int i = 0; i < nd; i++) {
+      double need = traffic_distance_m(a.lat, a.lon, drone_lat[i], drone_lon[i]) + NET_ADSB_DRONE_COVER_M;
+      if (need > a.radius_m) a.radius_m = need;
+    }
+  }
+  if (a.radius_m > max_m) a.radius_m = max_m;
+  return a;
+}
+
+/// The adsb.lol radius (whole nautical miles, rounded up) for metres.
+static inline int net_adsb_nm(double radius_m) { return (int)ceil(radius_m / 1852.0 - 1e-9); }
+
+/// A bounded set of aircraft that keeps the `cap` nearest to (lat, lon),
+/// and none farther than max_m (0: no limit).
 typedef struct {
   TrafficAircraft* ac;
   double*  dist;
   int      cap, n;
   double   lat, lon;
+  double   max_m;
   uint32_t now_ms;
   uint32_t seen, kept;
 } NetAdsbSet;
@@ -411,6 +468,7 @@ static inline void net_adsb_on_obj(void* ctx, const char* obj, size_t len) {
   s->seen++;
   if (!net_adsb_parse_ac(obj, s->now_ms, &a)) return;
   double d = traffic_distance_m(s->lat, s->lon, a.lat, a.lon);
+  if (s->max_m > 0 && d > s->max_m) return;
   int slot = -1;
   if (s->n < s->cap) slot = s->n++;
   else {
@@ -718,63 +776,7 @@ static inline bool net_ntp_parse(const uint8_t* p, size_t n, uint32_t tx_sec, ui
 }
 
 // ---------------------------------------------------------------------------
-// Tiles: the same recipe as TileSync.swift / tools/fetch_tiles.py (zooms
-// 11-15), centred on the board's position.
-
-static inline void net_deg2tile(double lat, double lon, int z, int32_t* x, int32_t* y) {
-  double n = (double)(1L << z);
-  double rad = lat * TRAFFIC_DEG;
-  double fx = (lon + 180.0) / 360.0 * n;
-  double fy = (1.0 - log(tan(rad) + 1.0 / cos(rad)) / M_PI) / 2.0 * n;
-  int32_t lim = (int32_t)(1L << z) - 1;
-  *x = (int32_t)fx; *y = (int32_t)fy;
-  if (*x < 0) *x = 0;
-  if (*x > lim) *x = lim;
-  if (*y < 0) *y = 0;
-  if (*y > lim) *y = lim;
-}
-
-typedef struct { int32_t x0, y0, x1, y1; } NetTileBox;
-
-static inline NetTileBox net_tile_box(double lat, double lon, double radius_m, int z) {
-  double dlat = radius_m / 111195.0;
-  double c = cos(lat * TRAFFIC_DEG);
-  double dlon = radius_m / (111195.0 * (c < 0.05 ? 0.05 : c));
-  double n = lat + dlat, s = lat - dlat;
-  if (n > 85.0) n = 85.0;
-  if (s < -85.0) s = -85.0;
-  NetTileBox b;
-  net_deg2tile(n, lon - dlon, z, &b.x0, &b.y0);
-  net_deg2tile(s, lon + dlon, z, &b.x1, &b.y1);
-  return b;
-}
-
-/// Tiles in the area over all zooms.
-static inline uint32_t net_tile_count(double lat, double lon, double radius_m) {
-  uint32_t n = 0;
-  for (int z = NET_TILE_ZMIN; z <= NET_TILE_ZMAX; z++) {
-    NetTileBox b = net_tile_box(lat, lon, radius_m, z);
-    n += (uint32_t)(b.x1 - b.x0 + 1) * (uint32_t)(b.y1 - b.y0 + 1);
-  }
-  return n;
-}
-
-/// The k-th tile of the area (zoom ascending, then x, then y); false past the end.
-static inline bool net_tile_at(double lat, double lon, double radius_m, uint32_t k,
-                               int* z, int32_t* x, int32_t* y) {
-  for (int zz = NET_TILE_ZMIN; zz <= NET_TILE_ZMAX; zz++) {
-    NetTileBox b = net_tile_box(lat, lon, radius_m, zz);
-    uint32_t w = (uint32_t)(b.x1 - b.x0 + 1), h = (uint32_t)(b.y1 - b.y0 + 1);
-    if (k < w * h) {
-      *z = zz;
-      *x = b.x0 + (int32_t)(k / h);
-      *y = b.y0 + (int32_t)(k % h);
-      return true;
-    }
-    k -= w * h;
-  }
-  return false;
-}
+// Tiles: which ones, and whether they fit, is tile_plan.h's job.
 
 // ---------------------------------------------------------------------------
 // URLs
@@ -788,10 +790,11 @@ static inline int net_url_tfr(char* out, size_t n, double lat, double lon) {
   return snprintf(out, n, "%s&bbox=%.4f,%.4f,%.4f,%.4f,EPSG:4326", NET_TFR_URL, lon0, lat0, lon1, lat1);
 }
 
-static inline int net_url_adsb(char* out, size_t n, double lat, double lon) {
-  return snprintf(out, n, NET_ADSB_URL, lat, lon, NET_ADSB_RADIUS_NM);
+static inline int net_url_adsb(char* out, size_t n, double lat, double lon, double radius_m) {
+  return snprintf(out, n, NET_ADSB_URL, lat, lon, net_adsb_nm(radius_m));
 }
 
+/// Esri's tile URLs are z/y/x (row before column).
 static inline int net_url_tile(char* out, size_t n, int z, int32_t x, int32_t y) {
-  return snprintf(out, n, NET_TILE_URL, z, (int)x, (int)y);
+  return snprintf(out, n, NET_TILE_URL, z, (int)y, (int)x);
 }

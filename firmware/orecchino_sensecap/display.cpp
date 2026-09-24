@@ -25,6 +25,9 @@ void display_force_redraw() {}
 #include <Wire.h>
 #include <LittleFS.h>
 #include <PNGdec.h>
+#include <JPEGDEC.h>
+#include <new>
+#include <esp_heap_caps.h>
 #include <Arduino_GFX_Library.h>
 #include "IndicatorBus.h"
 #include "spectrum.h"
@@ -33,6 +36,7 @@ void display_force_redraw() {}
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <time.h>
 #include "../common/solar.h"
+#include "../common/tile_path.h"
 
 #define GFX_BL     45
 #define BTN_PIN    38
@@ -54,6 +58,8 @@ static PNG  s_png;
 static File s_pngFile;
 static int  s_blit_x, s_blit_y;
 static uint8_t s_tp_addr = TP_ADDR_GX;
+
+static bool s_world_jpg = false;   // the composed world holds Esri tiles (attribution)
 
 // world cache identity
 static int  s_wz = -1;
@@ -122,6 +128,40 @@ static int pngDrawCb(PNGDRAW* d) {
   return 1;
 }
 
+// ----------------------------------------------------------- JPEG plumbing
+// Esri World Dark Gray tiles (/tiles/z/x/y.jpg, what the Mac now sends).
+// The decoder (~18 KB) and the tile's bytes live in PSRAM; the tile is read
+// whole and decoded from RAM, straight to RGB565 in the world canvas.
+#define TILE_JPG_MAX (64 * 1024)
+static JPEGDEC* s_jpg = nullptr;
+static uint8_t* s_jpg_buf = nullptr;
+
+static int jpgDrawCb(JPEGDRAW* d) {
+  s_world->draw16bitRGBBitmap(s_blit_x + d->x, s_blit_y + d->y, d->pPixels, d->iWidth, d->iHeight);
+  return 1;
+}
+
+static bool draw_tile_jpg(const char* path) {
+  if (!s_jpg) {
+    void* m = heap_caps_malloc(sizeof(JPEGDEC), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (m) s_jpg = new (m) JPEGDEC();
+  }
+  if (!s_jpg_buf) s_jpg_buf = (uint8_t*)heap_caps_malloc(TILE_JPG_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_jpg || !s_jpg_buf) return false;
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+  size_t n = f.size();
+  bool ok = false;
+  if (n >= 3 && n <= TILE_JPG_MAX && (size_t)f.read(s_jpg_buf, n) == n &&
+      tile_sniff(s_jpg_buf, n) == TILE_FMT_JPEG && s_jpg->openRAM(s_jpg_buf, (int)n, jpgDrawCb)) {
+    s_jpg->setPixelType(RGB565_LITTLE_ENDIAN);   // after open: open clears the settings
+    ok = s_jpg->getWidth() <= 256 && s_jpg->getHeight() <= 256 && s_jpg->decode(0, 0, 0) == 1;
+    s_jpg->close();
+  }
+  f.close();
+  return ok;
+}
+
 // --------------------------------------------------------------- mercator
 
 static void world_px(double lat, double lon, int z, double* wx, double* wy) {
@@ -148,6 +188,7 @@ static void world_compose(int z, long tx0, long ty0) {
   s_wz = z;
   s_wtx0 = tx0;
   s_wty0 = ty0;
+  s_world_jpg = false;
   long tmax = (1L << z) - 1;
   for (int dy = 0; dy < 3; dy++) {
     for (int dx = 0; dx < 3; dx++) {
@@ -157,6 +198,11 @@ static void world_compose(int z, long tx0, long ty0) {
       bool ok = false;
       if (tx >= 0 && ty >= 0 && tx <= tmax && ty <= tmax) {
         char path[48];
+        snprintf(path, sizeof(path), "/tiles/%d/%ld/%ld.jpg", z, tx, ty);
+        if (draw_tile_jpg(path)) {
+          s_world_jpg = true;
+          continue;
+        }
         snprintf(path, sizeof(path), "/tiles/%d/%ld/%ld.png", z, tx, ty);
         if (s_png.open(path, pngOpenCb, pngCloseCb, pngReadCb, pngSeekCb,
                        pngDrawCb) == PNG_SUCCESS) {
@@ -532,12 +578,13 @@ static void render_map() {
   const Track* sel = find_selected();
   if (sel) draw_detail_card(sel);
   draw_footer();
-  // basemap attribution (ODbL / CARTO terms)
-  s_cv->fillRect(4, 444, 108, 13, C_BG);
+  // basemap attribution (the tiles' terms): Esri's for .jpg, CARTO's for the bundled .png
+  const char* attrib = s_world_jpg ? TILE_ATTRIBUTION : "(c) OSM (c) CARTO";
+  s_cv->fillRect(4, 444, (int16_t)(strlen(attrib) * 6 + 8), 13, C_BG);
   s_cv->setTextSize(1);
   s_cv->setTextColor(C_MUTED);
   s_cv->setCursor(8, 447);
-  s_cv->print("(c) OSM (c) CARTO");
+  s_cv->print(attrib);
   s_cv->flush();
 }
 

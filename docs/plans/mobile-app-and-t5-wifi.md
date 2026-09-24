@@ -501,8 +501,9 @@ from the SYSTEM screen (so a USB cable is not a way to read passwords).
 ### 4.5 Map tiles over Wi-Fi
 
 `tile_store.h` already stores and evicts tiles and reports `fs_*` to the Mac
-app. Add `tile_fetch.h` (built inside `net_fetch.h` / `net_parse.h`): compute the tile list around home (default ±8 km,
-zooms 11-15, the same recipe as `TileSync.swift` / `tools/fetch_tiles.py`,
+app. Add `tile_fetch.h` (built inside `net_fetch.h` / `net_parse.h`): compute the tile list around home (as built: a 3 km circle,
+zooms 12-15, planned against free flash by `tile_plan.h`, mirrored by
+`TileSync.swift` / `TilePlan.swift` and `tools/fetch_tiles.py`,
 but centred on the board's position), skip tiles already present, fetch at
 most 4 per second with `User-Agent: orecchino/<ver>`, stream each to a
 temporary file then rename, stop when free space falls under 1 MB. Progress

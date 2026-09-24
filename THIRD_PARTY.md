@@ -9,7 +9,7 @@ Compiled into or referenced by this project. Audited 2026-09-23.
 | [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) | Apache-2.0 | BLE host, extended/coded-PHY scanning |
 | [Arduino_GFX](https://github.com/moononournation/Arduino_GFX) | BSD-style (`license.txt`) | Panel drivers (ST7701 RGB, ST7789 SPI, SH8601 QSPI), canvases |
 | [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library) | BSD | `Fonts/` headers only, on every board with a screen (see fonts note) |
-| [PNGdec](https://github.com/bitbank2/PNGdec) | Apache-2.0 | Map tile decoding |
+| [PNGdec](https://github.com/bitbank2/PNGdec) | Apache-2.0 | Map tile decoding (older `.png` tiles) |
 | [PCA95x5](https://github.com/hideakitai/PCA95x5) | MIT | TCA9535 IO expander |
 | [arduino-esp32](https://github.com/espressif/arduino-esp32) / ESP-IDF | LGPL-2.1 / Apache-2.0 | Core, WiFi promiscuous, radio stacks; on the T5 also `esp_http_client`, mbedTLS and the ESP-IDF root certificate bundle (`esp_crt_bundle`, Mozilla's CA list) for the Wi-Fi fetches |
 
@@ -55,6 +55,14 @@ project.
 
 ## Vendored / derived code
 
+- `firmware/libraries/JPEGDEC/` — [JPEGDEC](https://github.com/bitbank2/JPEGDEC)
+  1.8.4 by Larry Bank (Apache-2.0, `LICENSE`), unmodified: `src/`, its
+  `library.properties`, `LICENSE` and `README.md` from the Arduino library
+  release. Decodes the Esri JPEG map tiles: 8-bit grey on the T5, RGB565 on
+  the SenseCAP, its ~18 KB of state in PSRAM. (`library.properties` lists
+  `bb_spi_lcd` as a dependency; only its `JPEGDisplay.h`, which nothing here
+  includes, uses it.) Apache-2.0 is compatible with this project's
+  GPL-3.0-or-later.
 - `firmware/libraries/Monocypher/` — [Monocypher](https://monocypher.org)
   3.1.2 (BSD-2-Clause OR CC0-1.0), vendored with one change: a
   `#pragma GCC optimize ("Os")` so the file builds for size even where a
@@ -137,7 +145,9 @@ program. Compatible with either a GPL or permissive license for this repo.
 [opendroneid/wireshark-dissector](https://github.com/opendroneid/wireshark-dissector)
 (Apache-2.0), used as the independent ground truth for the decoder tests —
 the golden values in `tests/odid_test.c` were cross-checked against that
-dissector's output (one Lua 5.4 compatibility fix applied locally).
+dissector's output (one Lua 5.4 compatibility fix applied locally). The
+phone app's decoder tests (`mobile/test/odid_*_test.dart`) read the same
+captures.
 
 `tests/vectors/traffic/` (the shared traffic-rule cases) are this project's
 own. `tests/vectors/net/` and `app/Tests/OrecchinoTests/Fixtures/` hold
@@ -154,19 +164,26 @@ contributors); they are used only as test input.
   [Light RID Scanner](https://github.com/luyii-code-1/Light_RID_Scanner)'s
   `rid_model.json` (GPL-3.0, compatible with this project), with the names
   translated to English. The manufacturer codes are this project's own.
-- **Map tiles are not distributed in this repo.** `tools/fetch_tiles.py`
-  downloads CARTO `dark_all` raster tiles for personal/offline use:
-  map data © OpenStreetMap contributors (ODbL), tiles © CARTO, subject to
-  CARTO's basemap terms. For redistribution or heavier use, generate tiles
-  from OSM data or self-host (e.g. Protomaps/OpenMapTiles) instead.
+- **Map tiles are not distributed in this repo.** `tools/fetch_tiles.py`,
+  the Mac app's "Send Map to Receiver" and the T5's own Wi-Fi sync download
+  Esri World Dark Gray Canvas base tiles (JPEG, no key) for personal/offline
+  use of the planned area: attribution "Esri, HERE, Garmin, © OpenStreetMap
+  contributors" (map data ODbL), subject to Esri's terms of use (free
+  basemap use; an ArcGIS account may be required for production use). Each
+  names the app in its User-Agent and stays at or under 4 tiles a second.
+  Older tiles from CARTO `dark_all` (© OpenStreetMap contributors, © CARTO)
+  may remain on a SenseCAP; CARTO now requires an API key. For
+  redistribution or heavier use, generate tiles from OSM data or self-host
+  (e.g. Protomaps/OpenMapTiles) instead. The host test's tile fixture
+  (`tests/vectors/tiles/`) is synthetic, not map imagery.
 - **FAA TFR polygons** (macOS app, and the T5 over Wi-Fi) are fetched
   live from tfr.faa.gov (US-government data, public domain).
 - **ADS-B aircraft** (macOS app, phone app, and the T5 over Wi-Fi) are
   fetched live from [adsb.lol](https://www.adsb.lol/docs/open-data/api/),
   a community feed whose data is licensed ODbL 1.0; aircraft are held in
-  memory only while current (at most 60 s) and never redistributed. The T5 also fetches CARTO tiles for
-  its own area (at most 4 a second, within 8 km, zooms 11-15) on the same
-  terms as `tools/fetch_tiles.py` above.
+  memory only while current (at most 60 s) and never redistributed. The T5 also fetches Esri tiles for
+  its own area (at most 4 a second, a 3 km circle by default, zooms 12-15)
+  on the same terms as `tools/fetch_tiles.py` above.
 
 ## Specifications
 
@@ -176,8 +193,11 @@ public specification; no decoder code was copied from other projects.
 The GB 46750-2025 packet layout in `firmware/common/gb46750_decode.h`
 (data type, version, length, item bitmap, fixed item lengths and units)
 was taken from the Light RID Scanner project's Python parser (GPL-3.0) and
-reimplemented here in C; the two test vectors in `tests/odid_test.c` and
-`tests/core_test.cpp` (a DJI Matrice 400's ASTM v1 beacon and a DJI Mini
-5 Pro's GB 46750 packet) are that project's captures. The 5-degree no-fix
+reimplemented here in C, and ported from that C to Dart for the phone's
+own receiver (`mobile/lib/core/odid/gb46750.dart`); the two test vectors in
+`tests/odid_test.c` and `tests/core_test.cpp` (a DJI Matrice 400's ASTM v1
+beacon and a DJI Mini 5 Pro's GB 46750 packet), mirrored in
+`mobile/test/odid_decoder_test.dart` and `odid_rid_line_test.dart`, are
+that project's captures. The 5-degree no-fix
 band around 0,0 and the "RID-" SSID convention are observations from the
 same project.

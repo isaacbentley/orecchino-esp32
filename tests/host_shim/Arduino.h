@@ -49,7 +49,8 @@ static inline BaseType_t xQueueReceive(QueueHandle_t q, void* p, int) { if (q->q
 #define HIGH 1
 #define PI 3.14159265358979323846
 static inline void pinMode(int, int) {}
-static inline int digitalRead(int) { return HIGH; }
+inline int g_pin_low = -1;   // a harness holds this pin LOW (a key held down); -1: none
+static inline int digitalRead(int pin) { return pin == g_pin_low ? LOW : HIGH; }
 
 // ---- extras for the T-Embed render check
 #define OUTPUT 1

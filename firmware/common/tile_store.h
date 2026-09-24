@@ -1,6 +1,7 @@
 // Offline map tile store, shared by every board with a map view.
 //
-// Orecchino.app pushes CARTO raster tiles over the same serial line the JSON
+// Orecchino.app pushes raster tiles (Esri World Dark Gray JPEGs now; the
+// SenseCAP's bundled pack is CARTO PNGs) over the same serial line the JSON
 // feed uses: base64 chunks in JSON lines, acked one at a time, CRC32 per
 // file, writes confined to /tiles on LittleFS. The store manages its own
 // space — when a write needs room it drops the least valuable tile (highest
@@ -15,6 +16,7 @@
 #include "host_link.h"
 #include "ext_ram.h"
 #include "tile_path.h"
+#include "tile_plan.h"
 #include "mbedtls/base64.h"
 #include "esp_rom_crc.h"
 
@@ -164,8 +166,117 @@ static inline void ts_ls_walk(File dir, uint32_t* n, HostSrc src) {
   }
 }
 
+/// Every /tiles/<z>/<x>/<y>.png as a tile_plan.h key with its on-flash size
+/// (file size rounded up to the 4 KB LittleFS block), sorted by key. out may
+/// be NULL (count only); at most max are listed, all are counted. *bytes:
+/// the listed-or-counted total.
+static inline uint32_t ts_tiles_list(TileOnDisk* out, uint32_t max, uint64_t* bytes) {
+  uint32_t n = 0, k = 0;
+  uint64_t b = 0;
+  File root = LittleFS.open("/tiles");
+  if (root) {
+    for (File zd = root.openNextFile(); zd; zd = root.openNextFile()) {
+      if (!zd.isDirectory()) continue;
+      int z = atoi(zd.name());
+      for (File xd = zd.openNextFile(); xd; xd = zd.openNextFile()) {
+        if (!xd.isDirectory()) continue;
+        long x = atol(xd.name());
+        for (File f = xd.openNextFile(); f; f = xd.openNextFile()) {
+          if (f.isDirectory()) continue;
+          const char* nm = f.name();
+          const char* dot = strrchr(nm, '.');
+          if (!dot || (strcmp(dot, ".jpg") != 0 && strcmp(dot, ".png") != 0)) continue;
+          uint32_t sz = ((uint32_t)f.size() + 4095u) & ~4095u;
+          if (out && k < max) { out[k].key = tile_key(z, (int32_t)x, (int32_t)atol(nm)); out[k].bytes = sz; k++; }
+          b += sz;
+          n++;
+        }
+      }
+    }
+  }
+  if (out && k > 1) qsort(out, k, sizeof(TileOnDisk), tile_disk_cmp);
+  if (bytes) *bytes = b;
+  return out ? k : n;
+}
+
+/// Remove everything below dir_path; returns how many entries went. A
+/// directory is not walked while it is being changed: each pass notes up to
+/// 8 names, closes the directory, then removes them, until a pass finds
+/// nothing.
+static inline uint32_t ts_wipe_dir(const char* dir_path) {
+  uint32_t gone = 0;
+  for (int pass = 0; pass < 4096; pass++) {
+    char names[8][TILE_PATH_MAX];
+    bool dirs[8];
+    int n = 0;
+    File dir = LittleFS.open(dir_path);
+    if (!dir) break;
+    for (File f = dir.openNextFile(); f && n < 8; f = dir.openNextFile()) {
+      snprintf(names[n], TILE_PATH_MAX, "%s", f.path());
+      dirs[n] = f.isDirectory();
+      n++;
+      f.close();
+    }
+    dir.close();
+    if (!n) break;
+    for (int i = 0; i < n; i++) {
+      if (dirs[i]) { gone += ts_wipe_dir(names[i]); LittleFS.rmdir(names[i]); }
+      else if (LittleFS.remove(names[i])) gone++;
+    }
+  }
+  return gone;
+}
+
+/// Is /tiles from the current basemap (TILE_SOURCE_MARK holds
+/// TILE_SOURCE_ID)? If not and `wipe`, remove everything under /tiles first
+/// (the T5: its .png tiles came from CARTO, which now serves "API KEY
+/// REQUIRED" placeholders); then write the mark. Without `wipe` (the
+/// SenseCAP: its bundled .png pack is real) nothing is removed. Returns the
+/// number of entries removed. Runs once per source change; on a T5 holding a
+/// few hundred tiles that is a few seconds at boot.
+static inline uint32_t tile_store_check_source(bool wipe) {
+  char have[16] = {0};
+  File m = LittleFS.open(TILE_SOURCE_MARK, "r");
+  if (m) {
+    size_t n = m.readBytes(have, sizeof(have) - 1);
+    have[n] = 0;
+    m.close();
+  }
+  if (!strcmp(have, TILE_SOURCE_ID)) return 0;
+  uint32_t gone = wipe ? ts_wipe_dir("/tiles") : 0;
+  LittleFS.mkdir("/tiles");
+  File w = LittleFS.open(TILE_SOURCE_MARK, "w");
+  if (w) {
+    w.print(TILE_SOURCE_ID);
+    w.close();
+  }
+  return gone;
+}
+
+static inline bool ts_field_dbl(const char* line, const char* key, double* out) {
+  char pat[24];
+  snprintf(pat, sizeof(pat), "\"%s\":", key);
+  const char* p = strstr(line, pat);
+  if (!p) return false;
+  char* end;
+  double v = strtod(p + strlen(pat), &end);
+  if (end == p + strlen(pat) || !isfinite(v)) return false;
+  *out = v;
+  return true;
+}
+
+extern bool   g_home_set;          // rx_core.h
+extern double g_home_lat, g_home_lon;
+
 /// Handle one "fs_*" host command, replying to `src`. Returns false for
 /// anything else.
+///   {"cmd":"fs_stat"} (optional "lat","lon"; else home) ->
+///   {"type":"fs_stat","total":..,"used":..,"free":..,"reserve":1048576,
+///    "tiles":..,"tile_bytes":..,"avg_tile":..,"capacity":..,"max_radius_km":..}
+///   bytes; tile_bytes on flash (4 KB blocks); avg_tile = used / tiles once
+///   20 exist, else the 12 KB estimate; capacity: what maps may use (total -
+///   reserve - other files); max_radius_km: the largest z12-15 circle that
+///   fits it there (absent without a position). tile_plan.h has the rules.
 static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t now, HostSrc src) {
   if (strncmp(cmd, "fs_", 3) != 0) return false;
   s_ts_last_ms = now;
@@ -255,6 +366,27 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
       LittleFS.remove(path);
       host_printf_to(src, "{\"type\":\"fs_err\",\"msg\":\"crc\",\"p\":\"%s\"}\n", path);
     }
+  } else if (!strcmp(cmd, "fs_stat")) {
+    uint64_t tb = 0;
+    uint32_t n = ts_tiles_list(nullptr, 0, &tb);
+    uint64_t total = LittleFS.totalBytes(), used = LittleFS.usedBytes();
+    uint64_t other = used > tb ? used - tb : 0;
+    uint64_t cap = total > TILE_PLAN_RESERVE + other ? total - TILE_PLAN_RESERVE - other : 0;
+    uint32_t avg = n >= TILE_PLAN_MIN_SAMPLE ? (uint32_t)(used / n) : TILE_PLAN_DEFAULT_BYTES;
+    double lat = NAN, lon = NAN;
+    if (!(ts_field_dbl(line, "lat", &lat) && ts_field_dbl(line, "lon", &lon)) && g_home_set) {
+      lat = g_home_lat;
+      lon = g_home_lon;
+    }
+    char rad[32] = "";
+    if (lat >= -85 && lat <= 85 && lon >= -180 && lon <= 180)
+      snprintf(rad, sizeof(rad), ",\"max_radius_km\":%.2f", tile_plan_max_radius_m(lat, lon, cap, avg) / 1000.0);
+    host_printf_to(src,
+                   "{\"type\":\"fs_stat\",\"total\":%llu,\"used\":%llu,\"free\":%llu,\"reserve\":%u,"
+                   "\"tiles\":%u,\"tile_bytes\":%llu,\"avg_tile\":%u,\"capacity\":%llu%s}\n",
+                   (unsigned long long)total, (unsigned long long)used,
+                   (unsigned long long)(total > used ? total - used : 0), (unsigned)TILE_PLAN_RESERVE, (unsigned)n,
+                   (unsigned long long)tb, (unsigned)avg, (unsigned long long)cap, rad);
   } else if (!strcmp(cmd, "fs_rm")) {
     char path[TILE_PATH_MAX];
     if (ts_field_str(line, "p", path, sizeof(path)) && tile_rm_path_ok(path)) {

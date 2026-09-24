@@ -1,5 +1,5 @@
 // net_fetch.h — the T5's HTTPS jobs for net_sync.h, on a worker task:
-// SNTP, FAA TFRs, adsb.lol aircraft and CARTO map tiles.
+// SNTP, FAA TFRs, adsb.lol aircraft and Esri World Dark Gray map tiles.
 //
 // Include in the sketch only, after rx_core.h, tile_store.h and net_sync.h
 // (it installs TFRs into rx_core's table and writes tiles like tile_store).
@@ -15,21 +15,30 @@
 //          never inside the true outline). Installed under RX_LOCK by
 //          jobs_poll on the loop, replacing the table only when the whole
 //          answer parsed. 30 s deadline, 1 MB cap.
-//   ADS-B  GET adsb.lol within 17 NM of home (~35 KB at a busy airport),
-//          streamed one aircraft object at a time; the nearest 64 kept in
-//          PSRAM, handed to traffic_ingest() on the loop (it keeps 32).
-//          15 s deadline, 512 KB cap.
-//   TILES  /tiles/z/x/y.png within 8 km of home, zooms 11-15, missing ones
-//          only, at most 4 requests a second, each streamed to
-//          /tiles/fetch.part (PNG signature checked, 256 KB cap) and renamed
-//          into place; stops when LittleFS has under 1 MB free. At most
-//          `tile_budget` new tiles per window (8 automatically, all for
-//          UPDATE MAP). Needs an internal-RAM task stack (flash writes).
+//   ADS-B  GET adsb.lol around home, 10 km by default (5-30, whole NM
+//          rounded up: 6 NM), widened around live drones more than 3 km out
+//          so each has 9 km (net_adsb_area, <= 30 km); a few KB. Streamed
+//          one aircraft object at a time; the nearest 64 within the radius
+//          kept in PSRAM, handed to traffic_ingest() on the loop (it keeps
+//          32). 15 s deadline, 512 KB cap.
+//   TILES  plan first (tile_plan.h): the circle of z12-15 tiles around home
+//          (3 km by default), counted against what /tiles holds and the flash
+//          (1 MB reserve; tiles outside the plan may be evicted), shrunk z15
+//          first until it fits. Then only missing tiles, at most 4 requests
+//          a second, each streamed to /tiles/fetch.part (JPEG signature
+//          checked, 256 KB cap) and renamed into place as z/x/y.jpg; it
+//          stops before free space falls under the reserve. At most `tile_budget` new
+//          tiles per window (8 automatically, all for UPDATE MAP). Needs an
+//          internal-RAM task stack (flash writes).
 //   Every HTTPS request first checks the internal heap (mbedTLS allocates
 //   its ~33 KB of record buffers there): under NET_TLS_MIN_FREE free or
 //   NET_TLS_MIN_BLOCK largest block, the job fails with "low memory (..)".
 //   The numbers are reported in the "synced" status line (heap_int,
 //   heap_blk, heap_tls).
+//   A cancel (a phone connecting, a new CONNECT, mode OFF) is checked
+//   between jobs, in every HTTPS read, between the tile job's listing,
+//   planning and downloads, and on every plan tile walked; a job it cuts
+//   short (or never starts) is reported in `cancelled`, not `failed`.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
@@ -61,13 +70,14 @@
 #define NET_IO_BUF        2048
 #define NET_URL_MAX       384
 #define NET_TILE_TMP      "/tiles/fetch.part"
-#define NET_TILE_MIN_FREE (1024u * 1024u)
 #define NET_TILE_GAP_MS   250u      // at most 4 tile requests a second
+#define NET_TILE_DISK_MAX 4096      // tiles listed from flash (13.6 MB / ~11 KB is ~1,200)
+#define NET_DRONES_MAX    16
 #define NET_FETCH_STACK   8192
 #ifndef NET_FETCH_STACK_PSRAM
 #define NET_FETCH_STACK_PSRAM 1     // 0: always an internal-RAM stack (if TLS misbehaves on a PSRAM stack)
 #endif
-#define NET_USER_AGENT    "orecchino/" FW_VERSION " (T5 Remote ID receiver)"
+#define NET_USER_AGENT    "orecchino/" FW_VERSION " (T5 Remote ID receiver; offline map, <= 4 tiles/s)"
 
 typedef struct {
   TaskHandle_t task;
@@ -91,6 +101,10 @@ typedef struct {
   char*        obj;
   uint8_t*     io;
   char*        url;
+  TileOnDisk*  disk;            // what /tiles holds (sorted)
+  uint32_t*    victims;
+  NetArea      adsb;            // where to ask adsb.lol this time
+  uint32_t     tile_last_ms;    // rate limit
 } NetFetch;
 
 static NetFetch s_nf;
@@ -104,6 +118,17 @@ static void net_fetch_err(const char* job, const char* fmt, ...) {
   vsnprintf(msg, sizeof(msg), fmt, ap);
   va_end(ap);
   snprintf(s_nf.res.err, sizeof(s_nf.res.err), "%s: %s", job, msg);
+}
+
+/// A job that did not finish: cut short by a cancel (no failure: reported
+/// under "cancelled", no back-off), else failed.
+static void net_job_stop(uint32_t bit, const char* job) {
+  if (s_nf.cancel) {
+    s_nf.res.cancelled |= bit;
+    net_fetch_err(job, "cancelled");
+  } else {
+    s_nf.res.failed |= bit;
+  }
 }
 
 /// Enough internal RAM for a TLS session? Records the first measurement.
@@ -213,12 +238,13 @@ static bool net_sntp_query(const char* host, uint32_t* utc, uint32_t* at_ms) {
 
 static void net_job_time() {
   uint32_t utc = 0, at = 0;
-  if (net_sntp_query("pool.ntp.org", &utc, &at) || net_sntp_query("time.google.com", &utc, &at)) {
+  if (net_sntp_query("pool.ntp.org", &utc, &at) ||
+      (!s_nf.cancel && net_sntp_query("time.google.com", &utc, &at))) {
     s_nf.res.utc = utc;
     s_nf.res.utc_at_ms = at;
     s_nf.res.ok |= NET_JOB_TIME;
   } else {
-    s_nf.res.failed |= NET_JOB_TIME;
+    net_job_stop(NET_JOB_TIME, "CLOCK");
     net_fetch_err("CLOCK", "no SNTP answer");
   }
 }
@@ -243,7 +269,7 @@ static void net_job_tfr() {
   net_split_init(&sp, "features", s_nf.obj, NET_OBJ_BUF, net_tfr_on_obj, &set);
   bool ok = net_http_get("TFR", s_nf.url, net_split_sink, &sp, 1024u * 1024u, 30000);
   if (ok && !sp.complete) { ok = false; net_fetch_err("TFR", "unexpected answer"); }
-  if (!ok) { s_nf.res.failed |= NET_JOB_TFR; return; }
+  if (!ok) { net_job_stop(NET_JOB_TFR, "TFR"); return; }
   s_nf.tfr_n = set.n;
   s_nf.tfr_ok = true;
   s_nf.res.tfr_n = (uint16_t)set.n;
@@ -255,20 +281,25 @@ static void net_job_tfr() {
 static void net_job_adsb() {
   if (!s_nf.home) { s_nf.res.skipped |= NET_JOB_ADSB; return; }
   if (!net_heap_ok("ADS-B")) { s_nf.res.failed |= NET_JOB_ADSB; return; }
-  net_url_adsb(s_nf.url, NET_URL_MAX, s_nf.lat, s_nf.lon);
+  const NetArea* a = &s_nf.adsb;
+  s_nf.res.adsb_lat = a->lat;
+  s_nf.res.adsb_lon = a->lon;
+  s_nf.res.adsb_radius_m = a->radius_m;
+  net_url_adsb(s_nf.url, NET_URL_MAX, a->lat, a->lon, a->radius_m);
   NetAdsbSet set;
   memset(&set, 0, sizeof(set));
   set.ac = s_nf.ac;
   set.dist = s_nf.ac_d;
   set.cap = NET_ADSB_STAGE;
-  set.lat = s_nf.lat;
-  set.lon = s_nf.lon;
+  set.lat = a->lat;
+  set.lon = a->lon;
+  set.max_m = a->radius_m;   // the answer's NM rounding asks a little wider: trim it
   set.now_ms = millis();
   NetJsonSplit sp;
   net_split_init(&sp, "ac", s_nf.obj, NET_OBJ_BUF, net_adsb_on_obj, &set);
   bool ok = net_http_get("ADS-B", s_nf.url, net_split_sink, &sp, 512u * 1024u, 15000);
   if (ok && !sp.complete) { ok = false; net_fetch_err("ADS-B", "unexpected answer"); }
-  if (!ok) { s_nf.res.failed |= NET_JOB_ADSB; return; }
+  if (!ok) { net_job_stop(NET_JOB_ADSB, "ADS-B"); return; }
   s_nf.ac_n = set.n;
   s_nf.ac_ms = set.now_ms;
   s_nf.ac_ok = true;
@@ -281,74 +312,111 @@ static void net_job_adsb() {
 typedef struct {
   File     f;
   uint32_t n;
-  bool     png;
+  bool     jpeg;       // the first bytes were a JPEG's (FF D8 FF)
+  uint8_t  head[3];
 } NetTileSink;
 
+// Tiles must be JPEG: anything else (an error page, a placeholder PNG) is
+// refused at its first bytes and never stored.
 static bool net_tile_sink(void* ctx, const uint8_t* data, size_t n) {
-  static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
   NetTileSink* t = (NetTileSink*)ctx;
-  for (size_t i = 0; i < n && t->n + i < 8; i++)
-    if (data[i] != sig[t->n + i]) return false;
-  if (t->n + n >= 8) t->png = true;
+  for (size_t i = 0; i < n && t->n + i < sizeof(t->head); i++) t->head[t->n + i] = data[i];
+  if (t->n + n >= sizeof(t->head) && !t->jpeg) {
+    if (tile_sniff(t->head, sizeof(t->head)) != TILE_FMT_JPEG) return false;
+    t->jpeg = true;
+  }
   if (t->f.write(data, n) != n) return false;
   t->n += (uint32_t)n;
   return true;
 }
 
+// tile_plan.h's filesystem and network, on LittleFS and HTTPS.
+static uint64_t net_tile_free(void*) {
+  uint64_t t = LittleFS.totalBytes(), u = LittleFS.usedBytes();
+  return t > u ? t - u : 0;
+}
+static int net_tile_fetch(void*, int z, int32_t x, int32_t y, uint32_t* bytes) {
+  char path[TILE_PATH_MAX];
+  snprintf(path, sizeof(path), "/tiles/%d/%ld/%ld.jpg", z, (long)x, (long)y);
+  if (!tile_path_ok(path)) return 0;
+  if (!net_heap_ok("MAP")) return -1;
+  uint32_t since = millis() - s_nf.tile_last_ms;
+  if (s_nf.tile_last_ms && since < NET_TILE_GAP_MS) vTaskDelay(pdMS_TO_TICKS(NET_TILE_GAP_MS - since));
+  s_nf.tile_last_ms = millis();
+  net_url_tile(s_nf.url, NET_URL_MAX, z, x, y);
+  NetTileSink t;
+  t.f = LittleFS.open(NET_TILE_TMP, "w");
+  t.n = 0;
+  t.jpeg = false;
+  if (!t.f) { net_fetch_err("MAP", "cannot write"); return -1; }
+  bool ok = net_http_get("MAP", s_nf.url, net_tile_sink, &t, TILE_FILE_MAX, 20000);
+  t.f.close();
+  // Only a whole JPEG is renamed into place: a cancelled or cut download
+  // leaves nothing but the temp file, removed here.
+  if (ok && t.jpeg) {
+    ts_mkdirs(path);
+    ok = LittleFS.rename(NET_TILE_TMP, path);
+  }
+  if (!ok || !t.jpeg) {
+    LittleFS.remove(NET_TILE_TMP);
+    return 0;
+  }
+  *bytes = t.n;
+  return 1;
+}
+static bool net_tile_remove(void*, uint64_t key) {
+  int z;
+  int32_t x, y;
+  tile_key_split(key, &z, &x, &y);
+  char path[TILE_PATH_MAX];
+  for (int k = 0; k < 2; k++) {   // a key is a tile, whichever format holds it
+    snprintf(path, sizeof(path), "/tiles/%d/%ld/%ld.%s", z, (long)x, (long)y, k ? "png" : "jpg");
+    if (tile_path_ok(path) && LittleFS.exists(path)) {
+      ts_remove_pruned(path);
+      return true;
+    }
+  }
+  return false;
+}
+static bool net_tile_cancelled(void*) { return s_nf.cancel; }
+static void net_tile_progress(void*, uint32_t done, uint32_t total) {
+  g_net_tiles_done = (uint16_t)(done > 0xFFFF ? 0xFFFF : done);
+  g_net_tiles_total = (uint16_t)(total > 0xFFFF ? 0xFFFF : total);
+}
+
 static void net_job_tiles() {
   if (!s_nf.home) { s_nf.res.skipped |= NET_JOB_TILES; return; }
   if (tile_store_busy(millis())) { s_nf.res.skipped |= NET_JOB_TILES; net_fetch_err("MAP", "app tile sync running"); return; }
-  uint32_t total = net_tile_count(s_nf.lat, s_nf.lon, NET_TILE_RADIUS_M);
-  g_net_tiles_total = (uint16_t)(total > 0xFFFF ? 0xFFFF : total);
+  LittleFS.remove(NET_TILE_TMP);   // a leftover from a reset mid-download
+  ts_mkdirs(NET_TILE_TMP);         // /tiles itself, on a board that never had a map
+  // Plan first: what is on flash, what the circle needs, whether it fits
+  // (tile_plan.h shrinks z15, then z14... until it does). Listing and
+  // planning take seconds on a big store: a cancel is checked after each.
+  uint64_t tb = 0;
+  uint32_t n = ts_tiles_list(s_nf.disk, NET_TILE_DISK_MAX, &tb);
+  if (s_nf.cancel) { net_job_stop(NET_JOB_TILES, "MAP"); return; }
+  TilePlan* p = &s_nf.res.plan;
+  tile_plan_make(p, s_nf.lat, s_nf.lon, s_nf.req.tile_radius_m, LittleFS.totalBytes(), LittleFS.usedBytes(),
+                 s_nf.disk, n);
+  s_nf.res.have_plan = true;
+  if (s_nf.cancel) { net_job_stop(NET_JOB_TILES, "MAP"); return; }
+  s_nf.res.tile_max_m = tile_plan_max_radius_m(s_nf.lat, s_nf.lon, p->capacity, p->avg_bytes);
+  g_net_tiles_total = (uint16_t)(p->total > 0xFFFF ? 0xFFFF : p->total);
   g_net_tiles_done = 0;
   g_net_tiles_running = true;
-  uint16_t budget = s_nf.req.tile_budget;
-  uint16_t fresh = 0, fails = 0;
-  bool stopped = false, failed = false;
-  uint32_t last = 0;
-  char path[TILE_PATH_MAX];
-  for (uint32_t k = 0; k < total; k++) {
-    if (s_nf.cancel) { stopped = true; net_fetch_err("MAP", "cancelled"); break; }
-    int z;
-    int32_t x, y;
-    if (!net_tile_at(s_nf.lat, s_nf.lon, NET_TILE_RADIUS_M, k, &z, &x, &y)) break;
-    g_net_tiles_done = (uint16_t)(k + 1 > 0xFFFF ? 0xFFFF : k + 1);
-    snprintf(path, sizeof(path), "/tiles/%d/%ld/%ld.png", z, (long)x, (long)y);
-    if (!tile_path_ok(path) || LittleFS.exists(path)) continue;
-    if (fresh >= budget) { stopped = true; break; }   // the rest next window
-    if (LittleFS.totalBytes() - LittleFS.usedBytes() < NET_TILE_MIN_FREE) {
-      net_fetch_err("MAP", "storage full");
-      stopped = true;
-      failed = fresh == 0;
-      break;
-    }
-    if (!net_heap_ok("MAP")) { stopped = true; failed = true; break; }
-    uint32_t since = millis() - last;
-    if (last && since < NET_TILE_GAP_MS) vTaskDelay(pdMS_TO_TICKS(NET_TILE_GAP_MS - since));
-    last = millis();
-    net_url_tile(s_nf.url, NET_URL_MAX, z, x, y);
-    NetTileSink t;
-    t.f = LittleFS.open(NET_TILE_TMP, "w");
-    t.n = 0;
-    t.png = false;
-    if (!t.f) { net_fetch_err("MAP", "cannot write"); stopped = true; failed = true; break; }
-    bool ok = net_http_get("MAP", s_nf.url, net_tile_sink, &t, TILE_FILE_MAX, 20000);
-    t.f.close();
-    if (ok && t.png) {
-      ts_mkdirs(path);
-      ok = LittleFS.rename(NET_TILE_TMP, path);
-    }
-    if (!ok || !t.png) {
-      LittleFS.remove(NET_TILE_TMP);
-      if (++fails >= 3) { stopped = true; failed = true; break; }
-      continue;
-    }
-    fails = 0;
-    fresh++;
-  }
-  s_nf.res.tiles_new = fresh;
-  s_nf.res.tiles_left = stopped ? 1 : 0;
-  if (failed) s_nf.res.failed |= NET_JOB_TILES;
+  TileSyncOps ops = { nullptr, net_tile_free, net_tile_fetch, net_tile_remove, net_tile_cancelled, net_tile_progress };
+  TileSyncResult r;
+  s_nf.tile_last_ms = 0;
+  tile_sync_run(p, s_nf.disk, n, s_nf.req.tile_budget, &ops, s_nf.victims, NET_TILE_DISK_MAX, &r);
+  s_nf.res.tiles_new = (uint16_t)(r.fetched > 0xFFFF ? 0xFFFF : r.fetched);
+  s_nf.res.tiles_left = (uint16_t)(r.left > 0xFFFF ? 0xFFFF : r.left);
+  s_nf.res.storage_full = r.storage_full;
+  if (r.storage_full) net_fetch_err("MAP", "storage full (1 MB kept free)");
+  // Cut short by a cancel: not done, whatever it fetched first (tiles says how many).
+  if (r.cancelled) net_job_stop(NET_JOB_TILES, "MAP");
+  else if (r.stopped) net_fetch_err("MAP", "download failed");
+  if (r.cancelled) return;
+  if ((r.stopped && r.fetched == 0) || (r.storage_full && r.fetched == 0)) s_nf.res.failed |= NET_JOB_TILES;
   else s_nf.res.ok |= NET_JOB_TILES;
 }
 
@@ -366,9 +434,9 @@ static void net_fetch_task(void*) {
   if ((j & NET_JOB_TFR) && !s_nf.cancel) net_job_tfr();
   if ((j & NET_JOB_ADSB) && !s_nf.cancel) net_job_adsb();
   if ((j & NET_JOB_TILES) && !s_nf.cancel) net_job_tiles();
-  // Jobs never reached (cancelled) count as failed.
-  uint32_t seen = s_nf.res.ok | s_nf.res.failed | s_nf.res.skipped;
-  if (j & ~seen) { s_nf.res.failed |= j & ~seen; net_fetch_err("SYNC", "cancelled"); }
+  // Jobs never reached (a cancel) did not fail: they were not run.
+  uint32_t seen = s_nf.res.ok | s_nf.res.failed | s_nf.res.skipped | s_nf.res.cancelled;
+  if (j & ~seen) { s_nf.res.cancelled |= j & ~seen; net_fetch_err("SYNC", "cancelled"); }
   // No TLS ran (or it never got that far): still report the headroom.
   if (!s_nf.res.heap_free) {
     s_nf.res.heap_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -387,7 +455,10 @@ static bool net_fetch_alloc() {
   if (!s_nf.obj) s_nf.obj = (char*)ext_calloc(NET_OBJ_BUF);
   if (!s_nf.io) s_nf.io = (uint8_t*)ext_calloc(NET_IO_BUF);
   if (!s_nf.url) s_nf.url = (char*)ext_calloc(NET_URL_MAX);
-  return s_nf.ac && s_nf.ac_d && s_nf.tfr && s_nf.tfr_d && s_nf.ring && s_nf.obj && s_nf.io && s_nf.url;
+  if (!s_nf.disk) s_nf.disk = ext_new<TileOnDisk>(NET_TILE_DISK_MAX);
+  if (!s_nf.victims) s_nf.victims = ext_new<uint32_t>(NET_TILE_DISK_MAX);
+  return s_nf.ac && s_nf.ac_d && s_nf.tfr && s_nf.tfr_d && s_nf.ring && s_nf.obj && s_nf.io && s_nf.url &&
+         s_nf.disk && s_nf.victims;
 }
 
 static bool net_fetch_start(const NetJobReq* req) {
@@ -397,6 +468,20 @@ static bool net_fetch_start(const NetJobReq* req) {
   s_nf.lat = g_home_lat;
   s_nf.lon = g_home_lon;
   RX_UNLOCK();
+  // ADS-B: around home, or widened around live drones far from it. The
+  // screen's copy of the track table is the loop's own (this is the loop).
+  double dlat[NET_DRONES_MAX], dlon[NET_DRONES_MAX];
+  int nd = 0;
+  uint32_t now = millis();
+  for (int i = 0; i < TRK_MAX && nd < NET_DRONES_MAX; i++) {
+    const Track* t = &g_tracks[i];
+    if (!t->used || !t->has_pos || (int32_t)(now - t->last_ms) > 60000) continue;
+    if (!(fabs(t->lat) <= 90 && fabs(t->lon) <= 180)) continue;
+    dlat[nd] = t->lat;
+    dlon[nd] = t->lon;
+    nd++;
+  }
+  s_nf.adsb = net_adsb_area(s_nf.lat, s_nf.lon, dlat, dlon, nd, req->adsb_radius_m, NET_ADSB_KM_MAX * 1000.0);
   memset(&s_nf.res, 0, sizeof(s_nf.res));
   s_nf.req = *req;
   s_nf.done = false;

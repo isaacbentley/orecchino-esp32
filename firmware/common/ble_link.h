@@ -365,6 +365,9 @@ static void ble_link_poll(uint32_t now) {
 }
 
 static inline bool ble_link_connected() { return s_ble_connected; }
+/// A phone is connected on an encrypted (paired) link: the T5 pauses its
+/// own Wi-Fi syncs while this holds (net_sync.h).
+static inline bool ble_link_peer_secure() { return s_ble_connected && s_ble_encrypted; }
 static inline uint32_t ble_link_drops() { return s_ble_drops; }
 static inline uint32_t ble_link_rx_drops() { return s_ble_rx_drops; }
 
@@ -410,6 +413,7 @@ static inline void ble_link_poll(uint32_t now) {
 }
 
 static inline bool ble_link_connected() { return s_mock_connected; }
+static inline bool ble_link_peer_secure() { return s_mock_connected && s_mock_encrypted; }
 static inline uint32_t ble_link_drops() { return s_mock_drops; }
 static inline uint32_t ble_link_rx_drops() { return 0; }
 

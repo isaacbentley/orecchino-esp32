@@ -34,10 +34,18 @@ static const char* TXCARR[10] = {"Wi-Fi", "NAN", "BLE5", "BLE LR", "BLE4", "Wi-F
 int txui_count() { return 10; }
 const char* txui_id(int i) { return TXIDS[i]; }
 const char* txui_carrier(int i) { return TXCARR[i]; }
-bool txui_enabled(int i) { return i != 3; } void txui_set_enabled(int, bool) {}
-uint32_t txui_sent(int i) { return 1234 * (i + 1); } bool txui_running() { return true; } void txui_set_running(bool) {}
+static int p_tx_bad_row = 0, p_tx_master = 0;   // path indices off the list; master toggles
+bool txui_enabled(int i) { if (i < 0 || i >= 10) p_tx_bad_row++; return i != 3; }
+void txui_set_enabled(int i, bool) { if (i < 0 || i >= 10) p_tx_bad_row++; }
+uint32_t txui_sent(int i) { return 1234 * (i + 1); } bool txui_running() { return true; } void txui_set_running(bool) { p_tx_master++; }
 bool txui_emergency() { return false; } void txui_set_emergency(bool) {}
+bool txui_slow() { return false; } void txui_set_slow(bool) {}
 void board_switch_mode(uint8_t) {}
+// The receiver core's match log, as the menu sees it (rx_core.h is not in
+// this unit; tests/core_test.cpp checks the real clear, save and broadcast).
+static int p_log_held = 48, p_log_clears = 0;
+void rx_log_clear_all() { p_log_held = 0; p_log_clears++; }
+void rx_log_stats(int* held, uint32_t* oldest_age_s) { *held = p_log_held; *oldest_age_s = p_log_held ? 7200 : UINT32_MAX; }
 
 // ---- fixture: the T5 check's stress case
 static void add_track(int i, const char* id, double brg, double range_m, float h, float spd, float hdg,
@@ -160,7 +168,73 @@ int main() {
     if (cut) g_fails++;
   }
   scene_check("tembed_menu");
+  // Clear history: a click asks (CANCEL chosen), the knob picks CLEAR, a
+  // click clears; CANCEL, or the side key, keeps everything.
+  {
+    auto click = [&](int pin) {
+      g_pin_low = pin; g_millis += 20; ui_tick(g_millis, true, 80);
+      g_millis += 120; ui_tick(g_millis, true, 80);
+      g_pin_low = -1; g_millis += 20; ui_tick(g_millis, true, 80);
+    };
+    s_mode = UI_MODE_RX; s_view = V_MENU; s_menu_sel = MENU_CLEAR; s_clear_ask = false;
+    g_runs.clear(); draw_menu(); scene_check("tembed_menu_clear");
+    click(PIN_ENC_KEY);
+    bool asks = s_clear_ask && s_clear_sel == 0 && p_log_clears == 0;
+    printf("%s Clear history asks first, CANCEL chosen\n", asks ? "ok  " : "FAIL"); if (!asks) g_fails++;
+    g_runs.clear(); draw_menu(); scene_check("tembed_clear_ask");
+    click(PIN_ENC_KEY);                                   // CANCEL
+    bool kept = !s_clear_ask && p_log_clears == 0 && p_log_held == 48;
+    printf("%s CANCEL keeps the history\n", kept ? "ok  " : "FAIL"); if (!kept) g_fails++;
+    click(PIN_ENC_KEY); click(PIN_USER_KEY);              // ask, then back out with the side key
+    kept = !s_clear_ask && s_view == V_MENU && p_log_clears == 0;
+    printf("%s the side key backs out without clearing\n", kept ? "ok  " : "FAIL"); if (!kept) g_fails++;
+    click(PIN_ENC_KEY);
+    s_enc_pos += 1; g_millis += 200; ui_tick(g_millis, true, 80);   // turn: CLEAR
+    g_runs.clear(); draw_menu(); scene_check("tembed_clear_ask_clear");
+    click(PIN_ENC_KEY);
+    bool cleared = !s_clear_ask && p_log_clears == 1 && p_log_held == 0;
+    printf("%s CLEAR clears the history (rx_log_clear_all)\n", cleared ? "ok  " : "FAIL"); if (!cleared) g_fails++;
+    g_runs.clear(); draw_menu();
+    bool said = false; for (auto& r : g_runs) if (r.s == "history cleared") said = true;
+    printf("%s the menu then says history cleared\n", said ? "ok  " : "FAIL"); if (!said) g_fails++;
+    scene_check("tembed_menu_cleared");
+    // "history cleared" lasts 5 s, also across millis() wrapping (~49.7 days).
+    uint32_t keep_now = s_now;
+    s_cleared = true; s_cleared_ms = 0xFFFFF000u; p_log_held = 48;
+    char hb[48];
+    s_now = 0xFFFFF100u; history_words(hb, sizeof(hb));
+    bool wrap_on = !strcmp(hb, "history cleared");
+    s_now = 0x00000100u; history_words(hb, sizeof(hb));
+    wrap_on = wrap_on && !strcmp(hb, "history cleared");
+    s_now = 0x00002000u; history_words(hb, sizeof(hb));
+    bool wrap_off = strcmp(hb, "history cleared") != 0;
+    printf("%s \"history cleared\" lasts 5 s across the millis() wrap\n", wrap_on && wrap_off ? "ok  " : "FAIL");
+    if (!(wrap_on && wrap_off)) g_fails++;
+    s_cleared = false; s_now = keep_now;
+    s_view = V_SCOPE; p_log_held = 48;
+  }
   s_tx_sel = 4; draw_tx();                        scene_check("tembed_tx");
+  // A turn past either end and a click in the same pass act on the end row,
+  // never on a path index off the list (the click is handled before the draw
+  // that used to be the only clamp).
+  {
+    s_view = V_TX; p_tx_bad_row = 0;
+    auto turn_and_click = [&](int det) {
+      g_pin_low = PIN_ENC_KEY; g_millis += 20; ui_tick(g_millis, true, 80);
+      g_millis += 120; ui_tick(g_millis, true, 80);
+      s_enc_pos += det; g_pin_low = -1; g_millis += 20; ui_tick(g_millis, true, 80);
+    };
+    s_tx_sel = 0; int m0 = p_tx_master;
+    turn_and_click(-1);
+    bool low = s_tx_sel == 0 && p_tx_master == m0 + 1;
+    s_tx_sel = txui_count() + 2;
+    turn_and_click(+3);
+    bool high = s_tx_sel == txui_count() + 2;
+    bool ok = low && high && p_tx_bad_row == 0;
+    printf("%s TX list: a turn past the end and a click in one pass stay on the list\n", ok ? "ok  " : "FAIL");
+    if (!ok) g_fails++;
+    s_view = V_SCOPE; s_tx_sel = 4; g_runs.clear();
+  }
   // Only what changed goes over SPI: an identical frame sends nothing, a
   // clock tick a band or two.
   {

@@ -20,16 +20,17 @@ static inline bool tile_digits(const char** p, int max) {
   return n >= 1 && n <= max;
 }
 
-/// Exactly "/tiles/<z>/<x>/<y>.png", all numbers decimal: what fs_begin
-/// may create. z is at most 2 digits, x and y at most 7 (zoom 22 is
-/// 4194303 at most).
+/// Exactly "/tiles/<z>/<x>/<y>.jpg" or ".png", all numbers decimal: what
+/// fs_begin may create. z is at most 2 digits, x and y at most 7 (zoom 22
+/// is 4194303 at most). JPEG is the basemap now (Esri World Dark Gray);
+/// PNG stays for the SenseCAP's bundled CARTO pack.
 static inline bool tile_path_ok(const char* path) {
   if (!path || strlen(path) >= TILE_PATH_MAX || strncmp(path, "/tiles/", 7) != 0) return false;
   const char* p = path + 7;
   if (!tile_digits(&p, 2) || *p++ != '/') return false;
   if (!tile_digits(&p, 7) || *p++ != '/') return false;
   if (!tile_digits(&p, 7)) return false;
-  return strcmp(p, ".png") == 0;
+  return strcmp(p, ".jpg") == 0 || strcmp(p, ".png") == 0;
 }
 
 /// What fs_rm may remove: anything inside /tiles, so the host can prune a
@@ -62,4 +63,30 @@ static inline uint64_t tile_bytes_needed(uint64_t size, uint64_t fs_total) {
   if (size == 0 || size > TILE_FILE_MAX) return 0;
   uint64_t need = size + TILE_FS_MARGIN;
   return need <= fs_total ? need : 0;
+}
+
+// ---------------------------------------------------------------------------
+// The basemap and its marker.
+//
+// Tiles come from Esri's World Dark Gray Canvas (no key): JPEG base tiles,
+// fetched as z/y/x (note the order) and stored as /tiles/z/x/y.jpg. CARTO's
+// dark_all now answers every tile without an API key with a 200 OK "API KEY
+// REQUIRED" placeholder PNG, so .png tiles a T5 fetched itself are junk:
+// the T5 wipes /tiles once when TILE_SOURCE_MARK does not hold
+// TILE_SOURCE_ID (tile_store_check_source). The SenseCAP's bundled .png
+// pack is genuine and is never wiped.
+#define TILE_SOURCE_ID    "esri-dg1"
+#define TILE_SOURCE_MARK  "/tiles/.src"
+#define TILE_BASE_URL     "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/%d/%d/%d"   // z, y, x
+#define TILE_ATTRIBUTION  "Esri, HERE, Garmin, (c) OpenStreetMap contributors"
+
+enum { TILE_FMT_NONE = 0, TILE_FMT_JPEG = 1, TILE_FMT_PNG = 2 };
+
+/// What the first bytes of a tile say it is: JPEG (FF D8 FF), PNG (the
+/// 8-byte signature), or neither (an HTML/XML error page, a truncated file).
+static inline int tile_sniff(const uint8_t* b, size_t n) {
+  static const uint8_t png[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+  if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return TILE_FMT_JPEG;
+  if (n >= 8 && memcmp(b, png, 8) == 0) return TILE_FMT_PNG;
+  return TILE_FMT_NONE;
 }

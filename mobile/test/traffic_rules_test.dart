@@ -11,9 +11,11 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orecchino_mobile/core/traffic/traffic_rules.dart';
 
+/// Banned words: 'clear' only as the instruction 'KEEP CLEAR OF'; 'conflict'
+/// only in 'conflict watch' / 'ADS-B conflict(s)', never 'conflict resolved'.
 bool forbidden(String s) {
-  final l = s.toLowerCase();
-  return ['collision', 'conflict', 'safe', 'clear', 'tcas'].any(l.contains);
+  final l = s.toLowerCase().replaceAll('keep clear of', '');
+  return ['collision', 'safe', 'clear', 'tcas', 'conflict resolved', 'no traffic'].any(l.contains);
 }
 
 double? dbl(Object? v) => v is num ? v.toDouble() : null;
@@ -37,15 +39,19 @@ int runRules(String file, Map<String, dynamic> v, List<dynamic> steps) {
     final ctx = '$file t=$ts';
     final now = 1000000 + (ts * 1000).round();
     final dj = (step['drones'] ?? v['drones'] ?? const <dynamic>[]) as List<dynamic>;
-    final drones = dj.cast<Map<String, dynamic>>().map((d) => TrafficDrone(
-          id: d['id'] as String? ?? '',
-          lat: dbl(d['lat']),
-          lon: dbl(d['lon']),
-          altGeoM: dbl(d['alt_geo_m']),
-          speedMps: dbl(d['speed_mps']),
-          headingDeg: dbl(d['heading_deg']),
-          live: d['live'] == true,
-        )).toList();
+    final drones = dj
+        .cast<Map<String, dynamic>>()
+        .map((d) => TrafficDrone(
+              id: d['id'] as String? ?? '',
+              lat: dbl(d['lat']),
+              lon: dbl(d['lon']),
+              altGeoM: dbl(d['alt_geo_m']),
+              speedMps: dbl(d['speed_mps']),
+              headingDeg: dbl(d['heading_deg']),
+              live: d['live'] == true,
+              heightM: dbl(d['height_m']),
+            ))
+        .toList();
     final obs = observerOf(step['observer'] ?? v['observer']);
     final aircraft = <TrafficAircraft>[];
     for (final w in (step['aircraft'] as List<dynamic>).cast<Map<String, dynamic>>()) {
@@ -61,8 +67,6 @@ int runRules(String file, Map<String, dynamic> v, List<dynamic> steps) {
     expect(r.haveData, e['have_data'], reason: '$ctx: have_data');
     expect(r.stale, e['stale'], reason: '$ctx: stale');
     expect(r.highest.name, e['highest'], reason: '$ctx: highest');
-    expect(r.nearCount, e['near_count'], reason: '$ctx: near_count');
-    expect(r.groundCount, e['ground_count'], reason: '$ctx: ground_count');
     expect(r.aircraftCount, e['aircraft_count'], reason: '$ctx: aircraft_count');
     expect(r.summary, e['summary'], reason: '$ctx: summary');
     expect(forbidden(r.summary), isFalse);
@@ -77,7 +81,12 @@ int runRules(String file, Map<String, dynamic> v, List<dynamic> steps) {
       expect(a.hex, w['hex'], reason: '$c: hex');
       expect(a.held, w['held'], reason: '$c: held');
       expect(a.heightUnknown, w['height_unknown'], reason: '$c: height_unknown');
+      expect(a.vertRel.name, w['vert_rel'], reason: '$c: vert_rel');
       expect(a.approx, w['approx'], reason: '$c: approx');
+      expect(a.fromObserver, w['from_observer'], reason: '$c: from_observer');
+      expect(a.action, w['action'], reason: '$c: action');
+      expect(a.resolution, w['resolution'], reason: '$c: resolution');
+      expect(a.resolution.startsWith(a.action) && !forbidden(a.resolution), isTrue, reason: '$c: resolution words');
       expect(a.onGround, w['on_ground'], reason: '$c: on_ground');
       expect(close(a.horizM, w['horiz_m'], 1e-6), isTrue, reason: '$c: horiz ${a.horizM}');
       expect(close(a.vertM, w['vert_m'], 1e-6), isTrue, reason: '$c: vert ${a.vertM}');
@@ -156,7 +165,7 @@ void main() {
     final dir = Directory('../tests/vectors/traffic');
     final files = dir.listSync().whereType<File>().where((f) => f.path.endsWith('.json')).toList()
       ..sort((a, b) => a.path.compareTo(b.path));
-    expect(files.length, greaterThanOrEqualTo(13));
+    expect(files.length, greaterThanOrEqualTo(12));
     var ruleFiles = 0, steps = 0, alerts = 0, cases = 0;
     for (final f in files) {
       final name = f.uri.pathSegments.last;
@@ -172,7 +181,7 @@ void main() {
         fail('$name: unknown vector shape');
       }
     }
-    expect(ruleFiles >= 12 && steps >= 36 && alerts >= 60 && cases >= 8, isTrue,
+    expect(ruleFiles >= 11 && steps >= 37 && alerts >= 90 && cases >= 8, isTrue,
         reason: 'coverage: $ruleFiles rule files, $steps steps, $alerts alerts, $cases host cases');
   });
 
@@ -184,11 +193,9 @@ void main() {
 
   test('no source and empty set wording', () {
     final st = TrafficState();
-    final none = TrafficRules.evaluate(
-        drones: const [], aircraft: const [], observer: TrafficObserver.unknown, dataMs: null, nowMs: 10000, state: st);
-    expect(none.summary, 'no ADS-B source');
-    final empty = TrafficRules.evaluate(
-        drones: const [], aircraft: const [], observer: TrafficObserver.unknown, dataMs: 9000, nowMs: 10000, state: st);
-    expect(empty.summary, 'no ADS-B traffic reported within 3 km, data 1 s old');
+    final none = TrafficRules.evaluate(drones: const [], aircraft: const [], dataMs: null, nowMs: 10000, state: st);
+    expect(none.summary, 'CONFLICT WATCH OFF: no ADS-B source');
+    final empty = TrafficRules.evaluate(drones: const [], aircraft: const [], dataMs: 9000, nowMs: 10000, state: st);
+    expect(empty.summary, 'conflict watch on, no ADS-B conflicts, data 1 s old');
   });
 }

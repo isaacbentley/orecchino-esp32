@@ -85,7 +85,14 @@ const char* txui_desc(int i) { return TXDESC[i]; }
 bool txui_enabled(int i) { return i != 3; } void txui_set_enabled(int, bool) {}
 uint32_t txui_sent(int i) { return 1234 * (i + 1); } bool txui_running() { return true; } void txui_set_running(bool) {}
 bool txui_emergency() { return false; } void txui_set_emergency(bool) {}
+static bool g_tx_slow = false;
+bool txui_slow() { return g_tx_slow; } void txui_set_slow(bool on) { g_tx_slow = on; }
 void board_switch_mode(uint8_t) {}
+// The receiver core's match log, as the screen sees it (rx_core.h is not in
+// this unit; tests/core_test.cpp checks the real clear, save and broadcast).
+static int p_log_held = 48, p_log_clears = 0;
+void rx_log_clear_all() { p_log_held = 0; p_log_clears++; }
+void rx_log_stats(int* held, uint32_t* oldest_age_s) { *held = p_log_held; *oldest_age_s = p_log_held ? 7200 : UINT32_MAX; }
 
 // ---- fixture: the review's stress case, plus shared suffixes and a UUID
 static void add_track(int i, const char* id, double brg, double range_m, float h, float spd, float hdg,
@@ -225,6 +232,13 @@ static void wifi_fixture() {
   net_debug_set_scanning(false);
   net_debug_set_state(NET_STATE_DISCONNECTED, "", "");
   net_debug_set_last_sync(1790001840);
+  // The ADS-B radius, the map area, and the last tile plan (3 km at z12-14,
+  // z15 shrunk to 2 km to fit). No debug setter for these: set as the tick would.
+  g_net.cfg.adsb_km = 10; g_net.cfg.tile_km = 3;
+  memset(&g_net.plan, 0, sizeof(g_net.plan));
+  g_net.plan.radius_m[0] = g_net.plan.radius_m[1] = g_net.plan.radius_m[2] = 3000; g_net.plan.radius_m[3] = 2000;
+  g_net.plan.plan_bytes = 1153434; g_net.plan.capacity = 13107200; g_net.plan.shrunk = true;
+  g_net.have_plan = true; g_net.tile_max_m = 12000;
 }
 
 // ---- pixel checks
@@ -262,27 +276,52 @@ static void check(bool ok, const char* what) {
   printf("%s %s\n", ok ? "ok  " : "FAIL", what);
   if (!ok) g_fails++;
 }
-/// Traffic wording (plan §8.2): never these words, on any traffic scene.
+/// Traffic wording (traffic.h): never these words on any scene; "clear"
+/// only in the instruction "KEEP CLEAR OF"; never a count of aircraft or a
+/// "nearest traffic" (the board lists drones; ADS-B is for conflicts only).
+static bool s_expect_action = false;   // the scene shows an alert: its action must be there
 static void words_check(const char* name) {
-  static const char* bad[] = { "collision", "conflict", "safe", "clear", "tcas", "nm", "tau", "fl" };
-  int hits = 0;
+  static const char* bad[] = { "collision", "safe", "tcas", "nm", "tau", "fl" };
+  int hits = 0; bool action = false;
   for (const TextRun& r : g_runs) {
     std::string t;
     for (char c : r.s) t += (char)tolower((unsigned char)c);
+    if (strstr(t.c_str(), "give way") || strstr(t.c_str(), "keep clear of") || strstr(t.c_str(), "be ready to land")) action = true;
+    auto flag = [&](const char* why) { if (hits < 4) printf("   %s in \"%s\"\n", why, r.s.c_str()); hits++; };
+    if (strstr(t.c_str(), "conflict resolved")) flag("\"conflict resolved\"");
+    if (strstr(t.c_str(), "nearest traffic") || strstr(t.c_str(), "aircraft within") ||
+        strstr(t.c_str(), "no ads-b traffic")) flag("aircraft wording outside a conflict");
+    for (size_t k = 0; k + 1 < t.size(); k++) {   // "ADS-B 12", "TRAFFIC 3", "12 aircraft": counts of aircraft
+      if (!isdigit((unsigned char)t[k + 1]) || t[k] != ' ') continue;
+      size_t e = k + 1; while (e < t.size() && isdigit((unsigned char)t[e])) e++;
+      if (!t.compare(e, 6, " s old")) continue;   // "ADS-B 6 s old": an age, not a count
+      if ((k >= 5 && !t.compare(k - 5, 5, "ads-b")) || (k >= 7 && !t.compare(k - 7, 7, "traffic"))) flag("an aircraft count");
+    }
+    for (size_t k = 1; k < t.size(); k++)
+      if (t[k] == ' ' && isdigit((unsigned char)t[k - 1]) && !t.compare(k + 1, 8, "aircraft")) flag("an aircraft count");
     size_t i = 0;
     while (i < t.size()) {
       while (i < t.size() && !isalnum((unsigned char)t[i])) i++;
       size_t j = i;
       while (j < t.size() && isalnum((unsigned char)t[j])) j++;
       std::string w = t.substr(i, j - i);
-      for (const char* b : bad) if (w == b) { if (hits < 4) printf("   forbidden word \"%s\" in \"%s\"\n", b, r.s.c_str()); hits++; }
+      for (const char* b : bad) if (w == b) flag("forbidden word");
+      if (w == "clear" && !(i >= 5 && !t.compare(i - 5, 5, "keep ") && !t.compare(j, 3, " of"))) flag("\"clear\" outside KEEP CLEAR OF");
       i = j;
     }
   }
-  if (hits) { printf("FAIL %s: %d forbidden word(s)\n", name, hits); g_fails++; }
+  if (s_expect_action && !action) { printf("   no alert action on screen\n"); hits++; }
+  if (hits) { printf("FAIL %s: %d wording problem(s)\n", name, hits); g_fails++; }
+}
+/// Aircraft drawn only in an alert: every mark the last view placed is an
+/// alerting aircraft's.
+static void drawn_check(const char* name) {
+  int bad = 0;
+  for (int j = 0; j < s_pac_n; j++) if (!traffic_alert_for_hex(&g_traffic_result, s_pac_hex[j])) bad++;
+  if (bad) { printf("FAIL %s: %d aircraft drawn without an alert\n", name, bad); g_fails++; }
 }
 /// The scene: collisions, forbidden traffic words, then the picture.
-static void traffic_scene(const char* name) { words_check(name); scene_check(name); }
+static void traffic_scene(const char* name) { words_check(name); drawn_check(name); scene_check(name); }
 static void tick(uint32_t step = 10) { g_millis += step; ui_tick(g_millis, true, 76, -1); }
 /// The whole board as draw_board paints it, checked on its own runs.
 static void board_scene(const char* name) { g_runs.clear(); draw_board(true); scene_check(name); }
@@ -304,6 +343,38 @@ int main() {
   // ---- SYSTEM and the Wi-Fi screens, reached the way a finger reaches them
   wifi_fixture();
   s_diag = true; board_scene("t5_diag");
+  // CLEAR HISTORY asks first; CANCEL keeps the records, CLEAR clears them.
+  {
+    const int mw = 580, mh = 260, mx = (W - mw) / 2, my = (H - mh) / 2, by = my + 164;
+    tick(); touch(DG_CLR_X + 40, DG_MODE_BTN_Y + 15); tick();
+    check(s_confirm_switch && s_target_mode == UI_TARGET_CLEAR_LOG && p_log_clears == 0, "CLEAR HISTORY opens a confirmation, nothing cleared yet");
+    draw_board(false); g_runs.clear(); draw_switch_modal();
+    { bool asks = false; for (auto& r : g_runs) if (strstr(r.s.c_str(), "Clear the 48 saved drone records?")) asks = true;
+      check(asks, "the confirmation names the 48 records"); }
+    scene_check("t5_confirm_clear");
+    touch(mx + mw - 45 - 110, by + 27); tick();                               // CANCEL
+    check(!s_confirm_switch && p_log_clears == 0 && p_log_held == 48, "CANCEL keeps the history");
+    touch(DG_CLR_X + 40, DG_MODE_BTN_Y + 15); tick();
+    touch(mx + 45 + 110, by + 27); tick();                                    // CLEAR
+    check(!s_confirm_switch && p_log_clears == 1 && p_log_held == 0, "CLEAR clears the history (rx_log_clear_all)");
+    g_runs.clear(); draw_board(true);
+    { bool said = false; for (auto& r : g_runs) if (r.s == "History cleared") said = true;
+      check(said, "SYSTEM then says History cleared"); }
+    scene_check("t5_diag_cleared");
+    p_log_held = 48;
+  }
+  // The steppers: ADS-B radius in 5 km steps, the map area in 1 km steps.
+  tick(); touch(DG_STEP_X + 150, DG_ADSB_Y + 15); tick();
+  touch(DG_STEP_X + 10, DG_MAP_Y + 15); tick();
+  check(net_get_adsb_radius_km() == 15 && net_get_tile_radius_km() == 2, "ADS-B radius + (10 -> 15 km), map area - (3 -> 2 km)");
+  g_net.cfg.adsb_km = 10; g_net.cfg.tile_km = 3;
+  // A phone connected over BLE: the automatic Wi-Fi pauses, and SYSTEM says so.
+  g_net.paused = true;
+  g_runs.clear(); draw_board(true);
+  { bool said = false; for (auto& r : g_runs) if (strstr(r.s.c_str(), "Wi-Fi paused: phone connected")) said = true;
+    check(said, "SYSTEM says Wi-Fi paused: phone connected"); }
+  scene_check("t5_diag_paused");
+  g_net.paused = false;
   tick(); touch(DG_WF_X0 + 20, DG_WIFI_BTN_Y + 18); tick();   // NETWORKS
   check(s_wifi_modal && s_wv == WV_LIST && net_is_scanning(), "NETWORKS opens the list and asks for a scan");
   net_debug_set_scanning(true);                                    // what net_tick does with the request
@@ -387,7 +458,7 @@ int main() {
   scene_check("t5_table_stay");
   net_debug_set_mode(NET_MODE_SYNC); net_debug_set_state(NET_STATE_DISCONNECTED, NULL, "");
 
-  // ---- ADS-B traffic, through the real rules and the real tick
+  // ---- ADS-B conflicts, through the real rules and the real tick
   traffic_fixture();
   s_now = g_millis; build_order(); select_row(0);
   p_pulses = 0;
@@ -396,10 +467,15 @@ int main() {
   const TrafficAlert* w = nullptr;   // anywhere in the list: alerts sort nearest first
   for (int i = 0; i < g_traffic_result.n; i++)
     if (!strcmp(g_traffic_result.alerts[i].text, "TRAFFIC NEAR DRONE D9A03")) w = &g_traffic_result.alerts[i];
-  check(w != nullptr, "the fixture raises TRAFFIC NEAR DRONE D9A03");
+  check(w != nullptr && !strcmp(w->action, "GIVE WAY: DESCEND AND LAND D9A03"),
+        "the fixture raises TRAFFIC NEAR DRONE D9A03: GIVE WAY: DESCEND AND LAND D9A03");
   check(p_pulses == 3 && g_epd_log.n > n_before && g_epd_log.mode == MODE_GC16,
         "a new warning flashes the panel (GC16) and pulses the light three times");
-  traffic_board_scene("t5_table_traffic");
+  s_expect_action = true;
+  g_runs.clear(); draw_board(true);
+  { bool head = false; for (auto& r : g_runs) if (r.y1 < 70 && strstr(r.s.c_str(), "GIVE WAY")) head = true;
+    check(head, "the header leads with the action"); }
+  traffic_scene("t5_table_traffic");
   { const TrafficAircraft* ac; const TrafficAlert* al;
     check(traffic_card_pick(&ac, &al) && ac && !strcmp(ac->hex, "a1b2c3"), "the warning takes the plot panel"); }
   // Tap another row while the card shows: the partial path leaves no stale ink.
@@ -413,25 +489,17 @@ int main() {
   // Panels keep their marks to themselves.
   epd_hl_set_all_white(&s_hl); draw_traffic_card(&g_traffic_ac[0], w); panel_check("traffic card", {TC_X, TC_Y, TC_W, TC_H});
   epd_hl_set_all_white(&s_hl); draw_plot(); panel_check("plot with aircraft", RECT_PLOT);
+  drawn_check("plot");
   epd_hl_set_all_white(&s_hl); draw_table(); panel_check("table", RECT_TABLE);
-  // A chosen aircraft's card (the emergency one), without a warning.
+  s_map = true; s_cam_manual = false; map_camera(); traffic_board_scene("t5_map_traffic");
+  // A diamond on the map is an alerting aircraft: tapping it shows its alert in the HUD.
   {
-    TrafficResult keep = g_traffic_result;
-    g_traffic_result.n = 0; g_traffic_result.highest = TRAFFIC_NONE;
-    draw_board(true);
     int j = -1; for (int q = 0; q < s_pac_n; q++) if (!strcmp(s_pac_hex[q], "a1b2c3")) j = q;
-    check(j >= 0, "the plot draws UAL123 inside its rings");
+    check(j >= 0, "the map draws UAL123 (in a conflict)");
     if (j >= 0) { touch(s_pac_x[j], s_pac_y[j]); s_traffic_ms = g_millis; tick(); }   // no re-evaluation this pass
     check(!strcmp(s_ac_hex, "a1b2c3"), "tapping a diamond chooses its aircraft");
-    snprintf(s_ac_hex, sizeof(s_ac_hex), "a7700a");
-    traffic_board_scene("t5_table_ac_card");
-    s_traffic_ms = g_millis; touch(760, 300); tick();
-    check(!s_ac_hex[0] && !s_inspector, "a chosen aircraft's card closes on a tap");
-    s_inspector = false;
-    g_traffic_result = keep;
   }
-  s_map = true; s_cam_manual = false; map_camera(); traffic_board_scene("t5_map_traffic");
-  snprintf(s_ac_hex, sizeof(s_ac_hex), "a1b2c3"); traffic_board_scene("t5_map_ac_hud"); s_ac_hex[0] = 0;
+  traffic_board_scene("t5_map_ac_hud"); s_ac_hex[0] = 0;
   s_map = false;
   s_side = true; traffic_board_scene("t5_side_traffic");
   epd_hl_set_all_white(&s_hl); draw_side();
@@ -440,6 +508,38 @@ int main() {
   p_elev = NAN; traffic_board_scene("t5_side_traffic_noelev"); p_elev = 40;
   s_side = false;
   g_runs.clear(); draw_glance(); traffic_scene("t5_glance_traffic");
+
+  // The aircraft below the drone: descending would close on it, so move away first.
+  traffic_clear(); traffic_fixture();
+  g_traffic_ac[0].alt_geom_m = 181 - 90;      // 90 m below D9A03
+  s_now = g_millis; ui_traffic_update(g_millis);
+  { const TrafficAlert* b = traffic_alert_for_hex(&g_traffic_result, "a1b2c3");
+    check(b && strstr(b->action, "GIVE WAY: MOVE") && strstr(b->action, "THEN LAND D9A03"), "an aircraft below: MOVE <away>, THEN LAND"); }
+  traffic_board_scene("t5_table_traffic_below");
+
+  // Low traffic only (no pair): BE READY TO LAND DRONES, the aircraft joined to the board.
+  traffic_clear(); traffic_fixture();
+  g_traffic_ac[0].lat += 0.05;                // UAL123 leaves the drones
+  s_now = g_millis; ui_traffic_update(g_millis);
+  { bool low = false; for (int i = 0; i < g_traffic_result.n; i++) if (strstr(g_traffic_result.alerts[i].action, "BE READY TO LAND")) low = true;
+    check(low, "low traffic in the drones' airspace: BE READY TO LAND DRONES"); }
+  traffic_board_scene("t5_table_low");
+  s_map = true; s_cam_manual = false; map_camera(); traffic_board_scene("t5_map_low"); s_map = false;
+
+  // No conflicts: no aircraft anywhere, the watch says it is running.
+  traffic_clear(); traffic_fixture();
+  for (int i = 0; i < g_traffic_count; i++) { g_traffic_ac[i].lat += 0.3; }   // all 30+ km away
+  s_now = g_millis; ui_traffic_update(g_millis);
+  s_expect_action = false;
+  check(g_traffic_result.n == 0, "aircraft far from every drone raise nothing");
+  g_runs.clear(); draw_board(true);
+  { bool on = false; for (auto& r : g_runs) if (strstr(r.s.c_str(), "CONFLICT WATCH ON")) on = true;
+    check(on && s_pac_n == 0, "no conflicts: no aircraft drawn, CONFLICT WATCH ON in the footer"); }
+  traffic_scene("t5_table_watch_on");
+  s_map = true; s_cam_manual = false; map_camera(); traffic_board_scene("t5_map_watch_on");
+  check(s_pac_n == 0, "the map draws no aircraft outside a conflict"); s_map = false;
+  s_side = true; traffic_board_scene("t5_side_watch_on"); check(s_pac_n == 0, "the side view draws no aircraft outside a conflict"); s_side = false;
+
   traffic_clear(); traffic_fixture(true); s_now = g_millis; ui_traffic_update(g_millis);
   check(g_traffic_result.stale, "a 45 s old set is stale");
   g_runs.clear(); draw_board(true);
@@ -448,6 +548,10 @@ int main() {
     check(head && foot, "a stale feed says ADS-B STALE in the header and TRAFFIC DATA STALE in the footer"); }
   traffic_scene("t5_table_stale");
   traffic_clear();
+  g_runs.clear(); draw_board(true);
+  { bool off = false; for (auto& r : g_runs) if (strstr(r.s.c_str(), "CONFLICT WATCH OFF")) off = true;
+    check(off, "no ADS-B source: CONFLICT WATCH OFF in the footer"); }
+  traffic_scene("t5_table_watch_off");
 
   // An underrun leaves the glass incomplete: the next pass repaints it all.
   {
@@ -456,6 +560,13 @@ int main() {
     int gc = g_epd_log.gc16;
     tick();
     check(g_epd_clears == clears + 1 && g_epd_log.gc16 == gc + 1, "an underrun is repaired with a clear and a full GC16");
+    // A board whose refreshes keep underrunning (a busy radio task on the
+    // feeder's core) must not repaint in a loop: one repair per 30 s.
+    clears = g_epd_clears;
+    g_epd_fail_next = true; draw_board(false); tick(1000);
+    bool held = g_epd_clears == clears;
+    tick(30000);
+    check(held && g_epd_clears == clears + 1, "a second underrun within 30 s waits; the repair comes after 30 s");
   }
 
   g_home_set = false; p_gps_det = false; p_gps_fix = false;
@@ -474,8 +585,45 @@ int main() {
   p_gps_det = true; p_gps_fix = true;
   s_map = true; s_cam_manual = false; map_camera(); s_cam_manual = true; board_scene("t5_map");
   s_map = false; s_cam_manual = false;
-  s_mode = UI_MODE_TX; board_scene("t5_tx"); s_mode = UI_MODE_RX;
+  s_mode = UI_MODE_TX;
+  for (int slow = 0; slow < 2; slow++) {
+    g_tx_slow = slow; g_runs.clear(); draw_board(true);
+    bool said = false; for (auto& r : g_runs) if (r.s == (slow ? "RATE [SLOW]" : "RATE [SPEC]")) said = true;
+    check(said, slow ? "...and RATE [SLOW] when slow" : "the test beacon shows its rate: RATE [SPEC]");
+    scene_check(slow ? "t5_tx_slow" : "t5_tx");
+  }
+  g_tx_slow = false; s_mode = UI_MODE_RX;
   g_runs.clear(); draw_glance(); scene_check("t5_glance");
+  // Glance cadence: a moving drone changes the routine figures every few
+  // seconds; the panel may follow them at most once a minute, but an alert
+  // reaches it at once.
+  {
+    traffic_clear();
+    fixture(); s_now = g_millis; build_order();
+    for (int i = 0; i < TRK_MAX; i++) if (g_tracks[i].used) g_tracks[i].status = 0;
+    auto keep_fresh = [&]() { for (int i = 0; i < TRK_MAX; i++) if (g_tracks[i].used) g_tracks[i].last_ms = g_millis; };
+    s_glance = true; keep_fresh(); glance_show(g_millis);
+    int n0 = g_epd_log.n;
+    Track* nt = nullptr; double best = 1e18;
+    for (int i = 0; i < TRK_MAX; i++) {
+      Track* t = &g_tracks[i];
+      if (!t->used || !t->has_pos) continue;
+      double d = ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
+      if (d < best) { best = d; nt = t; }
+    }
+    int redraws_minute = 0;
+    for (int k = 0; k < 19 && nt; k++) {           // 57 s of a drone moving 60 m every 3 s
+      nt->lat += 60.0 / 111111.0; keep_fresh();
+      int n = g_epd_log.n; tick(3000); redraws_minute += g_epd_log.n - n;
+    }
+    for (int k = 0; k < 2; k++) { keep_fresh(); tick(3000); }   // past the minute
+    bool routine_once = s_glance && redraws_minute == 0 && g_epd_log.n - n0 == 1;
+    check(routine_once, "glance: a moving drone redraws the panel at most once a minute");
+    int n1 = g_epd_log.n;
+    nt->status = 3; keep_fresh(); tick(3000);
+    check(s_glance && g_epd_log.n - n1 == 1, "glance: a new emergency reaches the panel at once");
+    s_glance = false;
+  }
   s_side = true; board_scene("t5_side");
   g_home_set = false; board_scene("t5_side_nopos"); g_home_set = true;
   s_side = false;
@@ -505,17 +653,29 @@ int main() {
   printf("%s a reused slot is not mistaken for the old selection\n", resolved ? "ok  " : "FAIL");
   if (!resolved) g_fails++;
 
-  // The map re-tone, on dark_all's palette: land is paper, streets are
-  // darker than water and buildings and dark enough to show (the panel
-  // renders grey 3-10 distinctly), labels darkest. A plain inversion had
-  // made roads as light as land.
+  // The map re-tone (map_tone.h). CARTO dark_all's palette (older .png
+  // tiles): land is paper, streets darker than water and buildings and dark
+  // enough to show (the panel renders grey 3-10 distinctly), labels darkest.
+  // A plain inversion had made roads as light as land.
   {
-    unsigned land = map_tone(9), building = map_tone(6), street = map_tone(25),
-             water = map_tone(34), label = map_tone(66);
+    unsigned land = map_tone_carto(9), building = map_tone_carto(6), street = map_tone_carto(25),
+             water = map_tone_carto(34), label = map_tone_carto(66);
     bool ok = land == 15 && building < land && water < land && street < water &&
               street < building && street <= 6 && label < street;
-    printf("%s map tones: land %u, buildings %u, water %u, streets %u, labels %u\n",
+    printf("%s map tones (CARTO): land %u, buildings %u, water %u, streets %u, labels %u\n",
            ok ? "ok  " : "FAIL", land, building, water, street, label);
+    if (!ok) g_fails++;
+  }
+  // Esri World Dark Gray (the .jpg basemap), on its measured palette: land
+  // and blocks paper, water a light tint, streets dark, major roads darker,
+  // labels black.
+  {
+    unsigned land = map_tone_esri(77), block = map_tone_esri(70), water = map_tone_esri(34),
+             street = map_tone_esri(100), road = map_tone_esri(125), label = map_tone_esri(160);
+    bool ok = land == 15 && block == 15 && water < land && water > street && street <= 6 &&
+              road < street && label < road;
+    printf("%s map tones (Esri): land %u, blocks %u, water %u, streets %u, major roads %u, labels %u\n",
+           ok ? "ok  " : "FAIL", land, block, water, street, road, label);
     if (!ok) g_fails++;
   }
 

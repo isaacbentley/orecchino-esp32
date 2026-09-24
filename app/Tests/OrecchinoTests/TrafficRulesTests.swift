@@ -13,9 +13,11 @@ private let vectorDir = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     .deletingLastPathComponent().appendingPathComponent("tests/vectors/traffic")
 
+/// Banned words: "clear" only as the instruction "KEEP CLEAR OF"; "conflict"
+/// only in "conflict watch" / "ADS-B conflict(s)", never "conflict resolved".
 private func forbidden(_ s: String) -> Bool {
-    let l = s.lowercased()
-    return ["collision", "conflict", "safe", "clear", "tcas"].contains { l.contains($0) }
+    let l = s.lowercased().replacingOccurrences(of: "keep clear of", with: "")
+    return ["collision", "safe", "clear", "tcas", "conflict resolved", "no traffic"].contains { l.contains($0) }
 }
 
 private func dbl(_ v: Any?) -> Double? {
@@ -48,7 +50,7 @@ private func loadVectors() throws -> [(String, [String: Any])] {
 @Suite struct TrafficRulesTests {
     @Test func everyVectorFile() throws {
         let vectors = try loadVectors()
-        #expect(vectors.count >= 13)
+        #expect(vectors.count >= 12)
         var ruleFiles = 0, steps = 0, alerts = 0, cases = 0
         for (file, v) in vectors {
             if let cs = v["cases"] as? [[String: Any]] {
@@ -62,7 +64,7 @@ private func loadVectors() throws -> [(String, [String: Any])] {
                 Issue.record("\(file): unknown vector shape")
             }
         }
-        #expect(ruleFiles >= 12 && steps >= 36 && alerts >= 60 && cases >= 8,
+        #expect(ruleFiles >= 11 && steps >= 37 && alerts >= 90 && cases >= 8,
                 "coverage: \(ruleFiles) rule files, \(steps) steps, \(alerts) alerts, \(cases) host cases")
     }
 
@@ -77,7 +79,8 @@ private func loadVectors() throws -> [(String, [String: Any])] {
             let drones = dj.map { d in
                 TrafficDrone(id: d["id"] as? String ?? "", lat: dbl(d["lat"]), lon: dbl(d["lon"]),
                              altGeoM: dbl(d["alt_geo_m"]), speedMps: dbl(d["speed_mps"]),
-                             headingDeg: dbl(d["heading_deg"]), live: (d["live"] as? Bool) ?? false)
+                             headingDeg: dbl(d["heading_deg"]), live: (d["live"] as? Bool) ?? false,
+                             heightM: dbl(d["height_m"]))
             }
             let obs = observer(step["observer"] ?? v["observer"])
             var aircraft: [TrafficAircraft] = []
@@ -93,8 +96,6 @@ private func loadVectors() throws -> [(String, [String: Any])] {
             #expect(r.haveData == (e["have_data"] as? Bool), "\(ctx): have_data")
             #expect(r.stale == (e["stale"] as? Bool), "\(ctx): stale")
             #expect(r.highest.name == e["highest"] as? String, "\(ctx): highest \(r.highest.name)")
-            #expect(r.nearCount == (e["near_count"] as? Int), "\(ctx): near_count \(r.nearCount)")
-            #expect(r.groundCount == (e["ground_count"] as? Int), "\(ctx): ground_count \(r.groundCount)")
             #expect(r.aircraftCount == (e["aircraft_count"] as? Int), "\(ctx): aircraft_count")
             #expect(r.summary == e["summary"] as? String, "\(ctx): summary '\(r.summary)'")
             #expect(!forbidden(r.summary))
@@ -109,7 +110,12 @@ private func loadVectors() throws -> [(String, [String: Any])] {
                 #expect(a.text == w["text"] as? String, "\(c): text '\(a.text)'")
                 #expect(a.held == w["held"] as? Bool, "\(c): held")
                 #expect(a.heightUnknown == w["height_unknown"] as? Bool, "\(c): height_unknown")
+                #expect(a.vertRel.rawValue == w["vert_rel"] as? String, "\(c): vert_rel \(a.vertRel)")
                 #expect(a.approx == w["approx"] as? Bool, "\(c): approx")
+                #expect(a.fromObserver == w["from_observer"] as? Bool, "\(c): from_observer")
+                #expect(a.action == w["action"] as? String, "\(c): action '\(a.action)'")
+                #expect(a.resolution == w["resolution"] as? String, "\(c): resolution '\(a.resolution)'")
+                #expect(a.resolution.hasPrefix(a.action) && !forbidden(a.resolution))
                 #expect(a.onGround == w["on_ground"] as? Bool, "\(c): on_ground")
                 #expect(close(a.horizM, w["horiz_m"], 1e-6), "\(c): horiz \(String(describing: a.horizM))")
                 #expect(close(a.vertM, w["vert_m"], 1e-6), "\(c): vert \(String(describing: a.vertM))")
@@ -180,23 +186,25 @@ private func loadVectors() throws -> [(String, [String: Any])] {
         return cases.count
     }
 
-    @Test func recordedSfoAnswerRaisesNoLowForAircraftOnTheGround() throws {
+    @Test func recordedSfoAnswerWithoutDronesIsConflictWatchOnly() throws {
         // The recorded adsb.lol answer at SFO: 38 of 45 report "alt_baro":"ground".
+        // With no drone there is nothing to watch: no alerts, no aircraft counts.
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("Fixtures/adsb_lol_point_sfo.json")
         let rx: Int64 = 1_790_190_047_500
         let list = try AdsbLol.parse(try Data(contentsOf: url), receivedMs: rx)
         #expect(list.filter(\.onGround).count == 38)
         var st = TrafficState()
-        let r = TrafficRules.evaluate(drones: [], aircraft: list,
-                                      observer: TrafficObserver(lat: 37.62, lon: -122.38, elevM: -28),
-                                      dataMs: rx, nowMs: rx, state: &st)
-        let low = r.alerts.filter { $0.kind == .low }
-        #expect(low.allSatisfy { a in !list.first { $0.hex == a.hex }!.onGround })
-        #expect(low.count == 2)                     // UAL274 on final, UAL2352 on the runway
-        #expect(!r.alerts.contains { $0.text.contains("HEIGHT UNKNOWN") })
-        #expect(r.nearCount == 2 && r.groundCount > 0)   // taxiing aircraft are not in the count
-        #expect(r.summary == "2 airborne aircraft within 3 km, data 0 s old")
+        let r = TrafficRules.evaluate(drones: [], aircraft: list, dataMs: rx, nowMs: rx, state: &st)
+        #expect(r.alerts.isEmpty)
+        #expect(r.summary == "conflict watch on, no ADS-B conflicts, data 0 s old")
+        // A drone hovering over the apron next to UAL1668: ground aircraft are cautions.
+        let d = TrafficDrone(id: "1581F20000D9A11", lat: 37.621377, lon: -122.3870, altGeoM: 40,
+                             speedMps: 0, headingDeg: 0, live: true)
+        let r2 = TrafficRules.evaluate(drones: [d], aircraft: list, dataMs: rx, nowMs: rx, state: &st)
+        #expect(!r2.alerts.isEmpty)
+        #expect(r2.alerts.filter(\.onGround).allSatisfy {
+            $0.level == .caution && $0.action == "KEEP CLEAR OF AIRCRAFT ON GROUND" })
     }
 
     @Test func antimeridianDistance() {
@@ -207,9 +215,9 @@ private func loadVectors() throws -> [(String, [String: Any])] {
 
     @Test func emptySetAndNoSourceWording() {
         var st = TrafficState()
-        let none = TrafficRules.evaluate(drones: [], aircraft: [], observer: .unknown, dataMs: nil, nowMs: 10_000, state: &st)
-        #expect(none.summary == "no ADS-B source")
-        let empty = TrafficRules.evaluate(drones: [], aircraft: [], observer: .unknown, dataMs: 9_000, nowMs: 10_000, state: &st)
-        #expect(empty.summary == "no ADS-B traffic reported within 3 km, data 1 s old")
+        let none = TrafficRules.evaluate(drones: [], aircraft: [], dataMs: nil, nowMs: 10_000, state: &st)
+        #expect(none.summary == "CONFLICT WATCH OFF: no ADS-B source")
+        let empty = TrafficRules.evaluate(drones: [], aircraft: [], dataMs: 9_000, nowMs: 10_000, state: &st)
+        #expect(empty.summary == "conflict watch on, no ADS-B conflicts, data 1 s old")
     }
 }

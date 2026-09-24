@@ -4,8 +4,9 @@
  "worked_example": [
   "Drone D9A03 at alt_geo 150 m; UAL123 is 480 m E and 640 m N of it at alt_geom 240 m.",
   "horiz = sqrt(480^2 + 640^2) = 800.0 m <= 1000; vert = 240 - 150 = +90.0 m, |90| <= 150 -> TRAFFIC NEAR DRONE D9A03 (bearing 36.9 deg from the drone).",
+  "Resolution: the aircraft is 90 m above (more than 30 m) -> give way by descending: 'GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 90 M ABOVE, 800 M NE'.",
   "N12345: 1100 m W -> beyond 1000 m, nothing. SKW55: 700 m S but alt 500 -> vert +350 > 150, nothing.",
-  "Observer 3.5 km S of the drone: SKW55 is 2.8 km from it (near_count 1) but 500 m is not below 20 + 460 = 480 m, so no LOW."
+  "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): b2c3d4 at t=0 'LOW TRAFFIC W 1.1 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.1 KM W'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
  ],
  "observer": {
   "lat": 37.7749,
@@ -69,10 +70,8 @@
     "have_data": true,
     "stale": false,
     "highest": "warning",
-    "near_count": 1,
-    "ground_count": 0,
     "aircraft_count": 3,
-    "summary": "1 airborne aircraft within 3 km, data 4 s old",
+    "summary": "conflict watch on, 1 low aircraft, 1 ADS-B conflict, data 4 s old",
     "alerts": [
      {
       "level": "warning",
@@ -82,13 +81,37 @@
       "text": "TRAFFIC NEAR DRONE D9A03",
       "held": false,
       "height_unknown": false,
-      "approx": false,
       "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 90 M ABOVE, 800 M NE",
       "horiz_m": 800.0385597120052,
       "vert_m": 90.0,
       "bearing_deg": 36.8690442105677,
       "cpa_s": null,
       "age_s": 3.0
+     },
+     {
+      "level": "caution",
+      "kind": "low",
+      "drone": "1581F20000D9A03",
+      "hex": "b2c3d4",
+      "text": "LOW TRAFFIC W 1.1 KM",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "BE READY TO LAND DRONES",
+      "resolution": "BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.1 KM W",
+      "horiz_m": 1100.015476194998,
+      "vert_m": 180.0,
+      "bearing_deg": 270.0,
+      "cpa_s": null,
+      "age_s": 5.0
      }
     ]
    }

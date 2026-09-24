@@ -48,5 +48,8 @@ bool        txui_running();
 void        txui_set_running(bool on);
 bool        txui_emergency();
 void        txui_set_emergency(bool on);
+/// Slow: every path once every 5 s (a quiet bench); else the spec rate.
+bool        txui_slow();
+void        txui_set_slow(bool on);
 /// Persist `mode` as the boot mode and reboot into it.
 void        board_switch_mode(uint8_t mode);

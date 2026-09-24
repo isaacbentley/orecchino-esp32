@@ -1,8 +1,11 @@
-// TrafficViews.swift — ADS-B traffic on the Mac (plan §8.5): the sidebar's
-// alert strip, aircraft rows, the map marker, the separation bridge, the
-// aircraft card and the feed status. Every level has its own symbol, so no
-// state is told by colour alone; every alert shows its data age.
-// Words: never "collision", "conflict", "safe", "clear" or "TCAS".
+// TrafficViews.swift — ADS-B conflict watch on the Mac (plan §8.5). The app
+// is about drones: ADS-B is only for spotting and resolving conflicts with
+// them, so an aircraft is drawn only while it is in an alert, and every
+// alert leads with what to do with the drone (the rules' `action`), then the
+// geometry (`resolution`). Every level has its own symbol, so no state is
+// told by colour alone; every alert shows its data age.
+// Words: never "collision", "safe", "clear" (other than the instruction
+// "KEEP CLEAR OF"), "conflict resolved" or "TCAS".
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -15,8 +18,7 @@ func trafficColor(_ level: TrafficLevel?) -> Color {
     switch level ?? .none {
     case .warning:  return Theme.danger
     case .caution:  return Theme.warn
-    case .advisory: return Theme.accent
-    case .none:     return Theme.muted
+    default:        return Theme.muted
     }
 }
 
@@ -25,8 +27,7 @@ func trafficSymbol(_ level: TrafficLevel?) -> String {
     switch level ?? .none {
     case .warning:  return "exclamationmark.triangle.fill"
     case .caution:  return "exclamationmark.circle.fill"
-    case .advisory: return "info.circle.fill"
-    case .none:     return "airplane"
+    default:        return "airplane"
     }
 }
 
@@ -48,19 +49,39 @@ func trafficTrend(_ vs: Double?) -> String {
     return vs > 0 ? " ▲" : " ▼"
 }
 
-/// "UAL123 B738 · 1.1 km · Δ +90 m" — the second line of an alert.
-func trafficAlertDetail(_ a: TrafficAlert, aircraft: TrafficAircraft?) -> String {
-    var parts = [[a.callsign.isEmpty ? a.hex.uppercased() : a.callsign, aircraft?.type ?? ""]
-        .filter { !$0.isEmpty }.joined(separator: " ")]
-    parts.append(trafficKm(a.horizM) + (a.kind.isPair ? "" : " from here"))
+/// What to do, first: "GIVE WAY: DESCEND AND LAND D9A03" (the rule's words
+/// when an alert carries no action).
+func trafficAction(_ a: TrafficAlert) -> String { a.action.isEmpty ? a.text : a.action }
+
+/// The geometry after the action: "AIRCRAFT 90 M ABOVE, 640 M NE, CLOSING IN 12 S".
+func trafficGeometry(_ a: TrafficAlert) -> String {
+    if !a.action.isEmpty, a.resolution.hasPrefix(a.action + "; ") {
+        return String(a.resolution.dropFirst(a.action.count + 2))
+    }
+    if !a.resolution.isEmpty, a.resolution != a.action { return a.resolution }
+    var parts = [trafficKm(a.horizM)]
     if a.kind.isPair { parts.append(a.vertM.map { "Δ " + trafficVert($0) } ?? "height unknown") }
     return parts.joined(separator: " · ")
 }
 
-// MARK: - Sidebar: traffic alerts (above the drones)
+/// The short tag on a drone's row: "GIVE WAY", "KEEP CLEAR", "BE READY".
+func trafficTag(_ a: TrafficAlert) -> String {
+    let act = trafficAction(a)
+    if let c = act.firstIndex(of: ":") { return String(act[..<c]) }
+    return act.split(separator: " ").prefix(2).joined(separator: " ")
+}
 
-/// One traffic alert: the rule's words, the pair's numbers, the data age and
-/// "Show", which centres the map on the drone and the aircraft.
+/// "UAL123 B738"
+func trafficAircraftName(_ a: TrafficAlert, _ ac: TrafficAircraft?) -> String {
+    [a.callsign.isEmpty ? a.hex.uppercased() : a.callsign, ac?.type ?? ""]
+        .filter { !$0.isEmpty }.joined(separator: " ")
+}
+
+// MARK: - Alert strip (sidebar, drone card)
+
+/// One alert, action first: what to do with the drone, then where the
+/// aircraft is, then the rule's words, the aircraft, the data age and "Show"
+/// (frames the drone and the aircraft).
 struct TrafficAlertRow: View {
     @Environment(AppModel.self) private var model
     let alert: TrafficAlert
@@ -72,14 +93,19 @@ struct TrafficAlertRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: trafficSymbol(alert.level))
                     .font(.system(size: 11, weight: .bold))
-                Text(alert.text)
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                Text(trafficAction(alert))
+                    .font(.system(size: 12.5, weight: .bold, design: .monospaced))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .foregroundStyle(color)
-            Text(trafficAlertDetail(alert, aircraft: ac))
+            Text(trafficGeometry(alert))
                 .font(.system(size: 11.5, design: .monospaced))
                 .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("\(alert.text) · \(trafficAircraftName(alert, ac))")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
                 Text(TrafficRules.ageWords(alert.ageS) + (alert.held ? " · held" : ""))
                     .font(.system(size: 10.5, design: .monospaced))
@@ -96,79 +122,35 @@ struct TrafficAlertRow: View {
         .background(color.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.5), lineWidth: 1))
         .contentShape(Rectangle())
-        .onTapGesture { model.selectedTraffic = alert.hex }
+        .onTapGesture { model.select(alert: alert) }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(alert.level.name) traffic alert: \(alert.text). "
-                            + "\(trafficAlertDetail(alert, aircraft: ac)). \(TrafficRules.ageWords(alert.ageS))")
+        .accessibilityLabel("\(alert.level.name): \(trafficAction(alert)). \(trafficGeometry(alert)). "
+                            + "\(alert.text), \(trafficAircraftName(alert, ac)). \(TrafficRules.ageWords(alert.ageS))")
         .accessibilityAction(named: "Show on map") { model.focus(on: model.coordinates(of: alert)) }
     }
 }
 
-// MARK: - Sidebar: aircraft rows
-
-struct TrafficRow: View {
-    @Environment(AppModel.self) private var model
-    let aircraft: TrafficAircraft
-    let alert: TrafficAlert?
-
+/// The drone row's tag while the drone is in an alert ("GIVE WAY"). Shape
+/// and words carry the level, not only the colour.
+struct TrafficDroneTag: View {
+    let alert: TrafficAlert
     var body: some View {
-        let color = trafficColor(alert?.level)
-        let age = aircraft.ageS(nowMs: TrafficRules.nowMs(model.now))
-        HStack(alignment: .top, spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(color.opacity(0.6), lineWidth: 1)
-                    .frame(width: 30, height: 30)
-                Image(systemName: "airplane")
-                    .font(.system(size: 14))
-                    .foregroundStyle(color)
-                    .rotationEffect(.degrees((aircraft.trackDeg ?? 90) - 90))
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(aircraft.name)
-                        .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                    if !aircraft.type.isEmpty {
-                        Text(aircraft.type)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(Theme.muted)
-                    }
-                    Spacer(minLength: 4)
-                    if let alert {
-                        Label(alert.kind.name.uppercased(), systemImage: trafficSymbol(alert.level))
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(color)
-                            .fixedSize()
-                    }
-                }
-                HStack(spacing: 6) {
-                    if let ft = trafficFeet(aircraft.altBaroM) {
-                        Text(ft + trafficTrend(aircraft.vsMps))
-                    } else {
-                        Text("altitude —").foregroundStyle(Theme.unknown)
-                    }
-                    if let r = model.location.current {
-                        Text("· \(trafficKm(TrafficRules.distanceM(r.latitude, r.longitude, aircraft.lat, aircraft.lon)))")
-                    }
-                    Spacer(minLength: 4)
-                    Text(TrafficRules.ageWords(age))
-                }
-                .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(Theme.muted)
-            }
+        let color = trafficColor(alert.level)
+        HStack(spacing: 3) {
+            Image(systemName: trafficSymbol(alert.level)).font(.system(size: 8, weight: .bold))
+            Text(trafficTag(alert)).font(.system(size: 9, weight: .bold))
         }
-        .padding(.vertical, 2)
-        .opacity(age >= TrafficRules.freshS ? 0.6 : 1)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Aircraft \(aircraft.name)"
-                            + (aircraft.type.isEmpty ? "" : ", \(aircraft.type)")
-                            + (trafficFeet(aircraft.altBaroM).map { ", \($0)" } ?? "")
-                            + (alert.map { ", \($0.text)" } ?? "")
-                            + ", \(TrafficRules.ageWords(age))")
+        .lineLimit(1)
+        .padding(.horizontal, 4).padding(.vertical, 2)
+        .background(color.opacity(0.20), in: Capsule())
+        .overlay(Capsule().stroke(color.opacity(0.7), lineWidth: 0.8))
+        .foregroundStyle(color)
+        .help(trafficAction(alert))
+        .accessibilityLabel("ADS-B alert: \(trafficAction(alert))")
     }
 }
 
-// MARK: - Map marker
+// MARK: - Map marker (only for aircraft in an alert)
 
 /// The system airplane glyph rotated to the track, outlined only: a drone's
 /// marker is a filled disc, an aircraft never is. Label: callsign, pressure
@@ -210,7 +192,7 @@ struct TrafficMarker: View {
         .accessibilityLabel("Aircraft \(aircraft.name)"
                             + (trafficFeet(aircraft.altBaroM).map { ", \($0)" } ?? "")
                             + (aircraft.trackDeg.map { ", track \(Int($0)) degrees" } ?? "")
-                            + (alert.map { ", \($0.text)" } ?? ""))
+                            + (alert.map { ", \(trafficAction($0))" } ?? ""))
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -228,7 +210,8 @@ func trafficProjection(_ a: TrafficAircraft, seconds: Double = 60) -> CLLocation
 
 // MARK: - Separation bridge
 
-/// Labels one drone-aircraft pair alert with that pair's own numbers.
+/// Labels the line from a drone (or, for traffic near the user, this Mac)
+/// to the aircraft of an alert, with that alert's own numbers.
 struct SeparationBridge: View {
     let alert: TrafficAlert
 
@@ -237,8 +220,10 @@ struct SeparationBridge: View {
             Image(systemName: trafficSymbol(alert.level))
                 .font(.system(size: 9, weight: .bold))
             Text(trafficKm(alert.horizM))
-            Text("·")
-            Text(alert.vertM.map { "Δ " + trafficVert($0) } ?? "height unknown")
+            if alert.kind.isPair {
+                Text("·")
+                Text(alert.vertM.map { "Δ " + trafficVert($0) } ?? "height unknown")
+            }
         }
         .font(.system(size: 10.5, weight: .bold, design: .monospaced))
         .padding(.horizontal, 7)
@@ -247,17 +232,17 @@ struct SeparationBridge: View {
         .foregroundStyle(.white)
         .fixedSize()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Separation between drone \(TrafficRules.droneLabel(alert.droneId)) and "
-                            + "\(alert.callsign.isEmpty ? alert.hex.uppercased() : alert.callsign): "
-                            + "\(trafficKm(alert.horizM)), "
-                            + (alert.vertM.map { "vertical \(trafficVert($0))" } ?? "height unknown"))
+        .accessibilityLabel((alert.droneId.isEmpty ? "Distance" : "Separation from drone \(TrafficRules.droneLabel(alert.droneId))")
+                            + " to \(alert.callsign.isEmpty ? alert.hex.uppercased() : alert.callsign): "
+                            + "\(trafficKm(alert.horizM))"
+                            + (alert.kind.isPair ? ", " + (alert.vertM.map { "vertical \(trafficVert($0))" } ?? "height unknown") : ""))
     }
 }
 
-// MARK: - Feed status (top of the map)
+// MARK: - Conflict watch status (top of the map)
 
-/// What the feed says, with its age; never "no traffic". Warns when stale,
-/// failing or without a position to look around.
+/// Whether the conflict watch is running, and how old its data is (the
+/// rules' summary); warns when stale, failing or without a position.
 struct TrafficStatusPill: View {
     @Environment(AppModel.self) private var model
 
@@ -277,21 +262,24 @@ struct TrafficStatusPill: View {
         }()
         let warn = r.stale || problem != nil
         HStack(spacing: 6) {
-            Image(systemName: warn ? "exclamationmark.triangle.fill" : "airplane")
+            Image(systemName: warn ? "exclamationmark.triangle.fill"
+                  : r.alerts.isEmpty ? "eye" : trafficSymbol(r.highest))
             Text(model.demoMode ? "SIMULATED · " + r.summary : r.summary)
             if let problem { Text("· \(problem)") }
         }
         .font(.system(size: 11, weight: warn ? .semibold : .regular, design: .monospaced))
-        .foregroundStyle(warn ? Theme.warn : Theme.muted)
+        .foregroundStyle(warn ? Theme.warn : r.alerts.isEmpty ? Theme.muted : trafficColor(r.highest))
         .padding(.horizontal, 10).padding(.vertical, 5)
         .background(.ultraThinMaterial, in: Capsule())
-        .help("Aircraft positions from adsb.lol, as reported. Not every aircraft broadcasts ADS-B, "
-              + "and the feed has gaps and delay.")
+        .help("Manned aircraft from adsb.lol within "
+              + "\(model.traffic.area.map { String(format: "%.0f km", $0.radiusM / 1000) } ?? "the set radius"), "
+              + "checked against the drones. Not every aircraft broadcasts ADS-B, and the feed "
+              + "has gaps and delay.")
         .accessibilityElement(children: .combine)
     }
 }
 
-// MARK: - Aircraft card
+// MARK: - Aircraft card (from a marker)
 
 struct TrafficCard: View {
     @Environment(AppModel.self) private var model
@@ -300,19 +288,16 @@ struct TrafficCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Header: the rule's words and the data age
-            HStack(spacing: 8) {
+            // Header: the action, then the geometry.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: alert.map { trafficSymbol($0.level) } ?? "airplane")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(trafficColor(alert?.level))
-                Text(alert?.text ?? "ADS-B AIRCRAFT")
+                Text(alert.map(trafficAction) ?? "ADS-B AIRCRAFT")
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
                     .foregroundStyle(alert == nil ? Color.primary : trafficColor(alert?.level))
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Text(TrafficRules.ageWords(aircraft.ageS(nowMs: TrafficRules.nowMs(model.now))))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
                 Button {
                     model.selectedTraffic = nil
                 } label: {
@@ -323,68 +308,36 @@ struct TrafficCard: View {
                 .help("Close")
                 .accessibilityLabel("Close")
             }
-
-            // Callsign, type and address
-            HStack(alignment: .firstTextBaseline) {
-                Text(aircraft.name)
-                    .font(.system(size: 26, weight: .bold, design: .monospaced))
-                Text([aircraft.type, aircraft.hex.uppercased()].filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if aircraft.squawk > 0 {
-                    let emergency = [7500, 7600, 7700].contains(aircraft.squawk)
-                    Text(String(format: "SQ %04d", aircraft.squawk))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(emergency ? Theme.danger.opacity(0.2) : Theme.inset)
-                        .foregroundStyle(emergency ? Theme.danger : .primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                }
+            if let alert {
+                Text(trafficGeometry(alert))
+                    .font(.system(size: 12, design: .monospaced))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(alert.text)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(Theme.muted)
             }
 
             Divider()
 
-            // Separation: from the drone for a pair, else from here
-            if let alert {
-                HStack(spacing: 16) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(alert.kind.isPair ? "FROM DRONE \(TrafficRules.droneLabel(alert.droneId))" : "FROM HERE")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Text(trafficKm(alert.horizM))
-                            .font(.system(size: 18, weight: .bold, design: .monospaced))
-                    }
-                    if alert.kind.isPair {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("VERTICAL")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Text(trafficVert(alert.vertM))
-                                .font(.system(size: 18, weight: .bold, design: .monospaced))
-                                .foregroundStyle(alert.vertM == nil ? Theme.unknown : .primary)
-                        }
-                    }
-                    if let cpa = alert.cpaS {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("CLOSEST IN")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Text("\(Int(floor(cpa + 0.5))) s")
-                                .font(.system(size: 18, weight: .bold, design: .monospaced))
-                        }
-                    }
-                }
+            // Callsign, type and address
+            HStack(alignment: .firstTextBaseline) {
+                Text(aircraft.name)
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                Text([aircraft.type, aircraft.hex.uppercased()].filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(TrafficRules.ageWords(aircraft.ageS(nowMs: TrafficRules.nowMs(model.now))))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
 
-            // Altitude, speed, vertical rate as reported
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("ALTITUDE")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
-                    Text(trafficFeet(aircraft.altBaroM) ?? "--")
+                    Text(aircraft.onGround ? "on ground" : (trafficFeet(aircraft.altBaroM) ?? "--"))
                         .font(.system(size: 13, design: .monospaced))
                 }
                 .help("Pressure altitude as reported; never compared with drone heights")

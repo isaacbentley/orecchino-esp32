@@ -1,60 +1,125 @@
-// traffic.h — ADS-B traffic alerts: manned aircraft near the drones we hear.
+// traffic.h — ADS-B conflict watch: manned aircraft near the drones we hear.
 //
-// The reference implementation of docs/plans/mobile-app-and-t5-wifi.md §8.
-// Ported line for line to app/Sources/Orecchino/TrafficRules.swift and
-// mobile/lib/core/traffic/traffic_rules.dart; all three are tested against
-// every file in tests/vectors/traffic/*.json. Change one, change all three
-// and the vectors. Pure C/C++ (libc + libm only): no Arduino, host-testable.
+// The UI is Remote ID first; ADS-B is used only for conflict detection and
+// resolution between the drones a receiver hears and manned aircraft. The
+// reference implementation of docs/plans/mobile-app-and-t5-wifi.md §8 as
+// narrowed by that decision. Ported line for line to app/Sources/Orecchino/
+// TrafficRules.swift and mobile/lib/core/traffic/traffic_rules.dart; all
+// three are tested against every file in tests/vectors/traffic/*.json.
+// Change one, change all three and the vectors. Pure C/C++ (libc + libm
+// only): no Arduino, host-testable.
 //
 // ---------------------------------------------------------------------------
-// THE RULES (§8.2). Pairs are drone x aircraft; the observer is the board,
-// phone or Mac showing the alert.
+// THE RULES. Drone x aircraft pairs (a live drone and a fresh aircraft), and
+// LOW: an airborne aircraft in UAS airspace (one alert per aircraft).
 //
 //   level     kind        condition                                  words
-//   WARNING   NEAR        live drone + fresh aircraft, horizontal    TRAFFIC NEAR DRONE <id>
-//                         <= 1000 m and |vertical| <= 150 m, or
-//                         vertical unknown and horizontal <= 1000 m
-//   WARNING   CONVERGING  live drone + fresh aircraft, both          TRAFFIC CONVERGING WITH <id>, <n> S
-//                         velocities known, closest point of
+//   WARNING   NEAR        horizontal <= 1000 m and |vertical| <=     TRAFFIC NEAR DRONE <id>
+//                         150 m, or vertical unknown and
+//                         horizontal <= 1000 m
+//   WARNING   CONVERGING  both velocities known, closest point of    TRAFFIC CONVERGING WITH <id>, <n> S
 //                         approach in (0, 60] s, miss distance
 //                         < 500 m and |vertical at CPA| <= 150 m
 //                         (or vertical unknown)
-//   CAUTION   LOW         fresh aircraft <= 3000 m from the          LOW TRAFFIC <brg> <d.d> KM
-//                         observer and below observer elevation
-//                         + 460 m (1,500 ft)
-//   ADVISORY  EMERGENCY   squawk 7500 / 7600 / 7700 or emergency     HIJACK / RADIO FAILURE /
-//                         flag, <= 30 km from the observer           EMERGENCY + callsign
+//   CAUTION   NEAR        as NEAR, the aircraft reported on the      TRAFFIC NEAR DRONE <id>,
+//                         ground (see below)                         AIRCRAFT ON GROUND
+//   CAUTION   LOW         fresh airborne aircraft within 3 km        LOW TRAFFIC <brg> <dist>
+//                         (horizontally) of the observer or of any
+//                         live drone, below 460 m (1,500 ft) above
+//                         ground, or with that height unknown
+//
+// LOW (UAS airspace intrusion), the choices:
+// - Ground: the observer's elevation (geometric) when known; else, among the
+//   live drones reporting both alt_geo_m and height_m (height above take-off
+//   or ground), the lowest alt_geo_m minus its height_m; else unknown.
+// - Aircraft height: alt_geom_m, else alt_baro_m (then `approx`, words
+//   ", APPROX." / "ABOUT"), else unknown. vert_m = aircraft height - ground
+//   (height above ground, NaN unknown). Unknown -> raised with
+//   ", HEIGHT UNKNOWN" (never silent), except: with the ground unknown and
+//   the aircraft's own height known, only when that height is below
+//   TRAFFIC_LOW_UNKNOWN_GROUND_MAX_M (3,500 m MSL). UAS airspace is at most
+//   460 m above ground, and ground rarely lies above ~3,000 m where drones
+//   fly, so an aircraft at or above 3,500 m MSL cannot be in it; without
+//   this bound every airliner overhead would read "LOW TRAFFIC, HEIGHT
+//   UNKNOWN" whenever the ground is unknown. With the aircraft's height
+//   itself unknown it is always raised.
+// - One alert per aircraft (keyed by hex, drone_id is the anchor's). Anchor:
+//   the observer when the aircraft is within 3 km of it (from_observer,
+//   drone_id ""), else the nearest live drone within 3 km (drone_id). horiz_m
+//   and bearing_deg are from the anchor; cpa_s is NaN; vert_rel is ABOVE
+//   when vert_m is known, else UNKNOWN.
+// - Aircraft on the ground never raise LOW (an existing LOW clears 20 s
+//   after landing, reading ", AIRCRAFT ON GROUND" meanwhile).
+// - A warning (NEAR/CONVERGING, airborne) for the same aircraft supersedes
+//   its LOW: the LOW is kept by the hysteresis but not shown.
+// - Hysteresis: kept while the condition holds (freshness and staleness
+//   aside), removed 20 s after it stops holding.
+// - Words: text "LOW TRAFFIC <brg> <dist>" (<dist> as in the resolution
+//   geometry below) + ", AIRCRAFT ON GROUND" / ", HEIGHT UNKNOWN" /
+//   ", APPROX."; action "BE READY TO LAND DRONES"; resolution the action,
+//   "; ", then "AIRCRAFT <v> M ABOVE GROUND" (ABOUT <v> when approx; "NEAR
+//   GROUND LEVEL", approx or not, when <v> <= 0) / "AIRCRAFT HEIGHT UNKNOWN" / "AIRCRAFT ON
+//   GROUND", then ", <dist> <brg>". e.g. "BE READY TO LAND DRONES; AIRCRAFT
+//   240 M ABOVE GROUND, 2.4 KM W".
+// There is no emergency-squawk rule. The observer (traffic_evaluate's
+// overload with a TrafficObserver, traffic_tick's g_traffic_observer) only
+// feeds LOW and what traffic_ingest keeps.
+//
+// RESOLUTION. Every alert carries a resolution advisory for the drone,
+// grounded in 14 CFR 107.37(a): a small unmanned aircraft must yield the
+// right of way to all aircraft and may not pass over, under or ahead of one
+// unless well clear. `action` is the short instruction, `resolution` the
+// action plus the geometry that justifies it ("; " between them):
+//
+//   aircraft          vert_rel   action
+//   LOW (any)         -          BE READY TO LAND DRONES (see LOW above)
+//   on the ground     any        KEEP CLEAR OF AIRCRAFT ON GROUND
+//   more than 30 m    BELOW      GIVE WAY: MOVE <away>, THEN LAND <id>
+//   below the drone              (descending would close on it; <away> is
+//                                the 8-point direction opposite the aircraft)
+//   above, level      ABOVE,     GIVE WAY: DESCEND AND LAND <id>
+//   (within 30 m) or  LEVEL,
+//   height unknown    UNKNOWN
+//
+//   geometry: "AIRCRAFT <v> M ABOVE" / "AIRCRAFT <v> M BELOW" / "AIRCRAFT
+//   LEVEL WITHIN 30 M" / "AIRCRAFT HEIGHT UNKNOWN" / "AIRCRAFT ON GROUND",
+//   then ", <h> <brg>" from the drone to the aircraft (<h> = "<n> M" to the
+//   nearest 10 m under 1 km, else "<d.d> KM"), then ", CLOSEST IN <n> S"
+//   whenever a closest approach in (0, 60] s is known. e.g. "GIVE WAY:
+//   DESCEND AND LAND D9A03; AIRCRAFT 90 M ABOVE, 800 M NE, CLOSEST IN 24 S". vert_rel uses the current vertical (not at CPA);
+//   <v> = floor(|vertical| + 0.5). The words advise; they never claim the
+//   drone is out of danger.
 //
 // Aircraft on the ground (readsb/adsb.lol "alt_baro":"ground"; wire "gnd":1)
 // are common near airfields (taxiing, parked) and are not airborne traffic:
-//   - they never raise LOW (an existing LOW clears 20 s after landing);
 //   - CONVERGING is not computed for them (no closest-approach projection);
 //   - NEAR a live drone is still raised, as a CAUTION (not a warning) with
 //     the words ", AIRCRAFT ON GROUND": a drone within 1 km of an aircraft on
 //     an apron or taxiway is worth showing, but it must not flash, notify like
-//     a warning, or push airborne warnings out of the alert list;
-//   - EMERGENCY is still raised (a 7700 after landing is still reported);
-//   - they are not counted in near_count (the "N airborne aircraft within
-//     3 km" count) but in ground_count; they stay in aircraft_count and on
-//     maps and lists. With none airborne and some on the ground within 3 km
-//     the summary says "no airborne ADS-B traffic reported within 3 km".
+//     a warning, or push airborne warnings out of the alert list.
+//
+// CONFLICT WATCH STATUS (traffic_summary), the only status line; it never
+// counts aircraft:
+//   CONFLICT WATCH OFF: no ADS-B source
+//   TRAFFIC DATA STALE, data 45 s old
+//   conflict watch on, no ADS-B conflicts, data 6 s old
+//   conflict watch on, 2 ADS-B conflicts, data 6 s old   (pair alerts shown, held included)
+//   conflict watch on, 1 low aircraft, 1 ADS-B conflict, data 6 s old
+//   (LOW alerts shown count as "low aircraft"; nothing else is counted)
 //
 // Definitions and the choices made where §8 leaves room:
-// - near_count: fresh airborne aircraft within 3 km of the observer (of any
-//   drone with a position when the observer position is unknown);
-//   ground_count: the same for aircraft on the ground.
 // - Fresh aircraft: position age < 30 s. Present: age <= 60 s (older ones are
 //   ignored entirely, as if dropped). A drone is "live" when the caller says
 //   so (heard within 60 s with a position, §8.2); a drone without a finite
 //   position never pairs.
 // - Stale data: the ADS-B set is older than 30 s (data_age_s > 30), or its
 //   age is unknown. Then NO new alert is raised; existing alerts are kept by
-//   the hysteresis below with their last numbers and `held` set, and surfaces
-//   show `TRAFFIC DATA STALE` (traffic_summary) and `ADS-B <n> s old`
-//   (traffic_age_words) instead of a count. No source at all (have_data
-//   false): nothing is raised either, and the summary says `no ADS-B source`.
-// - Vertical (pairs): aircraft alt_geom_m minus drone alt_geo_m, both above
-//   the WGS-84 ellipsoid. Never barometric, never the drone's height above
+//   the hysteresis below with their last numbers and `held` set, and the
+//   status says `TRAFFIC DATA STALE`; alerts show `ADS-B <n> s old`
+//   (traffic_age_words). No source at all (have_data false): nothing is
+//   raised and the status says `CONFLICT WATCH OFF`.
+// - Vertical: aircraft alt_geom_m minus drone alt_geo_m, both above the
+//   WGS-84 ellipsoid. Never barometric, never the drone's height above
 //   take-off. Either missing -> vertical unknown: the alert is RAISED with
 //   the words `HEIGHT UNKNOWN`, never dropped. Callers pass NaN for unknown;
 //   the ODID/firmware marker -1000 (anything <= -999) is also read as unknown.
@@ -64,34 +129,22 @@
 //   miss = |r + w t|. Vertical at CPA = vertical + aircraft vs_mps * t (vs
 //   unknown -> 0; the drone's vertical rate is not used). If NEAR and
 //   CONVERGING both hold, the pair shows NEAR (cpa_s is still filled in).
-// - LOW: aircraft height = alt_geom_m, else alt_baro_m (then `approx`), else
-//   unknown (raised with `HEIGHT UNKNOWN`). Threshold = observer elev_m + 460
-//   m, or 460 m above sea level when elev_m is unknown (then `approx`). Needs
-//   the observer position. vert_m = aircraft height - elev_m (NaN unknown).
-//   observer elev_m should be the ellipsoid height; MSL is acceptable (the
-//   geoid separation is far inside the 460 m margin).
-// - EMERGENCY distance is from the observer; with no observer position, from
-//   the nearest drone with a position; with neither, unknown (raised: the
-//   aircraft set is already a 30 km query). vert_m is always NaN.
 // - Hysteresis (wall clock, never evaluation counts): an alert, once raised,
 //   is kept while its raise condition holds OR while it is "in hold"; it is
-//   removed when it has been out of hold continuously for >= 20 s.
-//     pairs:     in hold = both present, horizontal <= 1300 m and (vertical
-//                unknown or |vertical| <= 200 m) — "beyond 1.3 km or 200 m"
-//                releases. NEAR stays NEAR while in hold even if only
-//                CONVERGING is raised; outside hold a raised CONVERGING
-//                replaces NEAR.
-//     LOW/EMERG: in hold = the geometric condition without the freshness
-//                and staleness requirements (aircraft still present).
-//   A pair or aircraft missing from this evaluation is out of hold and keeps
-//   its last numbers and words; a held pair still present gets its words
-//   rebuilt from the current numbers (a held CONVERGING with no CPA now
-//   reads "TRAFFIC CONVERGING WITH <id>" without seconds).
-// - Ordering: level desc, kind (NEAR, CONVERGING, LOW, EMERGENCY), horiz_m
-//   asc (NaN last), drone id, hex (byte order). At most TRAFFIC_MAX_ALERTS;
-//   when full, a new alert replaces the last in that order only if it ranks
-//   before it. Candidates are visited drones x aircraft (pairs), then
-//   aircraft (LOW), then aircraft (EMERGENCY), in array order.
+//   removed when it has been out of hold continuously for >= 20 s. In hold =
+//   both present, horizontal <= 1300 m and (vertical unknown or |vertical|
+//   <= 200 m) — "beyond 1.3 km or 200 m" releases. NEAR stays NEAR while in
+//   hold even if only CONVERGING is raised; outside hold a raised CONVERGING
+//   replaces NEAR. A pair missing from this evaluation is out of hold and
+//   keeps its last numbers and words; a held pair still present gets its
+//   words and resolution rebuilt from the current numbers (a held
+//   CONVERGING with no CPA now reads "TRAFFIC CONVERGING WITH <id>" without
+//   seconds).
+// - Ordering: level desc, kind (NEAR, CONVERGING, LOW), horiz_m asc, drone
+//   id, hex (byte order). At most TRAFFIC_MAX_ALERTS; when full, a new alert
+//   replaces the last in that order only if it ranks before it. Candidates
+//   are visited drones x aircraft (pairs), then aircraft (LOW), in array
+//   order.
 // - Text: drone <id> is a readable tail of the drone's id (the same tail the
 //   T5 marks show): a "uas:"/"mac:" prefix is dropped; a MAC (12 hex digits,
 //   or six hex pairs joined by ':' or '-') reads "MAC " + its last three
@@ -100,13 +153,12 @@
 //   ("1581F20000D9A03" -> "D9A03", "DRONE-B-9A01" -> "B-9A01", never
 //   "-9A01"). <n> S = floor(cpa_s + 0.5). Distances in km with one decimal
 //   = floor(m / 100 + 0.5) tenths. Bearing words are the 8-point compass,
-//   floor((deg + 22.5) / 45) mod 8. Callsign, else the hex in capitals.
-//   Suffixes: ", AIRCRAFT ON GROUND" (wins over the next; on
-//   a LOW only while it is held after landing), ", HEIGHT UNKNOWN", or (LOW
-//   only) ", APPROX.".
-// - Words: never "collision", "conflict", "safe", "clear" or "TCAS". The most
-//   any surface says about absence is `no ADS-B traffic reported within 3 km`
-//   with the data age.
+//   floor((deg + 22.5) / 45) mod 8. Suffixes: ", AIRCRAFT ON GROUND" (wins
+//   over the next) or ", HEIGHT UNKNOWN".
+// - Words: never "collision", "safe", "clear" (other than the instruction
+//   "KEEP CLEAR OF"), "conflict resolved" or "TCAS". "conflict watch" and
+//   "ADS-B conflicts" are the user's terms. Absence is only ever "no ADS-B
+//   conflicts" with the data age: not every aircraft broadcasts ADS-B.
 // - Distances: flat earth at the mean latitude with the longitude difference
 //   wrapped into [-180, 180] (antimeridian), R = 6371000 m; good to well
 //   under 1% out to the 30 km horizon.
@@ -162,8 +214,8 @@
 //        is the local millis() the data refers to. `ac` must not be
 //        g_traffic_ac.
 //   void traffic_tick(const TrafficDrone* d, int nd, uint32_t now_ms)
-//        evaluates g_traffic_ac against g_traffic_observer into
-//        g_traffic_result, carrying g_traffic_state.
+//        evaluates g_traffic_ac against the drones into g_traffic_result,
+//        carrying g_traffic_state.
 //   void traffic_evaluate(...) the pure rule function (any caller-owned
 //        state and result).
 // All g_traffic_* are touched from the loop task only; a fetch task must hand
@@ -194,6 +246,8 @@
 #define TRAFFIC_MAX_ALERTS     16
 #define TRAFFIC_ID_LEN         41     // drone id, like Track.uas
 #define TRAFFIC_TEXT_LEN       64
+#define TRAFFIC_ACTION_LEN     48
+#define TRAFFIC_RES_LEN       128
 
 #define TRAFFIC_FRESH_S        30.0   // position age < 30 s: fresh
 #define TRAFFIC_PRESENT_S      60.0   // position age <= 60 s: kept
@@ -205,11 +259,11 @@
 #define TRAFFIC_HOLD_H_M     1300.0
 #define TRAFFIC_HOLD_V_M      200.0
 #define TRAFFIC_CLEAR_MS     20000u
-#define TRAFFIC_LOW_R_M      3000.0
-#define TRAFFIC_LOW_ABOVE_M   460.0
-#define TRAFFIC_EMERG_R_M   30000.0
+#define TRAFFIC_LEVEL_BAND_M   30.0   // |vertical| <= 30 m: aircraft level with the drone
+#define TRAFFIC_LOW_R_M      3000.0   // LOW: within 3 km of the observer or a live drone
+#define TRAFFIC_LOW_AGL_M     460.0   // LOW: below 460 m (1,500 ft) above ground
+#define TRAFFIC_LOW_UNKNOWN_GROUND_MAX_M 3500.0  // LOW, ground unknown: aircraft below 3,500 m MSL
 #define TRAFFIC_KEEP_R_M    30000.0   // ingest: within 30 km of the observer
-#define TRAFFIC_COUNT_R_M    3000.0   // near_count radius
 #define TRAFFIC_SOURCE_LOST_S 600.0   // traffic_tick: no set for 10 min = no source
 
 #define TRAFFIC_EARTH_R_M  6371000.0
@@ -217,9 +271,9 @@
 #define TRAFFIC_FT_TO_M    0.3048
 #define TRAFFIC_KT_TO_MPS  (1852.0 / 3600.0)
 
+// (1 was the removed ADVISORY level; the others keep their values.)
 typedef enum {
   TRAFFIC_NONE     = 0,
-  TRAFFIC_ADVISORY = 1,
   TRAFFIC_CAUTION  = 2,
   TRAFFIC_WARNING  = 3
 } TrafficLevel;
@@ -227,9 +281,16 @@ typedef enum {
 typedef enum {
   TRAFFIC_KIND_NEAR       = 0,
   TRAFFIC_KIND_CONVERGING = 1,
-  TRAFFIC_KIND_LOW        = 2,
-  TRAFFIC_KIND_EMERGENCY  = 3
+  TRAFFIC_KIND_LOW        = 2    // an airborne aircraft in UAS airspace (one per aircraft)
 } TrafficKind;
+
+// Where the aircraft is relative to the drone (current vertical).
+typedef enum {
+  TRAFFIC_VERT_UNKNOWN = 0,   // either height unknown
+  TRAFFIC_VERT_ABOVE   = 1,   // more than 30 m above the drone
+  TRAFFIC_VERT_LEVEL   = 2,   // within 30 m
+  TRAFFIC_VERT_BELOW   = 3    // more than 30 m below the drone
+} TrafficVert;
 
 // One aircraft as reported by ADS-B. NaN = unknown for every double except
 // lat/lon (required). squawk is the four octal digits read as a decimal
@@ -257,6 +318,8 @@ typedef struct {
   double speed_mps;           // NaN unknown
   double heading_deg;         // NaN unknown
   bool   live;                // heard within 60 s with a position
+  double height_m;            // height above take-off/ground (LOW's ground), NaN unknown;
+                              // zero-initialised drones read 0: set NaN when unknown
 } TrafficDrone;
 
 typedef struct {
@@ -267,22 +330,26 @@ typedef struct {
 typedef struct {
   uint8_t level;              // TrafficLevel
   uint8_t kind;               // TrafficKind
+  uint8_t vert_rel;           // TrafficVert: the aircraft above / level / below the drone
   bool    held;               // kept by hysteresis; the raise condition is false now
   bool    height_unknown;
-  bool    approx;             // LOW: elevation unknown or barometric height used
   bool    on_ground;          // the aircraft is reported on the ground
-  int16_t drone_index;        // index into this evaluation's drones[], -1 none
+  int16_t drone_index;        // index into this evaluation's drones[], -1 gone
   int16_t ac_index;           // index into this evaluation's aircraft[], -1 gone
-  char    drone_id[TRAFFIC_ID_LEN];  // "" for LOW / EMERGENCY
+  char    drone_id[TRAFFIC_ID_LEN];
   char    hex[7];
   char    callsign[9];
-  double  horiz_m;            // drone-aircraft (pairs) or observer-aircraft
-  double  vert_m;             // aircraft minus drone (pairs), minus elevation (LOW); NaN
-  double  bearing_deg;        // from the drone (pairs) / observer to the aircraft
+  double  horiz_m;            // drone to aircraft
+  double  vert_m;             // aircraft minus drone; NaN unknown
+  double  bearing_deg;        // from the drone to the aircraft
   double  cpa_s;              // closest approach in (0, 60] s, else NaN
   double  cpa_m;              // miss distance at cpa_s, else NaN
   double  age_s;              // aircraft position age
-  char    text[TRAFFIC_TEXT_LEN];
+  char    text[TRAFFIC_TEXT_LEN];          // "TRAFFIC NEAR DRONE D9A03"
+  char    action[TRAFFIC_ACTION_LEN];      // "GIVE WAY: DESCEND AND LAND D9A03"
+  char    resolution[TRAFFIC_RES_LEN];     // action + "; " + the geometry
+  bool    approx;             // LOW: barometric aircraft height used
+  bool    from_observer;      // LOW: horiz_m/bearing_deg are from the observer (drone_id "")
 } TrafficAlert;
 
 typedef struct {
@@ -306,9 +373,7 @@ typedef struct {
   bool    have_data;
   bool    stale;
   double  data_age_s;         // NaN without data
-  uint8_t near_count;         // fresh airborne aircraft within 3 km of the observer
-  uint8_t ground_count;       // fresh aircraft on the ground within 3 km (not in near_count)
-  uint8_t aircraft_count;     // aircraft present (<= 60 s)
+  uint8_t aircraft_count;     // aircraft present (<= 60 s); never shown as a count of threats
 } TrafficResult;
 
 // ---------------------------------------------------------------------------
@@ -333,8 +398,16 @@ static inline const char* traffic_level_name(uint8_t l) {
   switch (l) {
     case TRAFFIC_WARNING:  return "warning";
     case TRAFFIC_CAUTION:  return "caution";
-    case TRAFFIC_ADVISORY: return "advisory";
     default:               return "none";
+  }
+}
+
+static inline const char* traffic_vert_name(uint8_t v) {
+  switch (v) {
+    case TRAFFIC_VERT_ABOVE: return "above";
+    case TRAFFIC_VERT_LEVEL: return "level";
+    case TRAFFIC_VERT_BELOW: return "below";
+    default:                 return "unknown";
   }
 }
 
@@ -342,8 +415,7 @@ static inline const char* traffic_kind_name(uint8_t k) {
   switch (k) {
     case TRAFFIC_KIND_NEAR:       return "near";
     case TRAFFIC_KIND_CONVERGING: return "converging";
-    case TRAFFIC_KIND_LOW:        return "low";
-    default:                      return "emergency";
+    default:                      return "low";
   }
 }
 
@@ -458,13 +530,14 @@ static inline int traffic_alert_cmp(const TrafficAlert* a, const TrafficAlert* b
 
 static inline void traffic_state_reset(TrafficState* s) { memset(s, 0, sizeof(*s)); }
 
-static inline TrafficEntry* traffic_find(TrafficState* s, uint8_t fam, const char* drone_id,
+// A pair is keyed by drone and aircraft; LOW by the aircraft alone.
+static inline TrafficEntry* traffic_find(TrafficState* s, bool low, const char* drone_id,
                                          const char* hex) {
   for (int i = 0; i < TRAFFIC_MAX_ALERTS; i++) {
     TrafficEntry* e = &s->e[i];
     if (!e->used || strcmp(e->a.hex, hex)) continue;
-    if (fam == 0 && e->a.kind <= TRAFFIC_KIND_CONVERGING && !strcmp(e->a.drone_id, drone_id)) return e;
-    if (fam != 0 && e->a.kind == fam) return e;
+    if (low ? e->a.kind == TRAFFIC_KIND_LOW
+            : (e->a.kind != TRAFFIC_KIND_LOW && !strcmp(e->a.drone_id, drone_id))) return e;
   }
   return NULL;
 }
@@ -481,7 +554,17 @@ static inline TrafficEntry* traffic_slot(TrafficState* s, const TrafficAlert* ca
   return NULL;
 }
 
-static inline void traffic_pair_text(TrafficAlert* a, uint8_t kind) {
+// The aircraft above / level / below the drone, from the current vertical.
+static inline uint8_t traffic_vert_rel(double vert_m) {
+  if (isnan(vert_m)) return TRAFFIC_VERT_UNKNOWN;
+  if (vert_m > TRAFFIC_LEVEL_BAND_M) return TRAFFIC_VERT_ABOVE;
+  if (vert_m < -TRAFFIC_LEVEL_BAND_M) return TRAFFIC_VERT_BELOW;
+  return TRAFFIC_VERT_LEVEL;
+}
+
+// The words, the action and the resolution for a pair, from its numbers
+// (see RESOLUTION in the header comment).
+static inline void traffic_pair_words(TrafficAlert* a, uint8_t kind) {
   char id[TRAFFIC_ID_LEN];
   traffic_drone_label(a->drone_id, id, sizeof(id));
   const char* hu = a->on_ground ? ", AIRCRAFT ON GROUND"
@@ -493,25 +576,83 @@ static inline void traffic_pair_text(TrafficAlert* a, uint8_t kind) {
   else
     traffic_textf(a->text, sizeof(a->text), "TRAFFIC CONVERGING WITH %s, %ld S%s", id,
                   (long)floor(a->cpa_s + 0.5), hu);
+
+  a->vert_rel = traffic_vert_rel(a->vert_m);
+  if (a->on_ground)
+    traffic_textf(a->action, sizeof(a->action), "KEEP CLEAR OF AIRCRAFT ON GROUND");
+  else if (a->vert_rel == TRAFFIC_VERT_BELOW)
+    traffic_textf(a->action, sizeof(a->action), "GIVE WAY: MOVE %s, THEN LAND %s",
+                  traffic_compass8(fmod(a->bearing_deg + 180.0, 360.0)), id);
+  else
+    traffic_textf(a->action, sizeof(a->action), "GIVE WAY: DESCEND AND LAND %s", id);
+
+  char vert[40], km[16], hz[24], cpa[24] = "";
+  long v = isnan(a->vert_m) ? 0 : (long)floor(fabs(a->vert_m) + 0.5);
+  if (a->on_ground) snprintf(vert, sizeof(vert), "AIRCRAFT ON GROUND");
+  else if (a->vert_rel == TRAFFIC_VERT_ABOVE) snprintf(vert, sizeof(vert), "AIRCRAFT %ld M ABOVE", v);
+  else if (a->vert_rel == TRAFFIC_VERT_BELOW) snprintf(vert, sizeof(vert), "AIRCRAFT %ld M BELOW", v);
+  else if (a->vert_rel == TRAFFIC_VERT_LEVEL) snprintf(vert, sizeof(vert), "AIRCRAFT LEVEL WITHIN 30 M");
+  else snprintf(vert, sizeof(vert), "AIRCRAFT HEIGHT UNKNOWN");
+  if (a->horiz_m < 1000.0) {
+    snprintf(hz, sizeof(hz), "%ld M", (long)floor(a->horiz_m / 10.0 + 0.5) * 10);
+  } else {
+    traffic_km_text(a->horiz_m, km, sizeof(km));
+    snprintf(hz, sizeof(hz), "%s KM", km);
+  }
+  if (!isnan(a->cpa_s)) snprintf(cpa, sizeof(cpa), ", CLOSEST IN %ld S", (long)floor(a->cpa_s + 0.5));
+  traffic_textf(a->resolution, sizeof(a->resolution), "%s; %s, %s %s%s", a->action, vert, hz,
+                traffic_compass8(a->bearing_deg), cpa);
 }
 
-// A pair with an aircraft on the ground is a caution, not a warning.
+// A pair with an aircraft on the ground is a caution, not a warning; LOW is
+// a caution.
 static inline uint8_t traffic_kind_level(uint8_t kind, bool on_ground) {
-  return kind <= TRAFFIC_KIND_CONVERGING ? (on_ground ? TRAFFIC_CAUTION : TRAFFIC_WARNING)
-       : (kind == TRAFFIC_KIND_LOW ? TRAFFIC_CAUTION : TRAFFIC_ADVISORY);
+  if (kind == TRAFFIC_KIND_LOW) return TRAFFIC_CAUTION;
+  return on_ground ? TRAFFIC_CAUTION : TRAFFIC_WARNING;
 }
 
-// Raise or refresh the entry for `cand` (fam 0: a pair, else the kind).
-// raw: the raise condition holds now (cand->kind is what it raises); hold: in
-// hold. A pair keeps NEAR while in hold even when only CONVERGING is raised.
-// Pair words are rebuilt from the current numbers for the kind kept.
-static inline void traffic_apply(TrafficState* s, uint8_t fam, const TrafficAlert* cand,
+// "800 M" to the nearest 10 m under 1 km, else "2.4 KM".
+static inline void traffic_dist_text(double m, char* out, size_t n) {
+  if (m < 1000.0) {
+    snprintf(out, n, "%ld M", (long)floor(m / 10.0 + 0.5) * 10);
+  } else {
+    char km[16];
+    traffic_km_text(m, km, sizeof(km));
+    snprintf(out, n, "%s KM", km);
+  }
+}
+
+// LOW's words from its numbers (see LOW in the header comment).
+static inline void traffic_low_words(TrafficAlert* a) {
+  char dist[24], vert[48];
+  traffic_dist_text(a->horiz_m, dist, sizeof(dist));
+  const char* brg = traffic_compass8(a->bearing_deg);
+  traffic_textf(a->text, sizeof(a->text), "LOW TRAFFIC %s %s%s", brg, dist,
+                a->on_ground ? ", AIRCRAFT ON GROUND"
+                : a->height_unknown ? ", HEIGHT UNKNOWN" : (a->approx ? ", APPROX." : ""));
+  a->vert_rel = isnan(a->vert_m) ? TRAFFIC_VERT_UNKNOWN : TRAFFIC_VERT_ABOVE;
+  traffic_textf(a->action, sizeof(a->action), "BE READY TO LAND DRONES");
+  long v = isnan(a->vert_m) ? 0 : (long)floor(a->vert_m + 0.5);
+  if (a->on_ground) snprintf(vert, sizeof(vert), "AIRCRAFT ON GROUND");
+  else if (a->height_unknown) snprintf(vert, sizeof(vert), "AIRCRAFT HEIGHT UNKNOWN");
+  else if (v <= 0) snprintf(vert, sizeof(vert), "AIRCRAFT NEAR GROUND LEVEL");   // "near" is the approximation
+  else snprintf(vert, sizeof(vert), "AIRCRAFT %s%ld M ABOVE GROUND", a->approx ? "ABOUT " : "", v);
+  traffic_textf(a->resolution, sizeof(a->resolution), "%s; %s, %s %s", a->action, vert, dist, brg);
+}
+
+// Raise or refresh the entry for the pair in `cand`. raw: the raise
+// condition holds now (cand->kind is what it raises); hold: in hold. NEAR is
+// kept while in hold even when only CONVERGING is raised. The words and the
+// resolution are rebuilt from the current numbers for the kind kept.
+static inline void traffic_apply(TrafficState* s, const TrafficAlert* cand,
                                  bool raw, bool hold, uint32_t seen_ms, uint32_t now_ms) {
-  TrafficEntry* e = traffic_find(s, fam, cand->drone_id, cand->hex);
+  const bool low = cand->kind == TRAFFIC_KIND_LOW;
+  TrafficEntry* e = traffic_find(s, low, cand->drone_id, cand->hex);
   uint8_t kind = cand->kind;
   if (e) {
-    if (!raw) kind = e->a.kind;
-    else if (fam == 0 && e->a.kind == TRAFFIC_KIND_NEAR && hold) kind = TRAFFIC_KIND_NEAR;
+    if (low) kind = TRAFFIC_KIND_LOW;
+    else if (!raw) kind = e->a.kind;
+    else if (e->a.kind == TRAFFIC_KIND_NEAR && hold) kind = TRAFFIC_KIND_NEAR;
   } else {
     if (!raw) return;
     e = traffic_slot(s, cand);
@@ -525,7 +666,8 @@ static inline void traffic_apply(TrafficState* s, uint8_t fam, const TrafficAler
   e->a.kind = kind;
   e->a.level = traffic_kind_level(kind, e->a.on_ground);
   e->a.held = !raw;
-  if (fam == 0) traffic_pair_text(&e->a, kind);
+  if (low) traffic_low_words(&e->a);
+  else traffic_pair_words(&e->a, kind);
   if (raw || hold) {
     e->out = false;
   } else if (!e->out) {
@@ -535,7 +677,8 @@ static inline void traffic_apply(TrafficState* s, uint8_t fam, const TrafficAler
 }
 
 // The rule function. drones/aircraft may be NULL when their count is 0.
-// have_data false: no ADS-B source; data_ms is then ignored.
+// have_data false: no ADS-B source; data_ms is then ignored. obs (may be
+// NULL) only feeds LOW.
 static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
                                     const TrafficAircraft* ac, int na,
                                     const TrafficObserver* obs,
@@ -546,30 +689,15 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
   out->data_age_s = have_data ? traffic_age_s(data_ms, now_ms) : NAN;
   out->stale = have_data && !(out->data_age_s <= TRAFFIC_STALE_S);
   const bool can_raise = have_data && !out->stale;
-  const bool obs_pos = obs && traffic_known(obs->lat) && traffic_known(obs->lon);
-  const bool obs_elev = obs && traffic_alt_known(obs->elev_m);
 
   for (int k = 0; k < TRAFFIC_MAX_ALERTS; k++) st->e[k].visited = false;
 
-  // Presence and counts.
   for (int j = 0; j < na; j++) {
     const TrafficAircraft* a = &ac[j];
-    double age = traffic_age_s(a->seen_ms, now_ms);
-    if (age > TRAFFIC_PRESENT_S || !traffic_known(a->lat) || !traffic_known(a->lon)) continue;
-    out->aircraft_count++;
-    if (!(age < TRAFFIC_FRESH_S)) continue;
-    bool near = false;
-    if (obs_pos) {
-      near = traffic_distance_m(obs->lat, obs->lon, a->lat, a->lon) <= TRAFFIC_COUNT_R_M;
-    } else {
-      for (int i = 0; i < nd && !near; i++)
-        if (traffic_known(drones[i].lat) && traffic_known(drones[i].lon))
-          near = traffic_distance_m(drones[i].lat, drones[i].lon, a->lat, a->lon) <= TRAFFIC_COUNT_R_M;
-    }
-    if (near) { if (a->on_ground) out->ground_count++; else out->near_count++; }
+    if (traffic_age_s(a->seen_ms, now_ms) <= TRAFFIC_PRESENT_S &&
+        traffic_known(a->lat) && traffic_known(a->lon)) out->aircraft_count++;
   }
 
-  // Pairs.
   for (int i = 0; i < nd; i++) {
     const TrafficDrone* d = &drones[i];
     if (!traffic_known(d->lat) || !traffic_known(d->lon)) continue;
@@ -625,93 +753,84 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
                   (isnan(c.vert_m) || fabs(c.vert_m) <= TRAFFIC_HOLD_V_M);
       c.kind = near_raw ? TRAFFIC_KIND_NEAR : TRAFFIC_KIND_CONVERGING;
       c.level = traffic_kind_level(c.kind, c.on_ground);
-      traffic_apply(st, 0, &c, near_raw || conv_raw, hold, a->seen_ms, now_ms);
+      traffic_apply(st, &c, near_raw || conv_raw, hold, a->seen_ms, now_ms);
     }
   }
 
-  // Low traffic near the observer.
-  for (int j = 0; j < na && obs_pos; j++) {
-    const TrafficAircraft* a = &ac[j];
-    double age = traffic_age_s(a->seen_ms, now_ms);
-    if (age > TRAFFIC_PRESENT_S || !traffic_known(a->lat) || !traffic_known(a->lon)) continue;
-    TrafficAlert c;
-    memset(&c, 0, sizeof(c));
-    memcpy(c.hex, a->hex, sizeof(c.hex));
-    memcpy(c.callsign, a->callsign, sizeof(c.callsign));
-    c.drone_index = -1;
-    c.ac_index = (int16_t)j;
-    c.age_s = age;
-    c.level = TRAFFIC_CAUTION;
-    c.kind = TRAFFIC_KIND_LOW;
-    double dx, dy;
-    traffic_offset_m(obs->lat, obs->lon, a->lat, a->lon, &dx, &dy);
-    c.horiz_m = sqrt(dx * dx + dy * dy);
-    c.bearing_deg = traffic_bearing_of(dx, dy);
-    c.cpa_s = NAN;
-    c.cpa_m = NAN;
-    double h = NAN;
-    bool approx = !obs_elev;
-    if (traffic_alt_known(a->alt_geom_m)) h = a->alt_geom_m;
-    else if (traffic_alt_known(a->alt_baro_m)) { h = a->alt_baro_m; approx = true; }
-    double thr = (obs_elev ? obs->elev_m : 0.0) + TRAFFIC_LOW_ABOVE_M;
-    c.vert_m = (!isnan(h) && obs_elev) ? h - obs->elev_m : NAN;
-    c.height_unknown = isnan(h);
-    c.approx = approx && !c.height_unknown;
-    c.on_ground = a->on_ground;
-    bool cond = !a->on_ground && c.horiz_m <= TRAFFIC_LOW_R_M && (isnan(h) || h < thr);
-    char km[16];
-    traffic_km_text(c.horiz_m, km, sizeof(km));
-    snprintf(c.text, sizeof(c.text), "LOW TRAFFIC %s %s KM%s",
-             traffic_compass8(c.bearing_deg), km,
-             c.on_ground ? ", AIRCRAFT ON GROUND"
-             : c.height_unknown ? ", HEIGHT UNKNOWN" : (c.approx ? ", APPROX." : ""));
-    bool raw = can_raise && age < TRAFFIC_FRESH_S && cond;
-    traffic_apply(st, TRAFFIC_KIND_LOW, &c, raw, cond, a->seen_ms, now_ms);
+  // LOW: airborne aircraft in UAS airspace.
+  const bool obs_pos = obs && traffic_known(obs->lat) && traffic_known(obs->lon);
+  double ground = NAN;
+  if (obs && traffic_alt_known(obs->elev_m)) {
+    ground = obs->elev_m;
+  } else {
+    double lowest = NAN;
+    for (int i = 0; i < nd; i++) {
+      const TrafficDrone* d = &drones[i];
+      if (!d->live || !traffic_known(d->lat) || !traffic_known(d->lon)) continue;
+      if (!traffic_alt_known(d->alt_geo_m) || !traffic_known(d->height_m)) continue;
+      if (isnan(lowest) || d->alt_geo_m < lowest) { lowest = d->alt_geo_m; ground = d->alt_geo_m - d->height_m; }
+    }
   }
-
-  // Emergencies.
   for (int j = 0; j < na; j++) {
     const TrafficAircraft* a = &ac[j];
     double age = traffic_age_s(a->seen_ms, now_ms);
     if (age > TRAFFIC_PRESENT_S || !traffic_known(a->lat) || !traffic_known(a->lon)) continue;
-    const char* word = a->squawk == 7500 ? "HIJACK" : a->squawk == 7600 ? "RADIO FAILURE"
-                     : (a->squawk == 7700 || a->emergency) ? "EMERGENCY" : NULL;
-    if (!word) continue;
-    TrafficAlert c;
-    memset(&c, 0, sizeof(c));
-    memcpy(c.hex, a->hex, sizeof(c.hex));
-    memcpy(c.callsign, a->callsign, sizeof(c.callsign));
-    c.drone_index = -1;
-    c.ac_index = (int16_t)j;
-    c.age_s = age;
-    c.level = TRAFFIC_ADVISORY;
-    c.kind = TRAFFIC_KIND_EMERGENCY;
-    c.on_ground = a->on_ground;
-    c.horiz_m = NAN;
-    c.bearing_deg = NAN;
-    c.vert_m = NAN;
-    c.cpa_s = NAN;
-    c.cpa_m = NAN;
-    double dx, dy;
+    // Anchor: the observer within 3 km, else the nearest live drone within
+    // 3 km, else (only to keep a held alert's numbers) the observer or the
+    // nearest live drone at any distance.
+    double dx = NAN, dy = NAN, dist = NAN;
+    int anchor = -1;
+    bool from_obs = false, within = false;
     if (obs_pos) {
       traffic_offset_m(obs->lat, obs->lon, a->lat, a->lon, &dx, &dy);
-      c.horiz_m = sqrt(dx * dx + dy * dy);
-      c.bearing_deg = traffic_bearing_of(dx, dy);
-    } else {
+      dist = sqrt(dx * dx + dy * dy);
+      from_obs = true;
+      within = dist <= TRAFFIC_LOW_R_M;
+    }
+    if (!within) {
+      double bd = NAN, bx = 0, by = 0;
+      int bi = -1;
       for (int i = 0; i < nd; i++) {
         const TrafficDrone* d = &drones[i];
-        if (!traffic_known(d->lat) || !traffic_known(d->lon)) continue;
-        traffic_offset_m(d->lat, d->lon, a->lat, a->lon, &dx, &dy);
-        double h = sqrt(dx * dx + dy * dy);
-        if (isnan(c.horiz_m) || h < c.horiz_m) { c.horiz_m = h; c.bearing_deg = traffic_bearing_of(dx, dy); }
+        if (!d->live || !traffic_known(d->lat) || !traffic_known(d->lon)) continue;
+        double ex, ey;
+        traffic_offset_m(d->lat, d->lon, a->lat, a->lon, &ex, &ey);
+        double h = sqrt(ex * ex + ey * ey);
+        if (bi < 0 || h < bd) { bi = i; bd = h; bx = ex; by = ey; }
+      }
+      if (bi >= 0 && (bd <= TRAFFIC_LOW_R_M || !from_obs)) {
+        anchor = bi; dist = bd; dx = bx; dy = by; from_obs = false;
+        within = bd <= TRAFFIC_LOW_R_M;
       }
     }
-    char name[16];
-    traffic_ac_name(a, name, sizeof(name));
-    snprintf(c.text, sizeof(c.text), "%s %s", word, name);
-    bool cond = isnan(c.horiz_m) || c.horiz_m <= TRAFFIC_EMERG_R_M;
+    if (!from_obs && anchor < 0) continue;       // nothing to measure from
+    TrafficAlert c;
+    memset(&c, 0, sizeof(c));
+    if (anchor >= 0) snprintf(c.drone_id, sizeof(c.drone_id), "%s", drones[anchor].id);
+    memcpy(c.hex, a->hex, sizeof(c.hex));
+    memcpy(c.callsign, a->callsign, sizeof(c.callsign));
+    c.drone_index = (int16_t)anchor;
+    c.ac_index = (int16_t)j;
+    c.age_s = age;
+    c.kind = TRAFFIC_KIND_LOW;
+    c.level = TRAFFIC_CAUTION;
+    c.on_ground = a->on_ground;
+    c.from_observer = from_obs;
+    c.horiz_m = dist;
+    c.bearing_deg = traffic_bearing_of(dx, dy);
+    c.cpa_s = NAN;
+    c.cpa_m = NAN;
+    double h = NAN;
+    if (traffic_alt_known(a->alt_geom_m)) h = a->alt_geom_m;
+    else if (traffic_alt_known(a->alt_baro_m)) { h = a->alt_baro_m; c.approx = true; }
+    c.vert_m = (!isnan(h) && !isnan(ground)) ? h - ground : NAN;
+    c.height_unknown = isnan(c.vert_m);
+    if (c.height_unknown) c.approx = false;
+    bool low = !isnan(c.vert_m) ? c.vert_m < TRAFFIC_LOW_AGL_M
+             : (isnan(h) || !isnan(ground) || h < TRAFFIC_LOW_UNKNOWN_GROUND_MAX_M);
+    bool cond = !a->on_ground && within && low;
     bool raw = can_raise && age < TRAFFIC_FRESH_S && cond;
-    traffic_apply(st, TRAFFIC_KIND_EMERGENCY, &c, raw, cond, a->seen_ms, now_ms);
+    traffic_apply(st, &c, raw, cond, a->seen_ms, now_ms);
   }
 
   // Entries not seen this time are out of hold; expire after 20 s out.
@@ -739,6 +858,20 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
         o->ac_index = (int16_t)j; break;
       }
   }
+  // A warning for an aircraft supersedes its LOW (kept, not shown).
+  int kept = 0;
+  for (int i = 0; i < out->n; i++) {
+    bool hide = false;
+    if (out->alerts[i].kind == TRAFFIC_KIND_LOW)
+      for (int j = 0; j < out->n && !hide; j++)
+        hide = out->alerts[j].kind != TRAFFIC_KIND_LOW && out->alerts[j].level == TRAFFIC_WARNING &&
+               !strcmp(out->alerts[j].hex, out->alerts[i].hex);
+    if (!hide) {
+      if (kept != i) out->alerts[kept] = out->alerts[i];
+      kept++;
+    }
+  }
+  out->n = (uint8_t)kept;
   // Insertion sort (stable; keys are unique anyway).
   for (int i = 1; i < out->n; i++) {
     TrafficAlert t = out->alerts[i];
@@ -752,23 +885,35 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
   out->highest = out->n ? out->alerts[0].level : (uint8_t)TRAFFIC_NONE;
 }
 
-// One status line for every surface; never claims absence of traffic.
-//   no ADS-B source
+// Pairs only, no observer (LOW then anchors on live drones alone).
+static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
+                                    const TrafficAircraft* ac, int na,
+                                    bool have_data, uint32_t data_ms, uint32_t now_ms,
+                                    TrafficState* st, TrafficResult* out) {
+  traffic_evaluate(drones, nd, ac, na, (const TrafficObserver*)NULL, have_data, data_ms, now_ms, st, out);
+}
+
+// The conflict watch status, the one status line for every surface; it
+// never counts aircraft and never claims the airspace is empty.
+//   CONFLICT WATCH OFF: no ADS-B source
 //   TRAFFIC DATA STALE, data 45 s old
-//   no ADS-B traffic reported within 3 km, data 6 s old
-//   no airborne ADS-B traffic reported within 3 km, data 6 s old  (only ground)
-//   2 airborne aircraft within 3 km, data 6 s old
+//   conflict watch on, no ADS-B conflicts, data 6 s old
+//   conflict watch on, 2 ADS-B conflicts, data 6 s old
 static inline void traffic_summary(const TrafficResult* r, char* out, size_t n) {
-  if (!r->have_data) { snprintf(out, n, "no ADS-B source"); return; }
+  if (!r->have_data) { snprintf(out, n, "CONFLICT WATCH OFF: no ADS-B source"); return; }
   long age = (long)floor(r->data_age_s + 0.5);
   if (r->stale) {
     if (isnan(r->data_age_s)) snprintf(out, n, "TRAFFIC DATA STALE, data age unknown");
     else snprintf(out, n, "TRAFFIC DATA STALE, data %ld s old", age);
-  } else if (r->near_count == 0) {
-    snprintf(out, n, "no %sADS-B traffic reported within 3 km, data %ld s old",
-             r->ground_count ? "airborne " : "", age);
+  } else if (r->n == 0) {
+    snprintf(out, n, "conflict watch on, no ADS-B conflicts, data %ld s old", age);
   } else {
-    snprintf(out, n, "%u airborne aircraft within 3 km, data %ld s old", (unsigned)r->near_count, age);
+    unsigned low = 0, conf = 0;
+    for (int i = 0; i < r->n; i++) { if (r->alerts[i].kind == TRAFFIC_KIND_LOW) low++; else conf++; }
+    char a[40] = "", b[40] = "";
+    if (low) snprintf(a, sizeof(a), "%u low aircraft, ", low);
+    if (conf) snprintf(b, sizeof(b), "%u ADS-B conflict%s, ", conf, conf == 1 ? "" : "s");
+    snprintf(out, n, "conflict watch on, %s%sdata %ld s old", a, b, age);
   }
 }
 
