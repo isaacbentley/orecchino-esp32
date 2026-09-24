@@ -654,12 +654,41 @@ Each decoded broadcast is one JSON object per line:
  "basic_id":[{"id_type":1,"ua_type":2,"uas_id":"1581F..."}],
  "loc":{"status":2,"lat":37.1234567,"lon":-122.1234567,"alt_geo":82.0,
         "alt_baro":80.5,"height":60.0,"height_ref":0,"speed":8.0,
-        "vspeed":0.5,"dir":123,"ts":1801.2},
+        "vspeed":0.5,"dir":123,"ts":1801.2,
+        "h_acc":10,"v_acc":3,"spd_acc":2,"ts_acc":3},
  "self_id":{"desc_type":0,"desc":"Survey"},
  "system":{"op_lat":37.12,"op_lon":-122.12,"op_alt":12.0,"op_loc_type":1,
-           "area_count":1,"ts":238912345},
- "op_id":{"id_type":0,"id":"FIN87astrdge12k8"}}
+           "area_count":1,"ts":238912345,"area_radius":0,
+           "class_type":1,"cat_eu":1,"class_eu":2},
+ "op_id":{"id_type":0,"id":"FIN87astrdge12k8"},
+ "in_tfr":false}
 ```
+
+Fields that are often missing are left out rather than sent as a
+placeholder: a field is absent when the frame (or, for `auth` and the TFR
+fields, the contact) did not carry it, or carried the value ASTM F3411
+defines as unknown or undeclared. Codes are sent raw, as F3411 numbers them.
+
+| Field | In | Meaning, and when it is absent |
+| --- | --- | --- |
+| `vspeed` | `loc` | Vertical speed, m/s; absent when unknown |
+| `h_acc` | `loc` | Horizontal accuracy code: 1 < 18.52 km (10 NM) … 9 < 30 m, 10 < 10 m, 11 < 3 m, 12 < 1 m |
+| `v_acc`, `baro_acc` | `loc` | Geodetic and barometric altitude accuracy codes: 1 < 150 m, 2 < 45 m, 3 < 25 m, 4 < 10 m, 5 < 3 m, 6 < 1 m |
+| `spd_acc` | `loc` | Speed accuracy code: 1 < 10 m/s, 2 < 3 m/s, 3 < 1 m/s, 4 < 0.3 m/s |
+| `ts_acc` | `loc` | Timestamp accuracy code: the accuracy in tenths of a second (1–15) |
+| (the five above) | `loc` | Absent when 0 (unknown), and for a GB 46750 value past 15 |
+| `area_count` | `system` | Aircraft in the operating area or group (always sent with `system`; 0 for GB 46750, which has none) |
+| `area_radius` | `system` | Radius of the area, m (10 m steps; 0 for a single aircraft); absent for GB 46750 |
+| `area_ceiling`, `area_floor` | `system` | Top and bottom of the area, m WGS-84; absent when unknown and for GB 46750 |
+| `class_type` | `system` | UA classification type: 1 = EU; absent when undeclared (0) and for GB 46750 |
+| `cat_eu`, `class_eu` | `system` | Only when `class_type` is 1: EU category (1 Open, 2 Specific, 3 Certified) and class (1–7 = C0–C6); absent when undeclared |
+| `auth_ts` | `auth` | Timestamp of the Authentication set's page 0, seconds since 2019-01-01 00:00 UTC; absent until page 0 of the set being held has arrived |
+| `in_tfr` | top level | Whether the contact's last position is inside one of the TFRs a host pushed (`tfr_add`); absent until a host has pushed TFRs, and while the contact has no position |
+| `tfr_id` | top level | The `id` of that TFR (at most 15 characters), only with `"in_tfr":true` |
+
+All of them add up to about 225 bytes on the longest possible line (996
+bytes, well inside the 1,536-byte line buffer); a typical DJI pack line
+gains 60 to 90.
 
 Any device that speaks this format over a serial port can feed the Mac app —
 an SDR pipeline works just as well as the ESP32 receivers.
@@ -751,7 +780,8 @@ per contact still being tracked, then a `log_done` line:
 {"type":"log","seq":7,"i":7,"active":false,"uas":"1581F5FHD23AB00D","mac":"60:60:1F:AA:BB:CC",
  "srcs":5,"fmts":1,"ua_type":2,"first":1790000000,"last":1790000312,"dur":312,
  "lat":37.80390,"lon":-122.46400,"max_h":118,"peak_rssi":-58,
- "auth_state":"none","tfr":true,"emerg":false,"msgs":644}
+ "auth_state":"none","tfr":true,"in_tfr":false,"tfr_id":"6/3221","emerg":false,
+ "class_type":1,"cat_eu":1,"class_eu":2,"msgs":644}
 {"type":"log","seq":null,"i":null,"active":true,"uas":"1581F20000D9A03",...}
 {"type":"log_done","n":1,"live":1,"total":8,"clock":true,"next":8,"oldest":7}
 ```
@@ -759,7 +789,13 @@ per contact still being tracked, then a `log_done` line:
 `srcs` is a bit mask (1 Wi-Fi beacon, 2 NAN, 4 BLE), `fmts` another (1 ASTM
 F3411, 2 GB 46750). `first` and `last` are UTC seconds, 0 when the clock was
 not set when the record was made; `clock` in `log_done` says whether it is
-set now. An ended record's `seq` numbers it for good (`i` is the same
+set now. `tfr` says the contact was inside a pushed TFR at some point,
+`in_tfr` whether it still was at its last position (for a live contact:
+now), and `tfr_id` names the TFR it was last inside (cut to 14 characters;
+absent when it never was). `class_type`, `cat_eu` and `class_eu` are the
+last System message's UA classification, as on the `rid` line and absent
+when undeclared. Records written by firmware before these fields existed
+are kept, and read back without them. An ended record's `seq` numbers it for good (`i` is the same
 number, kept for older clients); a live contact has `"active":true` and
 `"seq":null`, and gets its number only when it ends. `total` counts every
 record ever written.

@@ -1052,6 +1052,15 @@ struct DroneDetailCard: View {
                                   + "position is not signed.")
                         KVRow(name: "Operator", value: track.operatorId)
                         KVRow(name: "Self ID", value: track.selfDesc)
+                        KVRow(name: "Class", value: RidNames.classification(
+                                  type: track.classType, category: track.catEu, cls: track.classEu),
+                              missing: "not reported",
+                              help: "UA classification from the System message: EU category "
+                                  + "(Open / Specific / Certified) and class C0–C6")
+                        KVRow(name: "Auth time", value: track.authTs.map {
+                                  DroneDetailCard.utc.string(from: RidNames.odidDate($0)) + " UTC" },
+                              missing: "not reported",
+                              help: "Timestamp of the signed Authentication set (page 0)")
                     }
                     KVSection(title: "Position (reported)") {
                         KVRow(name: "Lat, Lon", value: track.coordinate.map {
@@ -1061,6 +1070,21 @@ struct DroneDetailCard: View {
                         KVRow(name: "Heading", value: track.heading.map { "\(Int($0))°" })
                         KVRow(name: "Climb", value: track.vspeed.map {
                             String(format: "%+.1f m/s", $0) })
+                        KVRow(name: "TFR", value: track.inTFR.map {
+                                  $0 ? "inside \(track.tfrId ?? "a TFR")" : "outside" },
+                              ink: track.inTFR == true ? Theme.danger : nil,
+                              missing: "not reported",
+                              help: "The receiver's check against the TFRs this app pushed to it")
+                        KVRow(name: "H accuracy", value: RidNames.hAccuracy(track.hAcc),
+                              missing: "not reported")
+                        KVRow(name: "V accuracy", value: RidNames.vAccuracy(track.vAcc),
+                              missing: "not reported")
+                        KVRow(name: "Baro acc.", value: RidNames.vAccuracy(track.baroAcc),
+                              missing: "not reported")
+                        KVRow(name: "Speed acc.", value: RidNames.speedAccuracy(track.spdAcc),
+                              missing: "not reported")
+                        KVRow(name: "Time acc.", value: RidNames.timeAccuracy(track.tsAcc),
+                              missing: "not reported")
                     }
                     KVSection(title: "Operator (reported)") {
                         KVRow(name: "Position", value: track.operatorCoord.map {
@@ -1071,6 +1095,15 @@ struct DroneDetailCard: View {
                                   ink: Theme.warn,
                                   help: "Drone and operator are implausibly far apart")
                         }
+                        KVRow(name: "Area count", value: track.areaCount.map { "\($0)" },
+                              missing: "not reported",
+                              help: "Aircraft in the operating area or group (System message)")
+                        KVRow(name: "Area radius", value: track.areaRadius.map { "\(Int($0)) m" },
+                              missing: "not reported")
+                        KVRow(name: "Area ceiling", value: track.areaCeiling.map { "\(Int($0)) m" },
+                              missing: "not reported")
+                        KVRow(name: "Area floor", value: track.areaFloor.map { "\(Int($0)) m" },
+                              missing: "not reported")
                     }
 
                     DisclosureGroup(isExpanded: techExpanded.projectedValue) {
@@ -1097,6 +1130,15 @@ struct DroneDetailCard: View {
         .overlay(RoundedRectangle(cornerRadius: 10)
             .stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
+
+    /// "2026-09-23 12:00:00" in UTC, for the Authentication timestamp.
+    static let utc: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
 }
 
 /// Full-width alert block under the card header: one line per alert, each
@@ -1306,12 +1348,16 @@ struct KVRow: View {
     let name: String
     let value: String?
     var ink: Color?
+    /// Shown in place of a missing value ("—" unless given).
+    var missing: String?
     var help: String?
 
-    init(name: String, value: String?, ink: Color? = nil, help: String? = nil) {
+    init(name: String, value: String?, ink: Color? = nil, missing: String? = nil,
+         help: String? = nil) {
         self.name = name
         self.value = value
         self.ink = ink
+        self.missing = missing
         self.help = help
     }
 
@@ -1321,7 +1367,7 @@ struct KVRow: View {
                 .font(.system(size: 11.5))
                 .foregroundStyle(Theme.muted)
                 .gridColumnAlignment(.trailing)
-            Text(value?.isEmpty == false ? value! : "—")
+            Text(value?.isEmpty == false ? value! : (missing ?? "—"))
                 .font(.system(size: 11.5, design: .monospaced))
                 .foregroundStyle(value?.isEmpty == false ? (ink ?? Color.primary)
                                                          : Theme.unknown)

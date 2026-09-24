@@ -553,6 +553,8 @@ static void test_sniffer(void) {
   CHECK(t && fabs(t->height - 108.0) < 0.01 && fabs(t->speed - 2.8) < 0.01 && t->status == 2, "sniffer: GB height, speed and status");
   CHECK(t && t->ssid_check == 1, "sniffer: GB SSID serial matches");
   CHECK(json_has("\"fmt\":\"gb46750\"") && json_has("\"op_lat\":30.0675643"), "sniffer: JSON says GB and carries the operator position");
+  CHECK(!json_has("\"area_radius\"") && !json_has("\"area_ceiling\"") && !json_has("\"class_type\"") && !json_has("\"baro_acc\""),
+        "sniffer: a GB frame claims no operating area, EU class or baro accuracy");
 
   // A pack whose position is the DJI no-fix sentinel yields a track without a position.
   std::vector<uint8_t> nofix = dji;
@@ -922,6 +924,26 @@ static void test_log_sync(void) {
     }
     CHECK(ok, "log: v1 records migrate with seq = total - n + k, oldest first");
   }
+  // v2 migration: the records keep their numbers and gain empty v3 fields.
+  {
+    std::vector<LogRecV2> v2(LOG_MAX);
+    memset(v2.data(), 0, sizeof(LogRecV2) * LOG_MAX);
+    for (int k = 0; k < 3; k++) { snprintf(v2[k].uas, 24, "V2-%d", k); v2[k].seq = 40 + (uint32_t)k; v2[k].flags = 1; }
+    Preferences p; p.begin("orlog", false);
+    p.putUChar("ver", 2); p.putBytes("recs", v2.data(), sizeof(LogRecV2) * LOG_MAX);
+    p.putUChar("head", 3); p.putUChar("n", 3); p.putULong("total", 43); p.end();
+    log_load();
+    bool ok = s_log_n == 3 && s_log_total == 43;
+    for (int k = 0; k < 3 && ok; k++) {
+      char id[8]; snprintf(id, sizeof id, "V2-%d", k);
+      const LogRec* r = log_at(k);
+      if (r->seq != 40 + (uint32_t)k || strcmp(r->uas, id) || r->flags != 1 || r->tfr_id[0] || r->eu_class) ok = false;
+    }
+    CHECK(ok, "log: v2 records migrate keeping seq and flags, with no TFR id or EU class");
+    std::string o = log_get(",\"since\":0");
+    CHECK(json_has("\"uas\":\"V2-0\"") && json_has("\"tfr\":true,\"in_tfr\":false,\"emerg\"") && !json_has("tfr_id") && !json_has("class_type"),
+          "log: ...and a migrated record reads back without them");
+  }
   log_clear();
   s_rx_now += LOG_SAVE_MS + 1;
   rx_tick(s_rx_now);   // the clear reaches NVS
@@ -966,6 +988,145 @@ static void test_odid_extras(void) {
         "auth: the test key has its own neutral name, badge and colour");
 }
 
+// ------------------------------------------ rid line: the optional fields
+
+static std::string last_line() {
+  const std::string& o = Serial.out;
+  size_t end = o.size() && o.back() == '\n' ? o.size() - 1 : o.size();
+  size_t start = o.rfind('\n', end ? end - 1 : 0);
+  return o.substr(start == std::string::npos ? 0 : start + 1, end - (start == std::string::npos ? 0 : start + 1));
+}
+
+// Accuracy codes, the System message's area and EU class, the
+// Authentication timestamp and TFR membership: on the line (and, where the
+// match log keeps them, on its record) with the drone's own values when it
+// sends them; absent when it does not, or sends F3411's "unknown".
+static void test_rid_fields(void) {
+  log_clear();
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  g_tfr_n = 0; g_tfr_loaded = false;
+  serial_cmd("{\"cmd\":\"tfr_clear\"}\n");
+  serial_cmd("{\"cmd\":\"tfr_add\",\"id\":\"TEST/1\",\"pts\":[[37.7,-122.5],[37.9,-122.5],[37.9,-122.3],[37.7,-122.3]]}\n");
+  CHECK(g_tfr_n == 1 && g_tfr_loaded, "fields: a TFR around the test position is pushed");
+
+  // Everything: the signed pack (auth page 0 at ts 100), its Location and
+  // System re-coded with known values.
+  uint8_t pack[240];
+  int n = build_signed(pack, false);
+  uint8_t* loc = MSG(pack, 1);
+  loc[19] = (4 << 4) | 11;          // vertical <10 m, horizontal <3 m
+  loc[20] = (3 << 4) | 2;           // baro <25 m, speed <3 m/s
+  loc[23] = (uint8_t)((loc[23] & 0xF0) | 5);   // timestamp 0.5 s
+  uint8_t* sys = MSG(pack, 3);
+  sys[1] = (uint8_t)((sys[1] & 0x03) | (1 << 2));   // classification: EU
+  odid_put_u16(sys + 10, 5);        // five aircraft
+  sys[12] = 12;                     // 120 m radius
+  odid_put_u16(sys + 13, odid_enc_alt(150));
+  odid_put_u16(sys + 15, odid_enc_alt(20));
+  sys[17] = (2 << 4) | 3;           // Specific, class 2 (code 3)
+  Serial.out.clear();
+  feed(SRC_WIFI_BEACON, M1, pack, n);
+  std::string l = last_line();
+  auto has = [&](const char* s) { return l.find(s) != std::string::npos; };
+  CHECK(has("\"h_acc\":11") && has("\"v_acc\":4") && has("\"baro_acc\":3") && has("\"spd_acc\":2") && has("\"ts_acc\":5}"),
+        "fields: the five accuracy codes ride in loc, raw");
+  CHECK(has("\"area_count\":5") && has("\"area_radius\":120") && has("\"area_ceiling\":150.0") && has("\"area_floor\":20.0"),
+        "fields: the operating area rides in system (m)");
+  CHECK(has("\"class_type\":1") && has("\"cat_eu\":2") && has("\"class_eu\":3"), "fields: the EU classification rides in system, raw");
+  CHECK(has("\"auth_ts\":100,") && has("\"in_tfr\":true,\"tfr_id\":\"TEST/1\"}"), "fields: auth carries its timestamp, the line its TFR");
+  printf("     full line (%zu bytes): %s\n", l.size(), l.c_str());
+
+  // A later frame of the same aircraft that is only a Location, all its
+  // accuracies unknown: none of them, and no system fields.
+  uint8_t loc0[25]; memcpy(loc0, loc, 25);
+  loc0[19] = 0; loc0[20] = 0; loc0[23] &= 0xF0;
+  Serial.out.clear();
+  feed(SRC_BLE, M1, loc0, 25);
+  l = last_line();
+  CHECK(!has("_acc\"") && !has("\"area_") && !has("class") && !has("cat_eu"),
+        "fields: unknown accuracies and a missing System message leave them all out");
+  CHECK(has("\"auth_ts\":100,") && has("\"in_tfr\":true"),
+        "fields: ...but the assembled auth_ts and TFR membership come from the track, on every line");
+
+  // A System message without an area or a class, and Authentication pages
+  // without their page 0; a position outside the TFR.
+  uint8_t sys0[25]; memcpy(sys0, sys, 25);
+  sys0[1] &= 0x03; sys0[12] = 0; odid_put_u16(sys0 + 13, 0); odid_put_u16(sys0 + 15, 0); sys0[17] = 0x23;
+  uint8_t far[25]; memcpy(far, loc0, 25);
+  odid_put_i32(far + 5, 400000000);   // 40 N: outside TEST/1
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  feed(SRC_BLE, M2, MSG(pack, 0), 25);
+  feed(SRC_BLE, M2, far, 25);
+  feed(SRC_BLE, M2, sys0, 25);
+  l = last_line();
+  CHECK(has("\"area_radius\":0") && !has("area_ceiling") && !has("area_floor") && !has("class_type") && !has("cat_eu") && !has("class_eu"),
+        "fields: ceiling and floor unknown, class undeclared: left out (and EU codes under no EU class ignored)");
+  CHECK(has("\"in_tfr\":false") && !has("tfr_id"), "fields: outside every TFR: in_tfr false, no tfr_id");
+  feed(SRC_BLE, M2, MSG(pack, 6), 25);  // auth page 1 alone
+  l = last_line();
+  CHECK(has("\"auth\":{") && !has("auth_ts"), "fields: no auth_ts until page 0 arrives");
+  g_tfr_loaded = false; g_tfr_n = 0;
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  feed(SRC_BLE, M2, far, 25);
+  CHECK(!json_has("in_tfr"), "fields: no TFR data pushed: no in_tfr at all");
+
+  // The match log keeps TFR membership, the TFR's id and the EU class.
+  serial_cmd("{\"cmd\":\"tfr_add\",\"id\":\"TEST/1\",\"pts\":[[37.7,-122.5],[37.9,-122.5],[37.9,-122.3],[37.7,-122.3]]}\n");
+  memset(g_tracks, 0, sizeof g_tracks);
+  feed(SRC_WIFI_BEACON, M1, pack, n);
+  std::string o = log_get("");
+  CHECK(count_in(o, "\"tfr\":true,\"in_tfr\":true,\"tfr_id\":\"TEST/1\",\"emerg\":false,\"class_type\":1,\"cat_eu\":2,\"class_eu\":3,") == 1,
+        "fields: a live log record carries in_tfr, tfr_id and the EU class");
+  RX_LOCK();
+  Track* t = by_mac(M1);
+  if (t) {                                        // it flies out of the TFR, then ends
+    memcpy(far, loc, 25); odid_put_i32(far + 5, 400000000);
+    RX_UNLOCK();
+    feed(SRC_WIFI_BEACON, M1, far, 25);
+    RX_LOCK();
+    trk_on_end(t); t->used = false;
+  }
+  RX_UNLOCK();
+  const LogRec* r = s_log_n ? log_at(s_log_n - 1) : nullptr;
+  CHECK(r && (r->flags & 1) && !(r->flags & 4) && !strcmp(r->tfr_id, "TEST/1") && ((r->flags >> 3) & 7) == 1 && r->eu_class == 0x23,
+        "fields: the ended record keeps the TFR it was in, that it had left, and the class");
+  o = log_get(",\"since\":0");
+  CHECK(json_has("\"tfr\":true,\"in_tfr\":false,\"tfr_id\":\"TEST/1\"") && json_has("\"class_eu\":3"), "fields: ...and says so on log_get");
+
+  // Worst case: every field at its longest, on a Wi-Fi beacon with a full SSID.
+  uint8_t big[3 + 7 * 25]; memset(big, 0, sizeof big);
+  big[0] = 0xF2; big[1] = 25; big[2] = 7;
+  uint8_t* m = big + 3;
+  m[0] = 0x02; m[1] = (3 << 4) | 15; for (int i = 0; i < 20; i++) m[2 + i] = 0xAB;            // UUID: 40 hex
+  m += 25; m[0] = 0x02; m[1] = (4 << 4) | 15; for (int i = 0; i < 20; i++) m[2 + i] = 0xCD;  // session ID: 40 hex
+  m += 25; m[0] = 0x12; m[1] = (15 << 4) | 3; m[2] = 179; m[3] = 254; m[4] = 0x80;
+  odid_put_i32(m + 5, -899999999); odid_put_i32(m + 9, -1799999999);
+  odid_put_u16(m + 13, 0xFFFF); odid_put_u16(m + 15, 0xFFFF); odid_put_u16(m + 17, 0xFFFF);
+  m[19] = 0xFF; m[20] = 0xFF; odid_put_u16(m + 21, 0xFFFE); m[23] = 0x0F;
+  m += 25; m[0] = 0x32; m[1] = 255; memset(m + 2, 'S', 23);
+  m += 25; m[0] = 0x42; m[1] = 0x07; odid_put_i32(m + 2, -899999999); odid_put_i32(m + 6, -1799999999);
+  odid_put_u16(m + 10, 65535); m[12] = 255; odid_put_u16(m + 13, 0xFFFF); odid_put_u16(m + 15, 0xFFFF);
+  m[17] = 0xFF; odid_put_u16(m + 18, 0xFFFF); odid_put_u32(m + 20, 0xFFFFFFFF);
+  m += 25; m[0] = 0x52; m[1] = 255; memset(m + 2, 'O', 20);
+  m += 25; m[0] = 0x22; m[1] = (15 << 4) | 0; m[2] = 15; m[3] = 255; odid_put_u32(m + 4, 0xFFFFFFFF);
+  serial_cmd("{\"cmd\":\"tfr_add\",\"id\":\"ABCDEFGHIJKLMNOPQ\",\"pts\":[[-90,-180],[-89.8,-180],[-89.8,-179.8],[-90,-179.8]]}\n");
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  const uint8_t MW[6] = {0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  enqueue_rid(SRC_WIFI_BEACON, MW, -128, 13, 0, big, (int)sizeof big, "SSID-SSID-SSID-SSID-SSID-SSID-32");
+  s_rx_now += 50; rx_tick(s_rx_now);
+  l = last_line();
+  printf("     worst-case rid line: %zu bytes of JLINE_MAX %d\n", l.size() + 1, JLINE_MAX);
+  CHECK(has("\"tfr_id\":\"ABCDEFGHIJKLMNO\"}") && has("\"auth_ts\":4294967295") && has("\"class_eu\":15"),
+        "fields: the worst-case line is whole, TFR id last");
+  CHECK(l.size() + 256 < JLINE_MAX, "fields: ...with room to spare in the line buffer");
+
+  g_tfr_n = 0; g_tfr_loaded = false;
+  memset(g_tracks, 0, sizeof g_tracks);
+  log_clear();
+  s_rx_now += LOG_SAVE_MS + 1;
+  rx_tick(s_rx_now);
+}
+
 // Home survives a reboot; NVS is written on the first fix and after a move
 // of more than 500 m, at most every 10 minutes.
 static void test_home_persist(void) {
@@ -1000,6 +1161,7 @@ int main(void) {
   test_wrap();
   test_log_sync();
   test_odid_extras();
+  test_rid_fields();
   test_home_persist();
   if (g_fails) printf("%d FAILED\n", g_fails); else printf("all core checks passed\n");
   return g_fails ? 1 : 0;

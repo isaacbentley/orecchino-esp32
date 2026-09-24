@@ -5,7 +5,7 @@
 // Records are fixed-size and live in a ring of LOG_MAX; the oldest drops
 // out first. Saving to flash is debounced (log_due, from the loop): a busy
 // sky ends many contacts in a burst and NVS should see one write, not one
-// per contact. Each save rewrites the whole 3 KB blob, about one flash
+// per contact. Each save rewrites the whole 3.75 KB blob, about one flash
 // sector erased, so saves are rare -- at most one every LOG_SAVE_MS (10
 // min: a busy site then needs ~decades, not ~a year, to wear the NVS
 // partition out) -- plus one at the explicit points that end a session:
@@ -20,8 +20,8 @@
 #include <Preferences.h>
 #include "ext_ram.h"
 #define LOG_MAX      48
-#define LOG_SAVE_MS  600000  // at most one 3 KB NVS write every 10 minutes
-#define LOG_VERSION  2
+#define LOG_SAVE_MS  600000  // at most one 3.75 KB NVS write every 10 minutes
+#define LOG_VERSION  3
 
 struct LogRec {
   char     uas[24];      // UAS ID, truncated; empty when only a MAC was heard
@@ -36,13 +36,38 @@ struct LogRec {
   int16_t  max_height;   // metres; INT16_MIN when never reported
   int8_t   peak_rssi;
   uint8_t  auth_state;   // OdidAuthState at the end
-  uint8_t  flags;        // bit0 was in a TFR, bit1 reported an emergency
+  uint8_t  flags;        // bit0 was in a TFR, bit1 reported an emergency, bit2 in a
+                         // TFR at the end, bits 3..5 UA classification type (1 = EU)
   uint8_t  ua_type;      // ODID UA type, 0 unknown
   uint16_t msgs;         // decoded messages attributed to the contact
   uint32_t seq;          // sequence number (0-indexed)
+  // v3. 80 bytes a record keeps the 48-record blob (3,840 bytes) inside one
+  // NVS page's 4,000.
+  char     tfr_id[15];   // the TFR it was last inside (bit0), cut to 14 characters
+  uint8_t  eu_class;     // EU category << 4 | EU class (raw codes; 0 undeclared)
 };
+static_assert(sizeof(LogRec) == 80, "LogRec: the NVS blob is sized for 80-byte records");
 
-// Legacy v1 record structure for automatic NVS migration
+// Earlier record layouts, for automatic NVS migration. Each is a prefix of
+// the next: v2 added seq, v3 the TFR id and EU class.
+struct LogRecV2 {
+  char     uas[24];
+  uint8_t  mac[6];
+  uint8_t  src_mask;
+  uint8_t  fmt;
+  uint32_t first_utc;
+  uint32_t last_utc;
+  uint32_t dur_s;
+  int32_t  lat_e5;
+  int32_t  lon_e5;
+  int16_t  max_height;
+  int8_t   peak_rssi;
+  uint8_t  auth_state;
+  uint8_t  flags;
+  uint8_t  ua_type;
+  uint16_t msgs;
+  uint32_t seq;
+};
 struct LogRecV1 {
   char     uas[24];
   uint8_t  mac[6];
@@ -89,13 +114,14 @@ static inline void log_load() {
     s_log_n     = p.getUChar("n", 0);
     s_log_total = p.getULong("total", 0);
     if (s_log_n > LOG_MAX) s_log_n = LOG_MAX;
-  } else if (ver == 1 && p.getBytesLength("recs") == sizeof(LogRecV1) * LOG_MAX) {
-    // Migration: read v1 records and promote to v2. A record's sequence
-    // number is its place in the history, not its ring slot: the k-th held
-    // record, oldest first, is number total - n + k.
-    LogRecV1* v1_recs = ext_new<LogRecV1>(LOG_MAX);
-    if (!v1_recs) { p.end(); return; }
-    p.getBytes("recs", v1_recs, sizeof(LogRecV1) * LOG_MAX);
+  } else if ((ver == 1 || ver == 2) &&
+             p.getBytesLength("recs") == (ver == 1 ? sizeof(LogRecV1) : sizeof(LogRecV2)) * LOG_MAX) {
+    // Migration: an older record is a prefix of this one, so copy it and
+    // leave the newer fields zero (no TFR id, no EU class).
+    size_t rsz = ver == 1 ? sizeof(LogRecV1) : sizeof(LogRecV2);
+    uint8_t* old = (uint8_t*)ext_calloc(rsz * LOG_MAX);
+    if (!old) { p.end(); return; }
+    p.getBytes("recs", old, rsz * LOG_MAX);
     s_log_head  = p.getUChar("head", 0) % LOG_MAX;
     s_log_n     = p.getUChar("n", 0);
     s_log_total = p.getULong("total", 0);
@@ -103,12 +129,17 @@ static inline void log_load() {
     if (s_log_total < s_log_n) s_log_total = s_log_n;
     for (int i = 0; i < LOG_MAX; i++) {
       memset(&s_log[i], 0, sizeof(LogRec));
-      memcpy(&s_log[i], &v1_recs[i], sizeof(LogRecV1));
+      memcpy(&s_log[i], old + i * rsz, rsz);
     }
-    free(v1_recs);
-    int start = (s_log_head + LOG_MAX - s_log_n) % LOG_MAX;
-    for (int k = 0; k < s_log_n; k++)
-      s_log[(start + k) % LOG_MAX].seq = s_log_total - s_log_n + (uint32_t)k;
+    free(old);
+    // v1 had no seq. A record's sequence number is its place in the
+    // history, not its ring slot: the k-th held record, oldest first, is
+    // number total - n + k.
+    if (ver == 1) {
+      int start = (s_log_head + LOG_MAX - s_log_n) % LOG_MAX;
+      for (int k = 0; k < s_log_n; k++)
+        s_log[(start + k) % LOG_MAX].seq = s_log_total - s_log_n + (uint32_t)k;
+    }
   }
   p.end();
 }
@@ -162,10 +193,14 @@ static inline void log_fill(LogRec* r, const Track* t, uint32_t seq = 0) {
                 : (int16_t)constrain(lroundf(t->max_height), -32000, 32000);
   r->peak_rssi  = t->peak_rssi;
   r->auth_state = t->auth_state;
-  r->flags      = (t->tfr_ever ? 1 : 0) | (t->emerg_ever ? 2 : 0);
+  r->flags      = (t->tfr_ever ? 1 : 0) | (t->emerg_ever ? 2 : 0) | (t->in_tfr ? 4 : 0) |
+                  (uint8_t)((t->class_type & 7) << 3);
   r->ua_type    = t->ua_type;
   r->msgs       = t->msgs;
   r->seq        = seq;
+  if (t->tfr_ever)
+    memcpy(r->tfr_id, t->tfr_id, strnlen(t->tfr_id, sizeof(r->tfr_id) - 1));   // cut to fit, zero-terminated
+  r->eu_class   = (uint8_t)(((t->cat_eu & 15) << 4) | (t->class_eu & 15));
 }
 
 /// Record a contact that has ended. Called with the track table locked.

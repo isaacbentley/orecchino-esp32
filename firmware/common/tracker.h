@@ -54,13 +54,16 @@ struct Track {
   uint8_t  auth_state;
   OdidAuthAssembly auth_asm;
   bool     in_tfr;      // position inside a pushed TFR polygon
-  char     tfr_id[16];
+  char     tfr_id[16];  // the TFR it is (or was last) inside; kept after it leaves
   uint32_t first_ms, last_ms;
   uint16_t msgs;
   int8_t   peak_rssi;
   float    max_height;   // NAN until known
   bool     tfr_ever;     // was inside a TFR at some point (for the match log)
   bool     emerg_ever;   // reported status 3 (emergency) at some point
+  // UA classification from the System message, F3411 raw codes: type 1 is
+  // EU, with its category and class; 0 everywhere is "undeclared".
+  uint8_t  class_type, cat_eu, class_eu;
   // Duplicate suppression for the serial feed, per source (wifi/nan/ble):
   // a transmitter repeating an identical frame is reported once a second.
   uint32_t emit_hash[3];

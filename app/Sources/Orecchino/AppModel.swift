@@ -44,6 +44,18 @@ struct DroneTrack: Identifiable {
     /// Which ODID message types have been received (evidence string).
     var seenBasic = false, seenLoc = false, seenSelf = false
     var seenSys = false, seenOp = false
+    /// Accuracy codes from the latest Location message (raw F3411 enums).
+    var hAcc: Int?, vAcc: Int?, baroAcc: Int?, spdAcc: Int?, tsAcc: Int?
+    /// From the latest System message: the operating area (m) and the UA
+    /// classification (raw codes; class type 1 = EU).
+    var areaCount: Int?, areaRadius: Double?, areaCeiling: Double?, areaFloor: Double?
+    var classType: Int?, catEu: Int?, classEu: Int?
+    /// Authentication page 0 timestamp, seconds since 2019-01-01 UTC.
+    var authTs: Int?
+    /// The receiver's verdict against the TFRs it was pushed (nil: it has
+    /// none, or no position yet), and which TFR.
+    var inTFR: Bool?
+    var tfrId: String?
 
     var title: String {
         if let u = uasId, !u.isEmpty { return u }
@@ -737,6 +749,8 @@ final class AppModel {
             t.speed = l.speed >= 0 ? l.speed : nil
             t.vspeed = l.vspeed
             t.heading = (l.dir >= 0 && l.dir <= 360) ? l.dir : nil
+            t.hAcc = l.h_acc; t.vAcc = l.v_acc; t.baroAcc = l.baro_acc
+            t.spdAcc = l.spd_acc; t.tsAcc = l.ts_acc
         }
         if let s = msg.self_id {
             t.selfDesc = s.desc
@@ -748,9 +762,23 @@ final class AppModel {
                                                          longitude: s.op_lon)
             }
             t.operatorAlt = s.op_alt > -999 ? s.op_alt : nil
+            t.areaCount = msg.fmt == "gb46750" ? nil : s.area_count   // GB 46750 has no area: its 0 is filler
+            t.areaRadius = s.area_radius
+            t.areaCeiling = s.area_ceiling.flatMap { $0 > -999 ? $0 : nil }
+            t.areaFloor = s.area_floor.flatMap { $0 > -999 ? $0 : nil }
+            t.classType = s.class_type
+            t.catEu = s.class_type == 1 ? s.cat_eu : nil
+            t.classEu = s.class_type == 1 ? s.class_eu : nil
             t.seenSys = true
         }
-        if let a = msg.auth { t.authState = a.state }
+        if let a = msg.auth {
+            t.authState = a.state
+            if let ts = a.auth_ts { t.authTs = ts }
+        }
+        if let inside = msg.in_tfr {
+            t.inTFR = inside
+            t.tfrId = inside ? msg.tfr_id.map { String($0.prefix(16)) } : nil
+        }
         if let o = msg.op_id, !o.id.isEmpty {
             t.operatorId = o.id
             t.seenOp = true

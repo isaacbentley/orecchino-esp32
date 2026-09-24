@@ -24,6 +24,47 @@ private func decode(_ s: String) throws -> RidMessage {
         #expect(m.loc?.speed == 5.0)
         #expect(m.basic_id?.first?.uas_id == "1581F204C68D9A11")
     }
+
+    /// The optional detail fields, as core_test's full line writes them.
+    static let fullLine = #"{"type":"rid","src":"wifi","mac":"02:00:5E:7E:57:11","rssi":-40,"ch":6,"proto":2,"basic_id":[{"id_type":1,"ua_type":2,"uas_id":"ORECCHINO-TX-AUTH"}],"loc":{"status":2,"lat":37.8000000,"lon":-122.4000000,"alt_geo":80.0,"alt_baro":-1000.0,"height":60.0,"height_ref":0,"speed":5.00,"dir":90,"ts":0.0,"vspeed":0.00,"h_acc":11,"v_acc":4,"baro_acc":3,"spd_acc":2,"ts_acc":5},"system":{"op_lat":37.8000000,"op_lon":-122.4000000,"op_alt":10.0,"op_loc_type":1,"area_count":5,"ts":100,"area_radius":120,"area_ceiling":150.0,"area_floor":20.0,"class_type":1,"cat_eu":2,"class_eu":3},"auth":{"type":1,"len":64,"pages":4,"auth_ts":100,"state":"test_key"},"in_tfr":true,"tfr_id":"TEST/1"}"#
+
+    @Test func ridLineDetailFields() throws {
+        let m = try decode(Self.fullLine)
+        let l = try #require(m.loc), s = try #require(m.system), a = try #require(m.auth)
+        #expect(l.h_acc == 11 && l.v_acc == 4 && l.baro_acc == 3 && l.spd_acc == 2 && l.ts_acc == 5)
+        #expect(s.area_count == 5 && s.area_radius == 120 && s.area_ceiling == 150 && s.area_floor == 20)
+        #expect(s.class_type == 1 && s.cat_eu == 2 && s.class_eu == 3)
+        #expect(a.auth_ts == 100)
+        #expect(m.in_tfr == true && m.tfr_id == "TEST/1")
+    }
+
+    @Test func ridLineWithoutDetailFields() throws {
+        let m = try decode(#"{"type":"rid","src":"ble","mac":"AA:BB:CC:DD:EE:FF","loc":{"status":2,"lat":37.8,"lon":-122.4,"alt_geo":80,"alt_baro":-1000,"height":60,"height_ref":0,"speed":5,"dir":90,"ts":0},"system":{"op_lat":37.8,"op_lon":-122.4,"op_alt":10,"op_loc_type":1,"area_count":1,"ts":100},"auth":{"type":1,"len":64,"pages":4,"state":"partial"}}"#)
+        #expect(m.loc?.h_acc == nil && m.loc?.ts_acc == nil && m.system?.area_radius == nil)
+        #expect(m.system?.class_type == nil && m.auth?.auth_ts == nil && m.in_tfr == nil && m.tfr_id == nil)
+    }
+
+    @Test @MainActor func detailFieldsReachTheCardAndStayUnreportedWhenAbsent() throws {
+        let model = AppModel(startServices: false)
+        model.ingest(line: Self.fullLine)
+        let t = try #require(model.tracks["uas:ORECCHINO-TX-AUTH"])
+        #expect(t.hAcc == 11 && t.tsAcc == 5 && t.areaRadius == 120 && t.areaFloor == 20 && t.authTs == 100)
+        #expect(t.inTFR == true && t.tfrId == "TEST/1")
+        #expect(RidNames.hAccuracy(t.hAcc) == "< 3 m (11)")
+        #expect(RidNames.vAccuracy(t.baroAcc) == "< 25 m (3)")
+        #expect(RidNames.speedAccuracy(t.spdAcc) == "< 3 m/s (2)")
+        #expect(RidNames.timeAccuracy(t.tsAcc) == "0.5 s (5)")
+        #expect(RidNames.classification(type: t.classType, category: t.catEu, cls: t.classEu) == "EU · Specific · C2")
+        #expect(RidNames.odidDate(100) == Date(timeIntervalSince1970: 1_546_300_900))
+        #expect(RidNames.hAccuracy(13) == "reserved (13)")
+
+        model.ingest(line: #"{"type":"rid","src":"ble","mac":"02:00:5E:7E:57:30","basic_id":[{"id_type":1,"ua_type":2,"uas_id":"BARE-1"}],"loc":{"status":2,"lat":37.8,"lon":-122.4,"alt_geo":80,"alt_baro":-1000,"height":60,"height_ref":0,"speed":5,"dir":90,"ts":0},"system":{"op_lat":37.8,"op_lon":-122.4,"op_alt":10,"op_loc_type":1,"area_count":1,"ts":100,"area_radius":0}}"#)
+        let b = try #require(model.tracks["uas:BARE-1"])
+        #expect(b.hAcc == nil && b.vAcc == nil && b.baroAcc == nil && b.spdAcc == nil && b.tsAcc == nil)
+        #expect(b.areaCeiling == nil && b.areaFloor == nil && b.classType == nil && b.authTs == nil && b.inTFR == nil)
+        #expect(RidNames.hAccuracy(b.hAcc) == nil
+                && RidNames.classification(type: b.classType, category: b.catEu, cls: b.classEu) == nil)
+    }
 }
 
 @Suite struct CRC32Tests {

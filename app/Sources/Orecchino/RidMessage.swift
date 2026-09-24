@@ -19,6 +19,10 @@ struct RidMessage: Decodable {
     var proto: Int? = nil         // ODID protocol version from the message header
     var ssid: String? = nil       // Wi-Fi beacon SSID, when the frame had one
     var ssid_id_match: Bool? = nil   // the SSID's "RID-" serial agrees with the Basic ID
+    // rid and log: inside a TFR the host pushed (rid: only once TFRs have been
+    // pushed and there is a position; log: at the end), and which one.
+    var in_tfr: Bool? = nil
+    var tfr_id: String? = nil
 
     // tile-sync replies (fs_f / fs_ls_done / ack / fs_ok / fs_err)
     var q: Int? = nil
@@ -99,6 +103,12 @@ struct Loc: Decodable {
     var vspeed: Double?   // omitted when the broadcast marks it unknown
     var dir: Double
     var ts: Double
+    // Accuracy codes, raw ASTM F3411 enums (see RidNames); omitted when unknown.
+    var h_acc: Int? = nil
+    var v_acc: Int? = nil
+    var baro_acc: Int? = nil
+    var spd_acc: Int? = nil
+    var ts_acc: Int? = nil
 }
 
 struct SelfId: Decodable {
@@ -113,6 +123,15 @@ struct SystemMsg: Decodable {
     var op_loc_type: Int
     var area_count: Int
     var ts: Int
+    // ODID only (not GB 46750). Radius in m; ceiling and floor in m,
+    // omitted when unknown. Classification raw: class_type 1 = EU, and only
+    // then cat_eu / class_eu; each omitted when undeclared.
+    var area_radius: Double? = nil
+    var area_ceiling: Double? = nil
+    var area_floor: Double? = nil
+    var class_type: Int? = nil
+    var cat_eu: Int? = nil
+    var class_eu: Int? = nil
 }
 
 /// Authentication (ODID message type 2) as reported by the receiver.
@@ -124,6 +143,8 @@ struct AuthInfo: Decodable {
     var len: Int
     var pages: Int
     var state: String
+    /// Page 0's timestamp, seconds since 2019-01-01 00:00 UTC; omitted until page 0 arrives.
+    var auth_ts: Int? = nil
 }
 
 struct OpId: Decodable {
@@ -169,4 +190,43 @@ enum RidNames {
         guard let i, i >= 0, i < statuses.count else { return "Unknown" }
         return statuses[i]
     }
+
+    // ASTM F3411 accuracy enums (index = code; 0 is unknown and never sent).
+    static let hAccuracies = ["unknown", "< 18.5 km", "< 7.4 km", "< 3.7 km", "< 1.9 km",
+                              "< 926 m", "< 556 m", "< 185 m", "< 93 m", "< 30 m",
+                              "< 10 m", "< 3 m", "< 1 m"]
+    static let vAccuracies = ["unknown", "< 150 m", "< 45 m", "< 25 m", "< 10 m", "< 3 m", "< 1 m"]
+    static let speedAccuracies = ["unknown", "< 10 m/s", "< 3 m/s", "< 1 m/s", "< 0.3 m/s"]
+
+    /// "< 3 m (11)": the meaning and the raw code; a reserved code says so.
+    static func accuracy(_ code: Int?, _ table: [String]) -> String? {
+        guard let code else { return nil }
+        guard code > 0, code < table.count else { return "reserved (\(code))" }
+        return "\(table[code]) (\(code))"
+    }
+    static func hAccuracy(_ c: Int?) -> String? { accuracy(c, hAccuracies) }
+    static func vAccuracy(_ c: Int?) -> String? { accuracy(c, vAccuracies) }
+    static func speedAccuracy(_ c: Int?) -> String? { accuracy(c, speedAccuracies) }
+    /// Timestamp accuracy: code × 0.1 s (1...15).
+    static func timeAccuracy(_ c: Int?) -> String? {
+        guard let c else { return nil }
+        guard (1...15).contains(c) else { return "reserved (\(c))" }
+        return String(format: "%.1f s (%d)", Double(c) / 10, c)
+    }
+
+    static let euCategories = ["undeclared", "Open", "Specific", "Certified"]
+    /// "EU · Specific · C2". EU class codes 1...7 are classes C0...C6.
+    static func classification(type: Int?, category: Int?, cls: Int?) -> String? {
+        guard let type else { return nil }
+        guard type == 1 else { return "type \(type)" }
+        var parts = ["EU"]
+        if let c = category {
+            parts.append(c < euCategories.count ? euCategories[c] : "category \(c)")
+        }
+        if let c = cls { parts.append((1...7).contains(c) ? "C\(c - 1)" : "class \(c)") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Seconds since 2019-01-01 00:00 UTC (the ODID epoch) as a date.
+    static func odidDate(_ s: Int) -> Date { Date(timeIntervalSince1970: 1_546_300_800 + Double(s)) }
 }

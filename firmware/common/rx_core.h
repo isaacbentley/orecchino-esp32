@@ -518,6 +518,14 @@ static void jmac(const uint8_t* m) {
 }
 static inline void jkey(const char* k) { jchar(','); jchar('"'); jraw(k); jraw("\":"); }
 static inline void jstrv(const char* v) { jchar('"'); jraw(v); jchar('"'); }
+/// A raw 4-bit F3411 code, left out when 0 ("unknown" / "undeclared") or
+/// past 15 (a GB 46750 accuracy byte can be anything).
+static inline void jcode(const char* k, uint8_t v) { if (v >= 1 && v <= 15) { jkey(k); juint(v); } }
+/// A string from a host or a record, made safe to quote.
+static inline void jtext(const char* v, size_t n) {
+  char s[40]; odid_copy_text(s, sizeof(s), (const uint8_t*)v, strnlen(v, n)); jstrv(s);
+}
+extern bool g_tfr_loaded;   // defined with the TFR table below
 /// Close the object and terminate the line; returns its length.
 static size_t jfinish() {
   *s_jp++ = '}'; *s_jp++ = '\n'; *s_jp = 0;
@@ -565,6 +573,10 @@ static size_t format_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
     jkey("speed"); jfix(u->speed, 2);     jkey("dir"); jfix(u->dir, 0);
     jkey("ts"); jfix(u->ts, 1);
     if (u->vspeed > -900) { jkey("vspeed"); jfix(u->vspeed, 2); }
+    // Accuracy codes as F3411 numbers them (h 1..12, v and baro 1..6,
+    // speed 1..4, timestamp 1..15 tenths of a second); unknown ones left out.
+    jcode("h_acc", u->h_acc); jcode("v_acc", u->v_acc); jcode("baro_acc", u->baro_acc);
+    jcode("spd_acc", u->spd_acc); jcode("ts_acc", u->ts_acc);
     jchar('}');
   }
   if (u->has_self) {
@@ -575,7 +587,15 @@ static size_t format_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
     jkey("system"); jraw("{\"op_lat\":"); jfix(u->op_lat, 7);
     jkey("op_lon"); jfix(u->op_lon, 7); jkey("op_alt"); jfix(u->op_alt, 1);
     jkey("op_loc_type"); juint(u->op_loc_type); jkey("area_count"); juint(u->area_count);
-    jkey("ts"); juint(u->sys_ts); jchar('}');
+    jkey("ts"); juint(u->sys_ts);
+    if (!u->gb46750) {   // GB 46750 has neither an operating area nor an EU class
+      jkey("area_radius"); jfix(u->area_radius, 0);   // m, 10 m steps; 0 is a single aircraft
+      if (u->area_ceiling > -999) { jkey("area_ceiling"); jfix(u->area_ceiling, 1); }
+      if (u->area_floor > -999) { jkey("area_floor"); jfix(u->area_floor, 1); }
+      jcode("class_type", u->class_type);   // 1 = EU; category and class mean something only then
+      if (u->class_type == 1) { jcode("cat_eu", u->cat_eu); jcode("class_eu", u->class_eu); }
+    }
+    jchar('}');
   }
   if (u->has_op) {
     jkey("op_id"); jraw("{\"id_type\":"); juint(u->op_id_type);
@@ -586,7 +606,14 @@ static size_t format_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
     // frames, and verified once per change rather than once per line.
     jkey("auth"); jraw("{\"type\":"); juint(u->auth_type);
     jkey("len"); juint(u->auth_len); jkey("pages"); juint(u->auth_last_page + 1);
+    // Page 0's timestamp (s since 2019-01-01), while the set it heads is the one held.
+    if ((u->auth_pages_seen & 1) && u->auth_ts) { jkey("auth_ts"); juint(u->auth_ts); }
     jkey("state"); jstrv(odid_auth_state_name((OdidAuthState)t->auth_state)); jchar('}');
+  }
+  // TFR membership, once a host has pushed TFRs and there is a position to test.
+  if (t->has_pos && (g_tfr_loaded || t->in_tfr)) {
+    jkey("in_tfr"); jraw(t->in_tfr ? "true" : "false");
+    if (t->in_tfr) { jkey("tfr_id"); jtext(t->tfr_id, sizeof(t->tfr_id)); }
   }
   return jfinish();
 }
@@ -753,6 +780,12 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
   Track* t = tracker_upsert(e->mac, uas, now, &created);
   if (created) g_seen_count++;
   if (u->has_basic[0] && u->ua_type[0]) t->ua_type = u->ua_type[0];
+  if (u->has_sys && !u->gb46750) {   // for the match log; GB 46750 has no EU class
+    bool eu = u->class_type == 1;
+    t->class_type = u->class_type;
+    t->cat_eu = eu ? u->cat_eu : 0;
+    t->class_eu = eu ? u->class_eu : 0;
+  }
   bool entered = false;
   t->rssi = e->rssi;
   if (e->rssi > t->peak_rssi) t->peak_rssi = e->rssi;
@@ -901,7 +934,12 @@ static size_t format_log_rec(const LogRec* r, int32_t i, bool active) {
   jkey("peak_rssi"); jint(r->peak_rssi);
   jkey("auth_state"); jstrv(odid_auth_state_name((OdidAuthState)r->auth_state));
   jkey("tfr"); jraw(r->flags & 1 ? "true" : "false");
+  jkey("in_tfr"); jraw(r->flags & 4 ? "true" : "false");    // inside one at the end (live: now)
+  if ((r->flags & 1) && r->tfr_id[0]) { jkey("tfr_id"); jtext(r->tfr_id, sizeof(r->tfr_id)); }
   jkey("emerg"); jraw(r->flags & 2 ? "true" : "false");
+  uint8_t ct = (r->flags >> 3) & 7;
+  jcode("class_type", ct);
+  if (ct == 1) { jcode("cat_eu", (uint8_t)(r->eu_class >> 4)); jcode("class_eu", (uint8_t)(r->eu_class & 15)); }
   jkey("msgs"); juint(r->msgs);
   return jfinish();
 }
@@ -1289,6 +1327,9 @@ static void rx_process(const RidEvt* e, uint32_t now) {
   for (int i = 0; i < e->len; i++) h = (h ^ e->data[i]) * 16777619u;
   h = (h ^ t->auth_state) * 16777619u;
   h = (h ^ t->ssid_check) * 16777619u;
+  h = (h ^ (t->in_tfr ? 1u : 0u)) * 16777619u;
+  if (t->in_tfr)
+    for (const char* c = t->tfr_id; c < t->tfr_id + sizeof(t->tfr_id) && *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
   uint8_t si = e->src < 3 ? e->src : 0;
   bool repeat = t->emit_hash[si] == h && now - t->emit_ms[si] < 1000;
   size_t n = 0;
