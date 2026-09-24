@@ -30,3 +30,20 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # The living background (lib/ui/living_background.dart).
+  shaders:
+    - shaders/aurora.frag
+
+  # Bundled OFL fonts (licences beside them in assets/fonts/*/OFL.txt).
+  # Variable fonts: FontWeight drives the wght axis.
+  fonts:
+    - family: SpaceGrotesk
+      fonts:
+        - asset: assets/fonts/space_grotesk/SpaceGrotesk-Variable.ttf
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/inter/Inter-Variable.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/jetbrains_mono/JetBrainsMono-Variable.ttf

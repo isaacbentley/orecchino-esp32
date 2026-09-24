@@ -5,7 +5,8 @@
 // rebuild never adds a listener and a swipe-dismiss never leaks one. The
 // mode chips show the board's reported mode; every step has a state the
 // person can see: scanning, no networks, scan failed, connecting, connected,
-// failed with the board's reason, and a refused command.
+// failed with the board's reason, and a refused command. Drawn on glass to
+// match the rest of the app.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -16,7 +17,8 @@ import 'package:flutter/material.dart';
 import '../../core/link/detector_link.dart';
 import '../../core/protocol/commands.dart';
 import '../../core/protocol/messages.dart';
-import '../../ui/theme.dart';
+import '../../ui/glass.dart';
+import '../../ui/theme/theme.dart';
 
 enum WifiScanState { scanning, done, failed }
 
@@ -29,10 +31,17 @@ class WifiSetupSheet extends StatefulWidget {
   static Future<void> show(BuildContext context, DetectorLink link) {
     return showModalBottomSheet<void>(
       context: context,
-      backgroundColor: OrecchinoTheme.surface,
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (_) => FractionallySizedBox(heightFactor: 0.85, child: WifiSetupSheet(link: link)),
+      backgroundColor: Colors.transparent,
+      barrierColor: const Color(0x99020409),
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.85,
+        child: Glass(
+          blur: 32,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+          child: WifiSetupSheet(link: link),
+        ),
+      ),
     );
   }
 
@@ -147,97 +156,130 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
     final saved = st?.saved ?? const <String>[];
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+        padding: const EdgeInsets.fromLTRB(20, 10, 12, 8),
+        // Short (a phone on its side, large text): the whole sheet scrolls
+        // as one; tall: the network list scrolls under a fixed top.
+        child: LayoutBuilder(builder: (context, box) {
+          final short = box.maxHeight < 520;
+          final top = <Widget>[
+            Center(
+              child: Container(
+                width: 40,
+                height: 5,
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(color: OrecchinoColors.lineBright, borderRadius: BorderRadius.circular(3)),
+              ),
+            ),
             Row(
               children: [
-                const Expanded(
-                  child: Text('T5 WI-FI',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: OrecchinoTheme.text)),
-                ),
+                const Icon(Icons.wifi_rounded, color: OrecchinoColors.aqua, size: 22),
+                const SizedBox(width: 10),
+                Expanded(child: Semantics(header: true, child: const Text('T5 Wi-Fi', style: OrecchinoType.heading))),
                 IconButton(
                   tooltip: 'Close',
-                  icon: const Icon(Icons.close),
+                  icon: const Icon(Icons.close_rounded),
                   onPressed: () => Navigator.of(context).maybePop(),
                 ),
               ],
             ),
-            _statusLine(st),
+            const SizedBox(height: 4),
+            Padding(padding: const EdgeInsets.only(right: 8), child: _statusLine(st)),
             if (_error != null)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(_error!, style: const TextStyle(color: OrecchinoTheme.danger, fontSize: 13)),
+                padding: const EdgeInsets.only(top: 8, right: 8),
+                child: Text(_error!, style: OrecchinoType.label.copyWith(color: OrecchinoColors.warning)),
               ),
-            const SizedBox(height: 12),
-            const Text('MODE', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: OrecchinoTheme.muted)),
-            const SizedBox(height: 6),
-            Wrap(spacing: 8, runSpacing: 6, children: [
+            const SizedBox(height: 14),
+            const Text('MODE', style: OrecchinoType.eyebrow),
+            const SizedBox(height: 8),
+            Wrap(spacing: 8, runSpacing: 8, children: [
               _modeChip('sync', 'Sync every ${st?.everyMin ?? 15} min', mode),
               _modeChip('stay', 'Stay connected', mode),
               _modeChip('off', 'Off', mode),
             ]),
-            const SizedBox(height: 4),
-            const Text(
-              'Remote ID Wi-Fi pauses while the board scans or syncs; in Stay connected it hears only the '
-              'access point\'s channel. BLE Remote ID is unaffected.',
-              style: TextStyle(fontSize: 12, color: OrecchinoTheme.muted),
+            const SizedBox(height: 8),
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: Text(
+                'Remote ID Wi-Fi pauses while the board scans or syncs; in Stay connected it hears only the '
+                'access point\'s channel. BLE Remote ID is unaffected.',
+                style: OrecchinoType.caption,
+              ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             Row(
               children: [
-                const Expanded(
-                  child: Text('NETWORKS',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: OrecchinoTheme.muted)),
-                ),
+                const Expanded(child: Text('NETWORKS', style: OrecchinoType.eyebrow)),
                 if (_scan == WifiScanState.scanning)
-                  const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, semanticsLabel: 'Scanning'))
+                  const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, semanticsLabel: 'Scanning')),
+                  )
                 else
                   TextButton(onPressed: _startScan, child: const Text('SCAN AGAIN')),
               ],
             ),
-            Expanded(child: _list(saved)),
-          ],
-        ),
+          ];
+          if (short) {
+            return ListView(padding: EdgeInsets.zero, children: [...top, ..._rows(saved)]);
+          }
+          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            ...top,
+            Expanded(child: ListView(padding: const EdgeInsets.only(right: 8), children: _rows(saved))),
+          ]);
+        }),
       ),
     );
   }
 
   Widget _statusLine(WifiStatusMessage? st) {
     String text;
-    Color color = OrecchinoTheme.muted;
+    Color color = OrecchinoColors.inkMuted;
+    var busy = false;
+    var on = false;
     if (_joining != null) {
       text = 'Connecting to $_joining…';
+      busy = true;
     } else if (st == null) {
       text = 'Asking the detector…';
+      busy = true;
     } else {
       switch (st.state) {
         case 'connected':
           text = 'Connected to ${st.ssid ?? 'network'}${st.channel == null ? '' : ' (ch ${st.channel})'}'
               '${st.ip == null ? '' : ' · ${st.ip}'}';
-          color = OrecchinoTheme.ok;
+          color = OrecchinoColors.ok;
+          on = true;
         case 'connecting':
           text = 'Connecting to ${st.ssid ?? 'network'}…';
+          busy = true;
         case 'failed':
           text = 'Could not connect${st.reason == null ? '' : ': ${st.reason}'}';
-          color = OrecchinoTheme.danger;
+          color = OrecchinoColors.warning;
         case 'off':
           text = 'Wi-Fi off';
         default:
           text = st.reason == null ? 'Not connected' : 'Not connected (last: ${st.reason})';
       }
     }
-    return Semantics(
-      liveRegion: true,
-      child: Text(text, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: color)),
-    );
+    return Row(children: [
+      BreathingDot(color: busy ? OrecchinoColors.aqua : color, active: on || busy, busy: busy, size: 8),
+      const SizedBox(width: 6),
+      Expanded(
+        child: Semantics(
+          liveRegion: true,
+          child: Text(text,
+              style: OrecchinoType.bodyStrong
+                  .copyWith(color: color == OrecchinoColors.inkMuted ? OrecchinoColors.ink : color)),
+        ),
+      ),
+    ]);
   }
 
-  Widget _list(List<String> saved) {
+  List<Widget> _rows(List<String> saved) {
     final children = <Widget>[];
     for (final s in saved) {
       if (_nets.any((n) => n.ssid == s)) continue; // shown in the scan list
@@ -247,56 +289,107 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
       children.add(_netTile(n, saved.contains(n.ssid) || n.saved));
     }
     if (_scan == WifiScanState.done && _nets.isEmpty) {
-      children.add(const Padding(
-        padding: EdgeInsets.all(16),
-        child: Text('No networks found', style: TextStyle(color: OrecchinoTheme.muted)),
+      children.add(Padding(
+        padding: const EdgeInsets.all(16),
+        child: Text('No networks found', style: OrecchinoType.body.copyWith(color: OrecchinoColors.inkMuted)),
       ));
     }
     if (_scan == WifiScanState.failed) {
       children.add(Padding(
         padding: const EdgeInsets.all(16),
-        child: Text('Scan failed: ${_scanError ?? 'no answer'}', style: const TextStyle(color: OrecchinoTheme.danger)),
+        child: Text('Scan failed: ${_scanError ?? 'no answer'}',
+            style: OrecchinoType.body.copyWith(color: OrecchinoColors.warning)),
       ));
     }
     children.add(ListTile(
-      leading: const Icon(Icons.add, color: OrecchinoTheme.accent),
-      title: const Text('Other network…'),
+      contentPadding: const EdgeInsets.only(left: 4, right: 8),
+      leading: const Icon(Icons.add_rounded, color: OrecchinoColors.aqua),
+      title: Text('Other network…', style: OrecchinoType.bodyStrong.copyWith(color: OrecchinoColors.aqua)),
       onTap: () => _askPassword(null, secure: true),
     ));
-    return ListView(children: children);
+    return children;
   }
 
   Widget _netTile(WifiNetMessage n, bool isSaved) {
-    final bars = n.rssi == null ? 0 : (n.rssi! >= -55 ? 4 : n.rssi! >= -65 ? 3 : n.rssi! >= -75 ? 2 : 1);
+    final bars = n.rssi == null
+        ? 0
+        : (n.rssi! >= -55
+            ? 4
+            : n.rssi! >= -65
+                ? 3
+                : n.rssi! >= -75
+                    ? 2
+                    : 1);
     final detail = [
       if (isSaved) 'saved',
       n.secure ? 'secured' : 'open',
       if (n.rssi != null) 'signal $bars of 4',
     ].join(' · ');
-    return ListTile(
-      leading: Icon(n.secure ? Icons.wifi_lock : Icons.wifi, color: OrecchinoTheme.accent),
-      title: Text(n.ssid, style: const TextStyle(fontWeight: FontWeight.bold)),
-      subtitle: Text(detail, style: const TextStyle(fontSize: 12, color: OrecchinoTheme.muted)),
+    return _row(
+      leading: SignalBars(level: bars, height: 16),
+      title: n.ssid,
+      subtitle: detail,
+      trailing: n.secure ? Icons.lock_rounded : null,
       onTap: _joining != null
           ? null
           : () => isSaved ? _savedActions(n.ssid) : (n.secure ? _askPassword(n.ssid, secure: true) : _join(n.ssid, '')),
     );
   }
 
-  Widget _savedTile(String ssid) => ListTile(
-        leading: const Icon(Icons.bookmark, color: OrecchinoTheme.muted),
-        title: Text(ssid),
-        subtitle: const Text('saved, not in range', style: TextStyle(fontSize: 12, color: OrecchinoTheme.muted)),
+  Widget _savedTile(String ssid) => _row(
+        leading: const Icon(Icons.bookmark_rounded, color: OrecchinoColors.inkSubtle, size: 20),
+        title: ssid,
+        subtitle: 'saved, not in range',
         onTap: _joining != null ? null : () => _savedActions(ssid),
       );
+
+  Widget _row(
+      {required Widget leading,
+      required String title,
+      required String subtitle,
+      IconData? trailing,
+      VoidCallback? onTap}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: Colors.white.withValues(alpha: 0.04),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: OrecchinoColors.line),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 56),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(children: [
+                SizedBox(width: 26, child: Center(child: leading)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(title, style: OrecchinoType.bodyStrong),
+                    Text(subtitle, style: OrecchinoType.caption),
+                  ]),
+                ),
+                if (trailing != null) Icon(trailing, size: 16, color: OrecchinoColors.inkSubtle),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   void _savedActions(String ssid) {
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: OrecchinoTheme.surfaceHigh,
+      backgroundColor: OrecchinoColors.raised,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          ListTile(title: Text(ssid, style: const TextStyle(fontWeight: FontWeight.bold))),
+          ListTile(title: Text(ssid, style: OrecchinoType.heading)),
           ListTile(
             leading: const Icon(Icons.wifi),
             title: const Text('CONNECT'),
@@ -306,7 +399,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.delete_outline, color: OrecchinoTheme.danger),
+            leading: const Icon(Icons.delete_outline, color: OrecchinoColors.warning),
             title: const Text('FORGET'),
             onTap: () {
               Navigator.pop(ctx);
@@ -324,7 +417,6 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: OrecchinoTheme.surface,
         title: Text(ssid == null ? 'Other network' : 'Join $ssid'),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
           if (ssid == null)
@@ -356,8 +448,13 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
       label: Text(label),
       selected: active,
       onSelected: (_) => _setMode(mode),
-      selectedColor: OrecchinoTheme.accent.withValues(alpha: 0.25),
-      labelStyle: TextStyle(color: active ? OrecchinoTheme.accent : OrecchinoTheme.text, fontSize: 13),
+      showCheckmark: true,
+      materialTapTargetSize: MaterialTapTargetSize.padded,
+      labelStyle: OrecchinoType.label.copyWith(
+        color: active ? OrecchinoColors.aqua : OrecchinoColors.ink,
+        fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+      ),
+      side: BorderSide(color: active ? OrecchinoColors.aqua.withValues(alpha: 0.7) : OrecchinoColors.lineBright),
     );
   }
 }

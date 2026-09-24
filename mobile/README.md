@@ -2,7 +2,7 @@
 
 Remote ID and ADS-B traffic monitor for iOS and Android, built with Flutter
 (Dart 3). It pairs with an Orecchino receiver over Bluetooth LE, shows what the
-receiver hears on a heading-up radar, keeps the receiver's history on the
+receiver hears in a heading-up 3D sky, keeps the receiver's history on the
 phone, and warns when a manned aircraft reported over ADS-B is near a drone.
 Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobile-app-and-t5-wifi.md)
 §3, §5 and §8.4; phone designs in [`docs/mockups/`](../docs/mockups/).
@@ -31,10 +31,22 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   was stored, `oldest` above the cursor is reported as a gap, and a cursor
   above `total` (the detector's log was cleared) starts a new log epoch so
   new seqs never overwrite older history.
-- **Live radar**, heading-up from the compass (north-up and said so when there
-  is none): drones as dots with heading ticks, aircraft as outlined diamonds
-  with a 60-second time ghost, and a **separation bridge** between a drone and
-  the aircraft near it, labelled with horizontal and vertical separation.
+- **Live sky**, heading-up from the compass (north-up and said so when there
+  is none): a full-screen 3D dome (`features/live/sky_projection.dart`, a
+  perspective camera over a ground plane of range rings and compass ticks)
+  with every contact on a height stem above its ground position. Drones are
+  glowing orbs with heading ticks; aircraft are outlined chevrons (never
+  filled) with a dashed 60-second track projection and time-ghost dots; a
+  radar sweep re-lights fresh contacts; a **separation bridge** joins a drone
+  and the aircraft near it, with the horizontal and vertical separation
+  floating on it. Drag to rotate and tilt, pinch for 1 / 3 / 5 km, double-tap
+  to reset, and the 3D / 2D button lays it flat into a top-down radar. Heights
+  are drawn on a compressed scale; the labels carry the real numbers. The
+  contacts are in a glass sheet (peek: counts and the nearest; pulled up: a
+  card each with source badges, alert words, height, age and a sparkline of
+  its signal or altitude) and the sky re-fits above it. A capsule at the top
+  shows the counts and the ADS-B data age, and morphs into the alert, in the
+  rules' words, when there is one; tap it for the aircraft's card.
   Range and bearing come from the phone's own position (the firmware's
   `ui_bearing`/`ui_dist_m` formulas, `core/geo.dart`); without a position they
   are blank, never taken from somewhere else. Contacts go stale after 60 s
@@ -55,13 +67,25 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   drone alerts (EMERGENCY REPORTED, ID SIGNATURE INVALID) while a detector is
   connected; three short haptic pulses for traffic, one for drone alerts; an
   optional spoken callout ("Traffic, 2 o'clock, 1.1 kilometres, 2,600 feet,
-  descending.", off by default). The banner adds the clock position relative
-  to where the phone points. On Android an ongoing notification carries the
+  descending.", off by default). The Live alert capsule adds the clock
+  position relative to where the phone points. On Android an ongoing notification carries the
   active warning (updated at most every 5 s) and a foreground service says
   "Orecchino connected to 1 detector" while a detector is connected.
-- **Find:** a big arrow toward the chosen drone or aircraft as you turn.
-- **History:** every synced record, live ones marked LIVE, with alerts in
-  words (EMERGENCY REPORTED, IN TFR, ID SIGNATURE INVALID, TEST KEY).
+- **Find ("point at the sky"):** a head-up pointer to the chosen drone or
+  aircraft: left/right from the bearing, and its elevation above the horizon
+  (from its height and distance; "about" for aircraft, whose altitude is
+  barometric). A lock-on ring tightens as the phone comes round and says ON
+  TARGET; haptic ticks for each 15-degree step toward it, a tap on lock, and
+  one per step closer (50 m steps under 1 km, 250 m beyond; the Haptics
+  setting turns them off). Without a compass it is a north-up sky plot
+  (horizon at the rim, overhead at the centre) and says so.
+- **History:** an activity ribbon over the last 6 h / 24 h / 7 d (alert bins
+  marked) that you scrub; the record under the cursor replays on a mini sky
+  dome, and a record tapped in the list replays in a sheet over it (the list
+  keeps its place). Records keep one position and the highest height, so the
+  replay shows that position and the climb, not a flown track. Below, the
+  records grouped by day, live ones marked LIVE, alerts in words (EMERGENCY
+  REPORTED, IN TFR, ID SIGNATURE INVALID, TEST KEY).
 - **T5 Wi-Fi setup** over BLE (boards with the `wifi` capability): scan,
   join (open, with a password, or a saved network), forget, and the mode
   (Sync every N min / Stay connected / Off) as the board reports it, with the
@@ -70,11 +94,50 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   `wifi_mode`, refusals as `wifi_err`).
 - **Demo detector** (Detectors > Settings): made-up drones, history and one
   aircraft, labelled SIMULATED everywhere.
-- **Accessibility:** every radar mark and list row has a screen-reader label
+- **Accessibility:** every sky mark and contact card has a screen-reader label
   with the same words the screen shows (and is a 44 pt tap target); text
-  colours are at least 4.5:1; text follows the system size up to 2x and the
-  screens scroll or wrap instead of clipping; alerts are words, never colour
-  alone.
+  colours are at least 4.5:1 on every surface, on glass, and on the brightest
+  colour the living background draws; text follows the system size up to 2x
+  and the screens scroll or wrap instead of clipping (the tab bar's labels
+  stop at 1.35x, as tab bars do); alerts are words, never colour alone; with
+  Reduce Motion on, the sky, the sweep and the breathing lights stand still.
+- **Landscape and tablets:** every screen works in both orientations on
+  phones and iPads. On wide screens the Live contacts move into a side panel
+  (with the view controls and the heading/status chips on top) and the sky
+  fills the rest; on a phone on its side the tabs become a rail on the left,
+  clear of the Dynamic Island. Find puts its pointer beside the readouts.
+  The compass plugin reports where the top of the screen points in any
+  orientation, so heading-up and Find's pointer stay right when the phone is
+  turned.
+- **Battery:** the sky is drawn in two layers (the ground, stems and labels
+  only when the data or the camera change; the sweep and glows every frame),
+  the aurora runs at 24 frames a second, Find's pointer stops animating once
+  it has arrived (it pulses only while locked on), the connection lights
+  breathe three times and rest, and every ticker stops when the app is in
+  the background.
+
+## Design system
+
+`lib/ui/theme/`: `colors.dart` (a night-sky palette with avionics symbol
+colours: aqua drones, starlight aircraft, amber caution, red warning, and the
+three living-background palettes), `typography.dart` and `motion.dart`
+(durations, curves, springs, `Motion.reduced`). `lib/ui/glass.dart` has the
+frosted-glass panels, pills, tags and the breathing connection light;
+`lib/ui/living_background.dart` draws `shaders/aurora.frag`, an aurora whose
+colours follow the threat level (calm, caution, warning), with a static
+gradient when shaders are unavailable (tests). Fonts are bundled, never
+fetched: Space Grotesk (display and numbers), Inter (text) and JetBrains Mono
+(identifiers), all SIL Open Font License 1.1, with their licences in
+`assets/fonts/*/OFL.txt`. Numbers use tabular figures.
+
+The app icon and launch mark (a sky dome over a ground ring, the phone at its
+centre, a drone on its height stem, listening arcs) are authored as SVG in
+`branding/`: `icon.svg` (full bleed), `icon_background.svg` and
+`icon_foreground.svg` (Android adaptive layers, the motif inside the safe
+zone) and `launch_mark.svg`. `tool/make_icons.sh` rasterises them (needs
+`rsvg-convert` from librsvg and macOS `sips`) into the iOS AppIcon set (opaque,
+no alpha) and LaunchImage, the Android legacy and adaptive mipmaps, and the
+Android launch drawable; re-run it after editing a master.
 
 ## Privacy
 
@@ -118,8 +181,11 @@ words, never swallowed.
 - `lib/core/location/`: phone position and compass, with their failures.
 - `lib/data/`: drift schema 2 (detectors with cursor, log epoch and pin;
   detections keyed by epoch + seq or by live contact; settings).
-- `lib/features/`: `live`, `find`, `history`, `detectors` (with the Wi-Fi
-  sheet). `lib/ui/`: theme tokens, traffic banner, card and bridge badge.
+- `lib/features/`: `live` (items, the 3D camera, the sky painter and scene,
+  the alert capsule, the contact sheet), `find` (with its pure geometry and
+  haptic cues), `history` (with the timeline logic), `detectors` (with the
+  Wi-Fi sheet). `lib/ui/`: the design system (see above), the glass tab bar,
+  the aircraft card and the bridge badge.
 
 ## Tests
 
@@ -136,8 +202,13 @@ machine with a fake transport (verification, pinning, mid-pairing drops,
 stale disconnects, chunked writes), the app controller (position only to a
 pinned, verified detector; resume from the cursor), the Wi-Fi sheet (one
 listener, released on dismiss; every state), the alert policy and words, the
-adsb.lol mapping, contrast, screen-reader labels, and the Live screen at 2x
-text. The traffic rules run every shared vector in `tests/vectors/traffic/`.
+adsb.lol mapping, contrast, screen-reader labels, the Live screen at 2x text
+and with Reduce Motion, the 3D sky camera, the Find elevation angle and haptic
+cues (played on app updates, never on rebuilds), the History timeline, the
+sparkline history, the aurora shader (it compiles and takes its uniforms),
+text contrast over a star, and every screen on a phone on its side (1x and
+2x text) and on an iPad in both orientations. The traffic rules run every shared vector in
+`tests/vectors/traffic/`.
 
 After changing `lib/data/db.dart`, regenerate `db.g.dart` with
 `flutter pub run build_runner build`.
@@ -215,8 +286,11 @@ Time Sensitive Notifications capability to the App ID (see Permissions).
   equivalent, the ongoing notification, is done.
 - iOS state restoration for background BLE (`bluetooth-central` is declared;
   the app does not yet restore its central manager after being terminated).
-- History: the timeline scrubber, map replay and CSV export of plan §5.3.
-- Find: haptic ticks by range; warmer/colder for contacts without a position.
+- History: a map replay of real tracks (needs the `live_points` ring below)
+  and CSV export of plan §5.3.
+- Find: warmer/colder for contacts without a position; the phone's pitch
+  (it would need an accelerometer plugin) so the pointer could lock on in
+  elevation too, not only in bearing.
 - TFR fetch on the phone and push to boards (`tfr_add`).
 - The `live_points` table (schema 2) is declared for the 24 h live-track
   ring of plan §5.2 but nothing writes or reads it yet.

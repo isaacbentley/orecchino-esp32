@@ -51,7 +51,9 @@ void main() {
     final link = FakeLink();
     await tester.pumpWidget(host(link));
     await tester.tap(find.text('open'));
-    await tester.pumpAndSettle();
+    // The status light breathes while the sheet waits for the board, so
+    // pump past the sheet's entrance instead of waiting for stillness.
+    await tester.pump(const Duration(seconds: 1));
     expect(link.listens, 1);
     expect(link.commands, ['wifi_status', 'wifi_scan']);
 
@@ -65,7 +67,7 @@ void main() {
 
     // Dismiss the way a swipe or a tap on the barrier does (not the close button).
     await tester.tapAt(const Offset(10, 10));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 1));
     expect(find.byType(WifiSetupSheet), findsNothing);
     expect(link.cancels, 1);
     expect(link.ctl.hasListener, isFalse);
@@ -110,7 +112,8 @@ void main() {
     await tester.pump();
     expect(find.text('Could not connect: no IP address'), findsOneWidget);
 
-    link.line({'type': 'wifi_status', 'state': 'connected', 'mode': 'sync', 'ssid': 'Cafe', 'ip': '10.0.0.7', 'ch': 11});
+    link.line(
+        {'type': 'wifi_status', 'state': 'connected', 'mode': 'sync', 'ssid': 'Cafe', 'ip': '10.0.0.7', 'ch': 11});
     await tester.pump();
     expect(find.text('Connected to Cafe (ch 11) · 10.0.0.7'), findsOneWidget);
   });
@@ -130,9 +133,44 @@ void main() {
 
   testWidgets('no answer to a scan times out into a visible failure', (tester) async {
     final link = FakeLink();
-    await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: WifiSetupSheet(link: link, scanTimeout: const Duration(seconds: 3)))));
+    await tester.pumpWidget(
+        MaterialApp(home: Scaffold(body: WifiSetupSheet(link: link, scanTimeout: const Duration(seconds: 3)))));
     await tester.pump(const Duration(seconds: 4));
     expect(find.text('Scan failed: The detector did not answer the scan'), findsOneWidget);
+  });
+
+  testWidgets('a short sheet (a phone on its side, 2x text) scrolls as one, no overflow', (tester) async {
+    tester.view.physicalSize = const Size(874 * 3, 402 * 3);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    final link = FakeLink();
+    await tester.pumpWidget(MaterialApp(
+      home: MediaQuery(
+        data: const MediaQueryData(size: Size(874, 402), textScaler: TextScaler.linear(2)),
+        child: Scaffold(body: SizedBox(height: 340, child: WifiSetupSheet(link: link))),
+      ),
+    ));
+    for (var i = 0; i < 6; i++) {
+      link.line({'type': 'wifi_net', 'ssid': 'Net $i', 'rssi': -60, 'secure': i.isEven, 'saved': false});
+    }
+    link.line({'type': 'wifi_scan_done', 'n': 6});
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.scrollUntilVisible(find.text('Net 5'), 120);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('reduce motion: the sheet settles (its status light is still)', (tester) async {
+    final link = FakeLink();
+    await tester.pumpWidget(MaterialApp(
+      home: MediaQuery(
+        data: const MediaQueryData(disableAnimations: true),
+        child: Scaffold(body: WifiSetupSheet(link: link)),
+      ),
+    ));
+    link.line({'type': 'wifi_status', 'state': 'connected', 'mode': 'sync', 'ssid': 'Home', 'saved': <String>[]});
+    link.line({'type': 'wifi_scan_done', 'n': 0});
+    await tester.pumpAndSettle();
+    expect(find.text('Connected to Home'), findsOneWidget);
   });
 }

@@ -540,8 +540,11 @@ What it does:
 ## Phone app — `mobile/`
 
 A Flutter app for iOS and Android that pairs with any receiver over
-Bluetooth LE: a heading-up radar of what the receiver hears, a find arrow,
-the receiver's match log kept on the phone (synced incrementally), the
+Bluetooth LE: a 3D sky view of what the receiver hears (contacts on height
+stems over a perspective radar, separation bridges to nearby aircraft), a
+point-at-the-sky Find view with bearing and elevation, a scrubbable history
+timeline with replay, the receiver's match log kept on the phone (synced
+incrementally), the
 phone's position and time pushed to the receiver, ADS-B traffic alerts with
 the same rules as the boards and the Mac, and the T5's Wi-Fi setup. Build,
 permissions, privacy and what is still to do are in

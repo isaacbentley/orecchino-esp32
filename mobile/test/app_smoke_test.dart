@@ -22,6 +22,7 @@ class NoLocation extends LocationService {
 
 void main() {
   testWidgets('demo mode end to end through every tab', (tester) async {
+    final handle = tester.ensureSemantics();
     tester.view.physicalSize = const Size(430, 2400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -46,25 +47,40 @@ void main() {
     expect(app.tracker.length, 2);
     expect(find.text('SIMULATED detector and position'), findsOneWidget);
     expect(find.text('CONTACTS (3)'), findsOneWidget);
+    // Pull up the contacts sheet: the demo aircraft has a card.
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^Contacts sheet')));
+    for (var i = 0; i < 8; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
     expect(find.textContaining('D9A11'), findsWidgets); // drone 1's label
     expect(find.textContaining('N123SIM'), findsWidgets); // the demo aircraft
 
+    // The sky, north up without a compass, with the demo's marks.
+    expect(find.bySemanticsLabel(RegExp(r'^Sky view, 3D, north up, 3.0 km range, \d marks')), findsOneWidget);
+
     await tester.tap(find.text('Find'));
     await tester.pump();
-    expect(find.text('POINT & FIND'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('POINT AT THE SKY'), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp(r'^Pointer to drone D9A11, bearing \d+ degrees true')), findsOneWidget);
 
     await tester.tap(find.text('History'));
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
     await tester.pump();
-    expect(find.text('HISTORY LOG'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('FLIGHT LOG'), findsOneWidget);
+    expect(find.text('ACTIVITY'), findsOneWidget);
+    expect(find.text('TODAY'), findsWidgets); // records grouped by day
 
     await tester.tap(find.text('Detectors'));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('SIMULATED DETECTOR'), findsOneWidget);
     expect(find.text('Spoken traffic callouts'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 1)); // drift closes its watch streams on a timer
     await tester.runAsync(() async => app.dispose());
+    handle.dispose();
   });
 }

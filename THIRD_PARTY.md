@@ -34,11 +34,24 @@ package's `LICENSE` in the pub cache. All are GPL-compatible.
 
 The remaining transitive packages in the lock file are the Dart team's
 BSD-3-Clause utilities and a few MIT, BSD-2-Clause and Apache-2.0 ones
-(e.g. `rxdart` Apache-2.0, `uuid` MIT, `logger` MIT, `xml` MIT). Two are
+(e.g. `rxdart` Apache-2.0, `uuid` MIT, `xml` MIT). Two are
 MPL-2.0 — `bluez` and `dbus`, flutter_blue_plus's Linux backend — and are
 only compiled into a Linux desktop build, which this project does not
 ship; MPL-2.0 is GPL-compatible in any case. Build-time only (not shipped):
 `build_runner`, `drift_dev`, `flutter_lints` (BSD-3-Clause / MIT).
+
+Fonts bundled with the phone app (`mobile/assets/fonts/`, each folder with
+its `OFL.txt`), all under the SIL Open Font License 1.1, which allows
+bundling them in an app of any license:
+
+| Font | Use | Copyright |
+|---|---|---|
+| [Space Grotesk](https://github.com/floriankarsten/space-grotesk) (variable) | Display type and large numbers | 2020 The Space Grotesk Project Authors |
+| [Inter](https://github.com/rsms/inter) (variable) | Text | 2020 The Inter Project Authors |
+| [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) (variable) | UAS IDs, MACs, hex | 2020 The JetBrains Mono Project Authors |
+
+The app icon and launch artwork (`mobile/branding/`) are original to this
+project.
 
 ## Vendored / derived code
 

@@ -1,0 +1,49 @@
+<!-- Orecchino adaptive icon background. SPDX-License-Identifier: GPL-3.0-or-later -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E1638"/>
+      <stop offset="0.55" stop-color="#070B1C"/>
+      <stop offset="1" stop-color="#04060C"/>
+    </linearGradient>
+    <radialGradient id="aurora" cx="0.32" cy="0.22" r="0.6">
+      <stop offset="0" stop-color="#1B5A62" stop-opacity="0.9"/>
+      <stop offset="0.5" stop-color="#123646" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#123646" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nebula" cx="0.8" cy="0.75" r="0.55">
+      <stop offset="0" stop-color="#1C2152" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#1C2152" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ground" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#4BE3C8" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#4BE3C8" stop-opacity="0.02"/>
+    </radialGradient>
+    <radialGradient id="orbGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#4BE3C8" stop-opacity="0.75"/>
+      <stop offset="0.45" stop-color="#4BE3C8" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#4BE3C8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="stem" gradientUnits="userSpaceOnUse" x1="640" y1="668" x2="640" y2="440">
+      <stop offset="0" stop-color="#4BE3C8" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#4BE3C8" stop-opacity="0.95"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="14"/></filter>
+  </defs>
+  <g id="sky">
+    <rect width="1024" height="1024" fill="url(#sky)"/>
+    <rect width="1024" height="1024" fill="url(#aurora)"/>
+    <rect width="1024" height="1024" fill="url(#nebula)"/>
+    <g fill="#EEF3FF">
+      <circle cx="170" cy="190" r="4" fill-opacity="0.7"/>
+      <circle cx="300" cy="120" r="3" fill-opacity="0.5"/>
+      <circle cx="860" cy="170" r="4" fill-opacity="0.6"/>
+      <circle cx="930" cy="330" r="3" fill-opacity="0.45"/>
+      <circle cx="110" cy="420" r="3" fill-opacity="0.5"/>
+      <circle cx="420" cy="230" r="2.5" fill-opacity="0.5"/>
+      <circle cx="560" cy="150" r="3" fill-opacity="0.55"/>
+      <circle cx="880" cy="820" r="3" fill-opacity="0.35"/>
+      <circle cx="150" cy="860" r="3" fill-opacity="0.35"/>
+    </g>
+  </g>
+</svg>
