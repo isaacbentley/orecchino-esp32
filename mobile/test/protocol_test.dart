@@ -197,8 +197,9 @@ void main() {
       expect(live.lat, isNull);
     });
 
-    test('log_done carries total, next, oldest and live', () {
-      final d = HostMessage.parse('{"type":"log_done","n":40,"live":2,"total":52,"clock":true,"next":52,"oldest":12}')
+    test('log_done carries total, next, oldest, live and the log id', () {
+      final d = HostMessage.parse(
+              '{"type":"log_done","n":40,"live":2,"total":52,"clock":true,"next":52,"oldest":12,"log_id":3}')
           as LogDoneMessage;
       expect(d.count, 40);
       expect(d.live, 2);
@@ -206,6 +207,26 @@ void main() {
       expect(d.nextSeq, 52);
       expect(d.oldestSeq, 12);
       expect(d.clock, isTrue);
+      expect(d.logId, 3);
+      expect(d.cut, isFalse);
+      // Older firmware: none.
+      expect((HostMessage.parse('{"type":"log_done","n":0,"next":0,"oldest":0}') as LogDoneMessage).logId, isNull);
+      // A cut reply: next is the since asked for.
+      final cut = HostMessage.parse('{"type":"log_done","n":40,"live":0,"total":52,"clock":true,"next":12,"oldest":12,'
+          '"log_id":3,"err":"dropped"}') as LogDoneMessage;
+      expect(cut.cut, isTrue);
+      expect(cut.error, 'dropped');
+      expect(cut.nextSeq, 12);
+    });
+
+    test('a heartbeat may carry the USB host link\'s drops', () {
+      expect((HostMessage.parse('{"type":"hb","up":5,"usb_drop":3}') as HeartbeatMessage).usbDrops, 3);
+      expect((HostMessage.parse('{"type":"hb","up":5}') as HeartbeatMessage).usbDrops, isNull);
+    });
+
+    test('log_cleared carries the new log id when the firmware sends one', () {
+      expect((HostMessage.parse('{"type":"log_cleared","log_id":4}') as LogClearedMessage).logId, 4);
+      expect((HostMessage.parse('{"type":"log_cleared"}') as LogClearedMessage).logId, isNull);
     });
 
     test('Device info characteristic', () {

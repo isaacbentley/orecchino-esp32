@@ -199,8 +199,8 @@ enum ReceiverHealth: Equatable {
         case .receiving:
             return "The receiver is streaming; no aircraft have been heard yet."
         case .stalled:
-            return "The port is open but heartbeats stopped. "
-                + "Reconnect the USB cable or pick another port."
+            return "The port is open but heartbeats stopped. The app reopens the port "
+                + "after 15 s of silence; if that does not help, reconnect the USB cable."
         }
     }
 }
@@ -223,6 +223,9 @@ struct FeedStats {
     /// the decode task's least free stack in bytes.
     var bleDrop: Int?
     var bleRxDrop: Int?
+    /// Lines the receiver dropped toward USB because the Mac was not
+    /// reading the port (a closed or stalled host end), when there were any.
+    var usbDrop: Int?
     var rxStack: Int?
 }
 
@@ -243,7 +246,9 @@ struct MapFocus: Equatable {
 @MainActor
 @Observable
 final class AppModel {
-    var tracks: [String: DroneTrack] = [:]
+    var tracks: [String: DroneTrack] = [:] {
+        didSet { trackListCache = nil }
+    }
     /// The drone card, TFR card, and Traffic card are mutually exclusive:
     /// picking one closes the others, so at most one card covers the map.
     var selection: String? {
@@ -258,6 +263,9 @@ final class AppModel {
     var serialStatus: SerialStatus = .searching
     /// Port the user picked explicitly; nil means auto-detect.
     var preferredPort: String?
+    /// The serial ports that look like a receiver, as the serial manager
+    /// last listed /dev (every 2 s); the views read this, not /dev.
+    var ports: [String] = []
     var followAll = true
     var demoMode = false {
         didSet {
@@ -311,6 +319,7 @@ final class AppModel {
     }
 
     @ObservationIgnored private var macIndex: [String: String] = [:]
+    @ObservationIgnored private var trackListCache: [DroneTrack]?
     @ObservationIgnored private var nextColor = 0
     @ObservationIgnored let serial = SerialManager()
     @ObservationIgnored private let demo = DemoFeed()
@@ -328,6 +337,10 @@ final class AppModel {
 
     /// Tracks older than this are dropped from the list entirely.
     static let expiry: TimeInterval = 600
+    /// At most this many tracks (the firmware's TRK_MAX is far smaller): a
+    /// flood of random BLE addresses, or a spoofer, evicts the oldest-heard
+    /// track, one without a Basic ID before any with one.
+    static let maxTracks = 256
     /// The single freshness policy: a track unheard for longer than this is
     /// "stale" on every surface (row, marker, card). 60 s matches the
     /// firmware's "active within the last minute".
@@ -395,6 +408,11 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.ingest(line: line) }
             }
         }
+        serial.onPorts = { [weak self] ports in
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.ports = ports }
+            }
+        }
         serial.onStatus = { [weak self] st in
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
@@ -459,8 +477,14 @@ final class AppModel {
         }
     }
 
+    /// Every track, first heard first. Sorted once per change to `tracks`
+    /// (the 2 Hz tick, the map and the sidebar all read it).
     var trackList: [DroneTrack] {
-        tracks.values.sorted { $0.firstSeen < $1.firstSeen }
+        let all = tracks              // the read is what observation follows
+        if let cached = trackListCache { return cached }
+        let sorted = all.values.sorted { $0.firstSeen < $1.firstSeen }
+        trackListCache = sorted
+        return sorted
     }
 
     // MARK: - ADS-B traffic
@@ -642,6 +666,7 @@ final class AppModel {
             stats.bleExt = msg.ble_ext ?? stats.bleExt
             stats.bleDrop = msg.ble_drop
             stats.bleRxDrop = msg.ble_rx_drop
+            stats.usbDrop = msg.usb_drop
             stats.rxStack = msg.rx_stack ?? stats.rxStack
             if let c = msg.caps { receiverCaps = Set(c) }
             stats.lastHeartbeat = Date()
@@ -703,6 +728,7 @@ final class AppModel {
 
         var t = tracks[key] ?? {
             defer { nextColor += 1 }
+            makeRoom(for: key)
             return DroneTrack(id: key, firstSeen: now, lastSeen: now,
                               colorIndex: nextColor, isDemo: demo)
         }()
@@ -846,15 +872,28 @@ final class AppModel {
         return out
     }
 
+    /// Before a new track `key` is added: while the table is full, evict
+    /// the track heard longest ago, preferring one with no Basic ID.
+    private func makeRoom(for key: String) {
+        while tracks.count >= Self.maxTracks, tracks[key] == nil {
+            guard let victim = tracks.values.min(by: {
+                ($0.uasId == nil ? 0 : 1, $0.lastSeen) < ($1.uasId == nil ? 0 : 1, $1.lastSeen)
+            }) else { return }
+            forget(victim.id)
+        }
+    }
+
+    private func forget(_ k: String) {
+        tracks.removeValue(forKey: k)
+        if selection == k { selection = nil }
+        macIndex = macIndex.filter { $0.value != k }
+    }
+
     private func expireOld() {
         let cutoff = Date().addingTimeInterval(-Self.expiry)
         let removed = tracks.filter { $0.value.lastSeen < cutoff && !$0.value.isDemo }
         guard !removed.isEmpty else { return }
-        for k in removed.keys {
-            tracks.removeValue(forKey: k)
-            if selection == k { selection = nil }
-        }
-        macIndex = macIndex.filter { tracks[$0.value] != nil }
+        for k in removed.keys { forget(k) }
     }
 
     /// The band around 0,0 that DJI encoders emit for "no fix" (small

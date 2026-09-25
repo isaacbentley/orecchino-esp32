@@ -111,7 +111,38 @@ static TrafficObserver observer_of(const J* o) {   // LOW's observer; host_lines
   return ob;
 }
 
-static int g_steps = 0, g_alerts = 0;
+static int g_steps = 0, g_alerts = 0, g_hand = 0;
+
+// The vector's "hand_checks": numbers derived by hand from the scenario
+// (right triangles, the CPA formula), never from an implementation, so a
+// geometry slip shared by all three ports still fails. horiz_m / vert_m
+// within tol_m (0.5 m unless given), bearing within 0.05 deg, cpa_s within
+// 0.05 s; a null field must be unknown; an absent one is not checked.
+static void run_hand_checks(const J& v, const J& step, const TrafficResult& r) {
+  const J* hc = v.get("hand_checks");
+  if (!hc) return;
+  for (const J& c : hc->a) {
+    if (c.num("t_s") != step.num("t_s")) continue;
+    const TrafficAlert* m = nullptr;
+    int found = 0;
+    for (int i = 0; i < r.n; i++) {
+      const TrafficAlert& a = r.alerts[i];
+      if (c.str("hex") != a.hex) continue;
+      if (c.has("drone") && c.str("drone") != a.drone_id) continue;
+      if (c.has("kind") && c.str("kind") != traffic_kind_name(a.kind)) continue;
+      m = &a;
+      found++;
+    }
+    CHECK(found == 1, "hand check %s finds one alert (%d)", c.str("hex").c_str(), found);
+    if (found != 1) continue;
+    double tol = c.has("tol_m") ? c.num("tol_m") : 0.5;
+    if (c.has("horiz_m")) CHECK(near_eq(m->horiz_m, c.get("horiz_m"), tol), "hand %s horiz %.3f want %g", m->hex, m->horiz_m, c.num("horiz_m"));
+    if (c.has("vert_m")) CHECK(near_eq(m->vert_m, c.get("vert_m"), tol), "hand %s vert %.3f want %g", m->hex, m->vert_m, c.num("vert_m"));
+    if (c.has("bearing_deg")) CHECK(near_eq(m->bearing_deg, c.get("bearing_deg"), 0.05), "hand %s bearing %.3f want %g", m->hex, m->bearing_deg, c.num("bearing_deg"));
+    if (c.has("cpa_s")) CHECK(near_eq(m->cpa_s, c.get("cpa_s"), 0.05), "hand %s cpa %.3f want %g", m->hex, m->cpa_s, c.num("cpa_s"));
+    g_hand++;
+  }
+}
 
 static void run_rule_vector(const J& v) {
   TrafficState st;
@@ -187,6 +218,7 @@ static void run_rule_vector(const J& v) {
       if (a.drone_index >= 0) CHECK(!strcmp(drones[a.drone_index].id, a.drone_id), "#%d drone_index", i);
       g_alerts++;
     }
+    run_hand_checks(v, step, r);
     g_steps++;
   }
 }
@@ -322,6 +354,24 @@ static void test_edges(void) {
   CHECK(g_traffic_count == 32, "ingest cap %d", g_traffic_count);
   CHECK(!strcmp(g_traffic_ac[0].hex, "000000") && !strcmp(g_traffic_ac[31].hex, "00001f"), "ingest nearest first");
 
+  // A hex sent twice installs once: its nearest copy (the same aircraft
+  // would otherwise be two candidates writing over one alert entry).
+  traffic_reset_globals();
+  g_traffic_observer = {0.0, 0.0, 0.0};
+  TrafficAircraft dup[3] = { mk_ac("abc001", 0.010, 0.0, 500, now), mk_ac("abc002", 0.008, 0.0, 500, now),
+                             mk_ac("abc001", 0.005, 0.0, 500, now) };
+  traffic_ingest(dup, 3, now, now);
+  CHECK(g_traffic_count == 2 && !strcmp(g_traffic_ac[0].hex, "abc001") && fabs(g_traffic_ac[0].lat - 0.005) < 1e-12 &&
+        !strcmp(g_traffic_ac[1].hex, "abc002"), "ingest: one entry per hex, its nearest copy (%d)", g_traffic_count);
+
+  // "sq":true is not squawk 1 (the bool's 1 must not read as a code); em/gnd bools are flags.
+  TrafficAircraft sq;
+  CHECK(traffic_parse_aircraft("{\"hex\":\"abc003\",\"lat\":1,\"lon\":2,\"sq\":true,\"em\":true,\"gnd\":false,\"age_s\":1}",
+                               now, &sq, nullptr) && sq.squawk == 0 && sq.emergency && !sq.on_ground,
+        "parse: sq true -> 0, em true -> flag, gnd false -> airborne (squawk %d)", sq.squawk);
+  CHECK(traffic_parse_aircraft("{\"hex\":\"abc004\",\"lat\":1,\"lon\":2,\"sq\":7700,\"age_s\":1}", now, &sq, nullptr) &&
+        sq.squawk == 7700, "parse: a numeric squawk still reads");
+
   // traffic_tick: a set not refreshed for 10 min is no source.
   traffic_tick(nullptr, 0, now + 1000);
   CHECK(g_traffic_result.have_data && !g_traffic_result.stale, "tick fresh");
@@ -372,11 +422,11 @@ int main(int argc, char** argv) {
     else CHECK(false, "unknown vector shape");
   }
   g_ctx = "totals";
-  CHECK(files.size() >= 12, "vector files %zu", files.size());
-  CHECK(rule_files >= 11 && g_steps >= 37 && g_alerts >= 90 && g_cases >= 8,
-        "coverage: %d rule files, %d steps, %d alerts, %d host cases", rule_files, g_steps, g_alerts, g_cases);
+  CHECK(files.size() >= 16, "vector files %zu", files.size());
+  CHECK(rule_files >= 15 && g_steps >= 60 && g_alerts >= 180 && g_cases >= 9 && g_hand >= 40,
+        "coverage: %d rule files, %d steps, %d alerts, %d host cases, %d hand checks", rule_files, g_steps, g_alerts, g_cases, g_hand);
   test_edges();
-  printf("traffic: %zu vector files, %d steps, %d alerts, %d host cases, %d checks, %d failures\n",
-         files.size(), g_steps, g_alerts, g_cases, g_checks, g_fails);
+  printf("traffic: %zu vector files, %d steps, %d alerts, %d hand checks, %d host cases, %d checks, %d failures\n",
+         files.size(), g_steps, g_alerts, g_hand, g_cases, g_checks, g_fails);
   return g_fails ? 1 : 0;
 }

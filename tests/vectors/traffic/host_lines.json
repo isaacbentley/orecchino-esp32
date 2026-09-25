@@ -3,7 +3,8 @@
  "description": "The traffic / traffic_done host lines of plan section 8.1 (format in firmware/common/traffic.h): parsing, units, the atomic set swap and filtering. Each case starts from an empty receiver; every line is handled at now_ms.",
  "worked_example": [
   "UAL123: gs_kt 180 * 1852 / 3600 = 92.6 m/s; altb_ft 2650 * 0.3048 = 807.72 m; vr_fpm -640 * 0.3048 / 60 = -3.2512 m/s; sq \"7700\" -> 7700; age_s 3 at now 100000 ms -> seen_ms 97000.",
-  "Set 1 of case 1 arrives as 5 objects (n = 5); 2 survive; the nearer (N12345, 1 km) comes first."
+  "Set 1 of case 1 arrives as 5 objects (n = 5); 2 survive; the nearer (N12345, 1 km) comes first.",
+  "Case 8: abcde1 arrives twice (500 m, then 300 m): one entry, the 300 m one (callsign NEAR), first; abcde2's sq true reads squawk 0."
  ],
  "now_ms": 100000,
  "cases": [
@@ -432,6 +433,62 @@
       "emergency": false,
       "on_ground": false,
       "age_s": 0.2
+     }
+    ]
+   }
+  },
+  {
+   "description": "One entry per hex: a hex sent twice keeps its nearest copy; 'sq':true is not squawk 1 (0), while 'em':true and 'gnd':true are flags.",
+   "observer": {
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "elev_m": 20
+   },
+   "lines": [
+    "{\"cmd\":\"traffic\",\"t\":8,\"ac\":[{\"hex\":\"abcde1\",\"lat\":37.779397,\"lon\":-122.4194,\"cs\":\"FAR\",\"age_s\":1},{\"hex\":\"abcde2\",\"lat\":37.778497,\"lon\":-122.4194,\"sq\":true,\"em\":true,\"gnd\":true,\"age_s\":1},{\"hex\":\"abcde1\",\"lat\":37.777598,\"lon\":-122.4194,\"cs\":\"NEAR\",\"age_s\":2}]}",
+    "{\"cmd\":\"traffic_done\",\"n\":3}"
+   ],
+   "expect": {
+    "handled": [
+     true,
+     true
+    ],
+    "have_data": true,
+    "partial": false,
+    "count": 2,
+    "data_age_s": 0.0,
+    "aircraft": [
+     {
+      "hex": "abcde1",
+      "callsign": "NEAR",
+      "type": "",
+      "lat": 37.777598,
+      "lon": -122.4194,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": false,
+      "on_ground": false,
+      "age_s": 2.0
+     },
+     {
+      "hex": "abcde2",
+      "callsign": "",
+      "type": "",
+      "lat": 37.778497,
+      "lon": -122.4194,
+      "alt_geom_m": null,
+      "alt_baro_m": null,
+      "gs_mps": null,
+      "track_deg": null,
+      "vs_mps": null,
+      "squawk": 0,
+      "emergency": true,
+      "on_ground": true,
+      "age_s": 1.0
      }
     ]
    }

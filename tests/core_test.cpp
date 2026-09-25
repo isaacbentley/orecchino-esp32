@@ -25,6 +25,12 @@ static const uint8_t M1[6] = {2, 0, 0x5E, 0x7E, 0x57, 0x11};
 static const uint8_t M2[6] = {2, 0, 0x5E, 0x7E, 0x57, 0x22};
 static const uint8_t M3[6] = {2, 0, 0x5E, 0x7E, 0x57, 0x33};
 
+static int tracker_count() {
+  int n = 0;
+  for (int i = 0; i < TRK_MAX; i++) if (g_tracks[i].used) n++;
+  return n;
+}
+
 // ------------------------------------------------------------- tracker.h
 
 static void test_tracker(void) {
@@ -58,6 +64,27 @@ static void test_tracker(void) {
   tracker_upsert(M1, "X", 100, &c);
   tracker_upsert(M1, "Y", 200, &c);
   CHECK(tracker_count() == 2, "tracker: two UAS IDs on one address stay two contacts");
+
+  // A CAA registration (ID type 2) is the same aircraft as the serial it
+  // flies with: it joins the contact as uas2, whichever came first.
+  memset(g_tracks, 0, sizeof g_tracks);
+  tracker_upsert(M1, "SERIAL-1", 100, &c, 1);
+  tracker_upsert(M1, "CAA-1", 200, &c, 2);
+  tracker_upsert(M1, nullptr, 300, &c);
+  Track* d = &g_tracks[0];
+  CHECK(tracker_count() == 1 && !strcmp(d->uas, "SERIAL-1") && !strcmp(d->uas2, "CAA-1") && d->uas_type == 1,
+        "tracker: serial then registration on one address -> one contact, keyed on the serial");
+  tracker_upsert(M2, "CAA-1", 400, &c, 2);   // the registration from another address (BLE) finds it too
+  CHECK(tracker_count() == 1 && d->alt_mac_count == 1, "tracker: the registration alone from another address matches the contact");
+  memset(g_tracks, 0, sizeof g_tracks);
+  tracker_upsert(M1, "CAA-1", 100, &c, 2);
+  CHECK(tracker_count() == 1 && !strcmp(g_tracks[0].uas, "CAA-1") && g_tracks[0].uas_type == 2,
+        "tracker: a registration heard first names the contact for now");
+  tracker_upsert(M1, "SERIAL-1", 200, &c, 1);
+  CHECK(tracker_count() == 1 && !strcmp(g_tracks[0].uas, "SERIAL-1") && !strcmp(g_tracks[0].uas2, "CAA-1") && g_tracks[0].uas_type == 1,
+        "tracker: ...and steps aside when the serial arrives");
+  tracker_upsert(M1, "CAA-2", 300, &c, 2);
+  CHECK(tracker_count() == 2, "tracker: a second, different registration on the address is another contact");
 }
 
 // ------------------------------------------------------------- tx_core.h
@@ -476,12 +503,14 @@ static void test_rx(void) {
   for (int pg = 0; pg < 4; pg++) feed(SRC_BLE, M2, MSG(pack, 5 + pg), 25);
   CHECK(by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: first set verifies");
   uint8_t pack2[240]; build_signed(pack2, true, 200);            // second set: corrupted, page 0 last
+  s_rx_now += AUTH_VERIFY_MIN_MS;                                  // a new set comes at most once a second
   for (int pg = 1; pg < 4; pg++) feed(SRC_BLE, M2, MSG(pack2, 5 + pg), 25);
   CHECK(by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: the old verdict holds while the new set is incomplete");
   Serial.out.clear();
   feed(SRC_BLE, M2, MSG(pack2, 5), 25);
   CHECK(by_mac(M2)->auth_state == ODID_AUTH_INVALID && count_in(Serial.out, "\"state\":\"invalid\"") == 1, "rx: the late page 0 completes the new set, which fails as it should");
   uint8_t pack3[240]; build_signed(pack3, false, 300);            // third set: good again, page 0 last
+  s_rx_now += AUTH_VERIFY_MIN_MS;
   for (int pg = 1; pg < 4; pg++) feed(SRC_BLE, M2, MSG(pack3, 5 + pg), 25);
   feed(SRC_BLE, M2, MSG(pack3, 5), 25);
   CHECK(by_mac(M2)->auth_state == ODID_AUTH_TEST_KEY, "rx: and a good set after a bad one clears it");
@@ -494,6 +523,73 @@ static void test_rx(void) {
   feed(SRC_WIFI_BEACON, M2, MSG(pack, 1), 25);
   feed(SRC_BLE, M1, MSG(pack, 1), 25);
   CHECK(tracker_count() == 1, "rx: one aircraft on two addresses stays one contact through Location-only frames");
+
+  // A transmitter repeating one signed pack (the test beacon does 8/s; a
+  // hostile one could do 100/s) costs one Ed25519 check, not one per frame.
+  memset(g_tracks, 0, sizeof g_tracks);
+  n = build_signed(pack, false, 100);
+  uint32_t v0 = s_cnt_verify;
+  feed(SRC_WIFI_BEACON, M1, pack, n);
+  build_signed(pack2, true, 101);                 // a new set 50 ms after the last check: within the window
+  feed(SRC_WIFI_BEACON, M1, pack2, n);
+  CHECK(s_cnt_verify == v0 + 1 && by_mac(M1)->auth_state == ODID_AUTH_TEST_KEY,
+        "rx: a second set inside AUTH_VERIFY_MIN_MS waits, the last verdict standing");
+  s_rx_now += AUTH_VERIFY_MIN_MS;
+  feed(SRC_BLE, M1, MSG(pack, 1), 25);            // any frame of the contact past the window
+  CHECK(s_cnt_verify == v0 + 2 && by_mac(M1)->auth_state == ODID_AUTH_INVALID,
+        "rx: ...and is checked at the next frame past it");
+  s_rx_now += AUTH_VERIFY_MIN_MS;
+  for (int i = 0; i < 20; i++) feed(SRC_WIFI_BEACON, M1, pack, n);   // one a 50 ms, for a second
+  CHECK(s_cnt_verify == v0 + 3 && by_mac(M1)->auth_state == ODID_AUTH_TEST_KEY, "rx: a signed pack repeated 20 times is verified once");
+  for (int pg = 0; pg < 4; pg++) feed(SRC_BLE, M1, MSG(pack, 5 + pg), 25);   // the same set's pages, one per frame (BLE4)
+  feed(SRC_BLE, M1, MSG(pack, 1), 25);
+  CHECK(s_cnt_verify == v0 + 3 && by_mac(M1)->auth_state == ODID_AUTH_TEST_KEY,
+        "rx: ...and its pages coming round again one per frame add nothing");
+
+  // Serial and CAA registration in separate frames (BLE4 sends one message
+  // per advertisement): one contact, named by the serial, and the signature
+  // -- which covers the serial's Basic ID -- still assembles across the
+  // registration frames in between.
+  uint8_t caa[25] = {0};
+  caa[0] = 0x02; caa[1] = (2 << 4) | 2; memcpy(caa + 2, "CAA-REG-TEST-0001", 17);
+  memset(g_tracks, 0, sizeof g_tracks);
+  n = build_signed(pack, false, 300);
+  feed(SRC_BLE, M1, MSG(pack, 0), 25);
+  feed(SRC_BLE, M1, caa, 25);
+  feed(SRC_BLE, M1, MSG(pack, 1), 25);
+  feed(SRC_BLE, M1, MSG(pack, 5), 25);
+  feed(SRC_BLE, M1, caa, 25);
+  feed(SRC_BLE, M1, MSG(pack, 6), 25);
+  feed(SRC_BLE, M1, MSG(pack, 7), 25);
+  feed(SRC_BLE, M1, caa, 25);
+  feed(SRC_BLE, M1, MSG(pack, 8), 25);
+  feed(SRC_BLE, M1, MSG(pack, 1), 25);
+  Track* dt = by_mac(M1);
+  CHECK(tracker_count() == 1 && dt && !strcmp(dt->uas, "ORECCHINO-TX-AUTH") && !strcmp(dt->uas2, "CAA-REG-TEST-0001"),
+        "rx: serial and registration alternating in single-message frames stay one contact");
+  CHECK(dt && dt->auth_state == ODID_AUTH_TEST_KEY, "rx: ...and the signature assembles across the registration frames");
+  memset(g_tracks, 0, sizeof g_tracks);
+  feed(SRC_BLE, M1, caa, 25);                     // registration first
+  feed(SRC_BLE, M1, MSG(pack, 1), 25);
+  feed(SRC_BLE, M1, MSG(pack, 0), 25);
+  dt = by_mac(M1);
+  CHECK(tracker_count() == 1 && dt && !strcmp(dt->uas, "ORECCHINO-TX-AUTH") && !strcmp(dt->uas2, "CAA-REG-TEST-0001"),
+        "rx: registration first, serial later: one contact, named by the serial");
+  // A pack listing the registration before the serial (then Location and
+  // the four pages: seven messages) binds the signature to the serial all
+  // the same.
+  uint8_t pack4[240];
+  memcpy(pack4, pack, 3);
+  pack4[2] = 7;
+  memcpy(MSG(pack4, 0), caa, 25);
+  memcpy(MSG(pack4, 1), MSG(pack, 0), 25);
+  memcpy(MSG(pack4, 2), MSG(pack, 1), 25);
+  for (int pg = 0; pg < 4; pg++) memcpy(MSG(pack4, 3 + pg), MSG(pack, 5 + pg), 25);
+  memset(g_tracks, 0, sizeof g_tracks);
+  feed(SRC_WIFI_BEACON, M2, pack4, 3 + 7 * 25);
+  dt = by_mac(M2);
+  CHECK(dt && !strcmp(dt->uas, "ORECCHINO-TX-AUTH") && !strcmp(dt->uas2, "CAA-REG-TEST-0001") && dt->auth_state == ODID_AUTH_TEST_KEY,
+        "rx: a pack with the registration first still verifies against the serial");
 }
 
 static void unhex(const char* h, std::vector<uint8_t>& out) {
@@ -618,7 +714,7 @@ static void test_json_and_log(void) {
   const LogRec* r = log_at(0);
   CHECK(!strcmp(r->uas, "ORECCHINO-TX-AUTH") && r->src_mask == 1 && r->lat_e5 == 3780000 && r->max_height == 60,
         "log: the record keeps ID, source, position and height");
-  CHECK(r->first_utc == 1790000000 - set_ms / 1000 + first / 1000 && r->last_utc >= r->first_utc,
+  CHECK(r->first_utc == 1790000000 + (first - set_ms) / 1000 && r->last_utc >= r->first_utc,
         "log: times are wall-clock once set_time has arrived");
   s_rx_now += LOG_SAVE_MS + 1;
   rx_tick(s_rx_now);                              // debounced save
@@ -640,7 +736,7 @@ static void test_json_and_log(void) {
   CHECK(count_in(Serial.out, "\"type\":\"log\"") == 3 + TRK_MAX && count_in(Serial.out, "\"active\":true") == TRK_MAX &&
         Serial.out.find("\"type\":\"log_done\",\"n\":3,\"live\":16") != std::string::npos,
         "log: log_get sends every record, the live contacts, then log_done");
-  CHECK(count_in(Serial.out, "\"seq\":null") == TRK_MAX && json_has("\"next\":3,") && json_has("\"oldest\":0}"),
+  CHECK(count_in(Serial.out, "\"seq\":null") == TRK_MAX && json_has("\"next\":3,") && json_has("\"oldest\":0,"),
         "log: live contacts carry no seq, and next counts only ended records");
   CHECK(Serial.out.find("\"uas\":\"ORECCHINO-TX-AUTH\"") != std::string::npos && Serial.out.find("\"clock\":true") != std::string::npos,
         "log: records carry the ID, and log_done says the clock is set");
@@ -675,7 +771,7 @@ static void test_host_link_and_ble(void) {
   // test did one -- must not register it twice and deliver every line twice.
   ble_link_init("host-test", RX_CAPS);
   CHECK(s_host_sink_count == 1, "ble: the sink is registered once however often init runs");
-  ble_link_test_set_connected(true);
+  ble_link_test_set_connected(true, s_rx_now);
   ble_link_test_set_subscribed(true);
   ble_link_test_set_encrypted(true);
   ble_link_test_clear_tx();
@@ -742,17 +838,85 @@ static void test_host_link_and_ble(void) {
   CHECK(ble_link_test_get_tx().empty(), "ble: an unencrypted peer receives nothing");
   ble_link_test_set_connected(false);
   CHECK(!host_get_feed(SRC_BLE_BONDED), "ble: a disconnect turns the feed off for the next peer");
-  ble_link_test_set_connected(true); ble_link_test_set_subscribed(true); ble_link_test_set_encrypted(true);
+  ble_link_test_set_connected(true, s_rx_now); ble_link_test_set_subscribed(true); ble_link_test_set_encrypted(true);
   host_printf("{\"type\":\"rid\",\"uas\":\"TEST-UAS\"}\n");
   CHECK(ble_link_test_get_tx().empty(), "ble: ...so a new peer gets no rid until it asks");
+
+  // The device's own RX path (the line assembler behind onWrite): bytes on
+  // an unencrypted link go nowhere, nor on a Just Works pairing (encrypted
+  // but never authenticated by the passkey); a line past BLE_LINE_MAX is
+  // dropped whole and counted, and the one after it still runs.
+  ble_link_test_clear_tx();
+  ble_link_test_set_encrypted(false);
+  ble_cmd("{\"cmd\":\"feed\",\"on\":true}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(ble_link_test_get_tx().empty() && !host_get_feed(SRC_BLE_BONDED), "ble: a write on an unencrypted link is ignored");
+  ble_link_test_set_just_works();
+  double jl = 0, jo = 0; rx_get_home(&jl, &jo);
+  int held0 = 0; uint32_t age0 = 0; rx_log_stats(&held0, &age0);
+  ble_cmd("{\"cmd\":\"feed\",\"on\":true}\n");
+  ble_cmd("{\"cmd\":\"set_home\",\"lat\":1,\"lon\":2}\n");
+  ble_cmd("{\"cmd\":\"log_clear\"}\n");
+  ble_cmd("{\"cmd\":\"wifi_join\",\"ssid\":\"evil\",\"psk\":\"x\"}\n");
+  ble_link_poll(s_rx_now);
+  double jl2 = 0, jo2 = 0; rx_get_home(&jl2, &jo2);
+  int held1 = 0; uint32_t age1 = 0; rx_log_stats(&held1, &age1);
+  CHECK(ble_link_test_get_tx().empty() && !host_get_feed(SRC_BLE_BONDED) && jl2 == jl && jo2 == jo && held1 == held0 &&
+        !ble_link_peer_secure(), "ble: a Just Works peer (encrypted, not authenticated) runs nothing, and is not a secure peer");
+  host_printf("{\"type\":\"boot\",\"fw\":\"x\"}\n");
+  CHECK(ble_link_test_get_tx().empty(), "ble: ...and receives nothing");
+  ble_link_test_set_encrypted(true);
+  uint32_t rxd0 = ble_link_rx_drops();
+  std::string longline(BLE_LINE_MAX + 100, 'x');
+  ble_cmd(longline.c_str()); ble_cmd("\n");
+  ble_cmd("{\"cmd\":\"feed\",\"on\":true}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(ble_link_rx_drops() == rxd0 + 1 && host_get_feed(SRC_BLE_BONDED) && tx_count_in("feed_status") == 1,
+        "ble: an over-long line is dropped whole and counted; the next line runs");
+  ble_cmd("{\"cmd\":\"feed\",\"on\":false}\n");
+  ble_link_poll(s_rx_now);
+
+  // A cut reply is reported: the ring refuses the third line of a log_get,
+  // so the client gets two records, then log_done with err and next = its
+  // own since, and asks again.
+  ble_link_test_clear_tx();
+  uint32_t rd0 = host_reply_drops(SRC_BLE_BONDED);
+  ble_link_test_ctl_fail_at(3);
+  ble_cmd("{\"cmd\":\"log_get\",\"since\":5}\n");
+  ble_link_poll(s_rx_now);
+  {
+    const auto& t = ble_link_test_get_tx();
+    CHECK(t.size() == 3 && count_in(t[0], "\"type\":\"log\"") == 1 && count_in(t[1], "\"type\":\"log\"") == 1 &&
+          t[2].find("\"type\":\"log_done\"") != std::string::npos && t[2].find("\"err\":\"dropped\"") != std::string::npos &&
+          t[2].find("\"next\":5,") != std::string::npos && host_reply_drops(SRC_BLE_BONDED) == rd0 + 1,
+          "ble: a record the ring refused ends the reply: log_done says dropped, next = since");
+  }
+  ble_link_test_clear_tx();
+  ble_cmd("{\"cmd\":\"log_get\",\"since\":5}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(tx_count_in("\"type\":\"log\"") == (size_t)TRK_MAX && tx_count_in("\"err\"") == 0 && tx_count_in("\"log_id\":") == 1,
+        "ble: ...and the next log_get comes whole, log_done carrying the log identity");
+  // A peer that stopped reading altogether: the loop pays one bounded wait
+  // for the first record and one for log_done, never one per record.
+  ble_link_test_clear_tx();
+  ble_link_test_ctl_dead(true);
+  uint32_t t0 = g_millis;
+  rd0 = host_reply_drops(SRC_BLE_BONDED);
+  ble_cmd("{\"cmd\":\"log_get\"}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(ble_link_test_get_tx().empty() && host_reply_drops(SRC_BLE_BONDED) == rd0 + 2 && g_millis - t0 == 2 * HOST_CTL_WAIT_MS,
+        "ble: a dead peer costs a log_get two waits (record, log_done), nothing more");
+  ble_link_test_ctl_dead(false);
+  ble_cmd("{\"cmd\":\"log_get\"}\n");
+  ble_link_poll(s_rx_now);
+  CHECK(tx_count_in("log_done") == 1 && tx_count_in("\"err\"") == 0, "ble: ...and the ring takes replies again once it drains");
 
   // Location push over BLE updates home location
   ble_cmd("{\"cmd\":\"set_home\",\"lat\":37.7749,\"lon\":-122.4194,\"alt\":15.0,\"acc\":3.5,\"src\":\"ble\"}\n");
   ble_link_poll(s_rx_now);
-  CHECK(fabs(g_home_lat - 37.7749) < 0.0001 && fabs(g_home_lon - (-122.4194)) < 0.0001,
-        "home: location push updates coordinates");
-  CHECK(fabs(g_home_acc - 3.5f) < 0.01f && !strcmp(g_home_src, "ble"),
-        "home: accuracy and source set");
+  double hlat = 0, hlon = 0;
+  CHECK(rx_get_home(&hlat, &hlon) && fabs(hlat - 37.7749) < 0.0001 && fabs(hlon - (-122.4194)) < 0.0001 && !strcmp(g_home_src, "ble"),
+        "home: location push updates coordinates and source");
 
   // Channel hop hold
   rx_hop_hold(true);
@@ -760,6 +924,56 @@ static void test_host_link_and_ble(void) {
   rx_hop_hold(false);
   CHECK(!rx_hop_is_held(), "hop: channel hop hold cleared");
   ble_link_test_set_connected(false);
+
+  // The pairing deadline: a peer connected but not encrypted is dropped
+  // after BLE_PAIR_DEADLINE_MS, a paired one is kept.
+  ble_link_test_set_connected(true, s_rx_now);
+  ble_link_poll(s_rx_now + BLE_PAIR_DEADLINE_MS);
+  CHECK(ble_link_test_connected(), "ble: an unpaired peer is kept until the deadline");
+  ble_link_poll(s_rx_now + BLE_PAIR_DEADLINE_MS + 1);
+  CHECK(!ble_link_test_connected(), "ble: ...and dropped past it");
+  ble_link_test_set_connected(true, s_rx_now); ble_link_test_set_encrypted(true);
+  ble_link_poll(s_rx_now + BLE_PAIR_DEADLINE_MS + 1);
+  CHECK(ble_link_test_connected(), "ble: a paired peer stays");
+  ble_link_test_set_connected(true, s_rx_now); ble_link_test_set_just_works();
+  ble_link_poll(s_rx_now + BLE_PAIR_DEADLINE_MS + 1);
+  CHECK(!ble_link_test_connected(), "ble: a Just Works peer counts as unpaired and is dropped at the deadline");
+  ble_link_test_set_connected(false);
+}
+
+// ------------------------------------------------ USB under backpressure
+
+// A host that stops reading (the Mac app closes the port with the cable
+// in: HWCDC::write then blocks ~2 s a call) must cost the decode task
+// nothing: feed lines are refused at once and counted, a reply waits once.
+static void test_usb_backpressure(void) {
+  Serial.out.clear();
+  host_link_test_stall_usb(true);
+  uint32_t t0 = g_millis, d0 = host_usb_drops();
+  for (int i = 0; i < 50; i++) host_printf("{\"type\":\"rid\",\"i\":%d}\n", i);
+  CHECK(g_millis == t0 && host_usb_drops() == d0 + 50 && Serial.out.empty(),
+        "usb: with the host stalled, 50 feed lines cost no time and are dropped, counted");
+  uint32_t r0 = host_reply_drops(SRC_SERIAL);
+  for (int i = 0; i < 20; i++) host_printf_to(SRC_SERIAL, "{\"type\":\"fs_ok\",\"i\":%d}\n", i);
+  CHECK(g_millis - t0 == HOST_CTL_WAIT_MS && host_reply_drops(SRC_SERIAL) == r0 + 20 && host_usb_drops() == d0 + 70,
+        "usb: 20 replies wait once, HOST_CTL_WAIT_MS in all, then drop without waiting");
+  t0 = g_millis;
+  Serial.in = "{\"cmd\":\"log_get\"}\n"; Serial.in_pos = 0;
+  rx_tick(s_rx_now);
+  CHECK(g_millis - t0 == HOST_CTL_WAIT_MS && Serial.out.empty(), "usb: a log_get to the stalled host costs one more wait (log_done's) and sends nothing");
+  host_link_test_stall_usb(false);
+  Serial.out.clear();
+  host_printf("{\"type\":\"rid\",\"i\":99}\n");
+  emit_heartbeat();
+  char want[32]; snprintf(want, sizeof want, "\"usb_drop\":%lu", (unsigned long)host_usb_drops());
+  CHECK(count_in(Serial.out, "\"type\":\"rid\"") == 1 && json_has(want), "usb: lines flow again once the host reads, the heartbeat reports usb_drop");
+  // The ring refuses one line of a log reply: log_done says so and does not move the cursor.
+  Serial.out.clear();
+  host_link_test_usb_fail_at(2);
+  Serial.in = "{\"cmd\":\"log_get\",\"since\":7}\n"; Serial.in_pos = 0;
+  rx_tick(s_rx_now);
+  CHECK(count_in(Serial.out, "\"type\":\"log\"") == 1 && json_has("\"err\":\"dropped\"") && json_has("\"next\":7,"),
+        "usb: a cut log reply says dropped, next = since");
 }
 
 // ------------------------------------------------ what a host may not do
@@ -778,13 +992,13 @@ static void test_host_input_limits(void) {
   CHECK(Serial.out.empty(), "limits: an over-long host_printf line is dropped, not over-read");
 
   // set_time: 0, negative, before 2024, past uint32, NaN all refused.
-  uint32_t before = s_utc_at_boot;
+  uint32_t before = s_utc_set;
   const char* bad_times[] = { "0", "-5", "1000000", "1e20", "nan" };
   for (const char* v : bad_times) {
     char l[80]; snprintf(l, sizeof l, "{\"cmd\":\"set_time\",\"utc\":%s}\n", v);
     serial_cmd(l);
   }
-  CHECK(s_utc_at_boot == before, "limits: set_time refuses 0, negative, pre-2024, huge and NaN");
+  CHECK(s_utc_set == before, "limits: set_time refuses 0, negative, pre-2024, huge and NaN");
   serial_cmd("{\"cmd\":\"set_time\",\"utc\":1790000000}\n");
   CHECK(log_utc(s_rx_now) == 1790000000, "limits: ...and takes a real time");
 
@@ -801,6 +1015,13 @@ static void test_host_input_limits(void) {
   serial_cmd("{\"cmd\":\"log_get\",\"since\":1e30,\"after_utc\":-4}\n");
   CHECK(json_has("\"type\":\"log_done\""), "limits: log_get with an absurd cursor still answers");
 
+  // An over-long USB line is dropped whole: its tail must not run as a
+  // command of its own (it used to), and the line after it still does.
+  Serial.out.clear();
+  std::string tail(RX_HOST_LINE_MAX, 'x');
+  serial_cmd((tail + "{\"cmd\":\"log_get\"}\n{\"cmd\":\"feed\",\"on\":true}\n").c_str());
+  CHECK(!json_has("log_done") && count_in(Serial.out, "feed_status") == 1, "limits: an over-long USB line is dropped whole, the next one runs");
+
   // Tile paths: only /tiles/<z>/<x>/<y>.png may be written.
   CHECK(tile_path_ok("/tiles/14/2620/6332.png") && tile_path_ok("/tiles/0/0/0.png") &&
         tile_path_ok("/tiles/14/2620/6332.jpg"), "tiles: z/x/y.png and .jpg accepted");
@@ -816,10 +1037,18 @@ static void test_host_input_limits(void) {
   CHECK(!tile_rm_path_ok("/tiles/../log/records.bin") && !tile_rm_path_ok("/tiles/14/../../x") &&
         !tile_rm_path_ok("/tiles//x") && !tile_rm_path_ok("/tiles/") && !tile_rm_path_ok("/tiles/a b") &&
         !tile_rm_path_ok("/tiles/14/.."), "tiles: ...but nothing that climbs out");
+  CHECK(!tile_rm_path_ok(TILE_SOURCE_MARK) && tile_rm_path_ok("/tiles/.srcx"),
+        "tiles: ...nor the basemap mark (removing it would wipe every tile at the next boot)");
   CHECK(tile_bytes_needed(20000, 6u << 20) == 20000 + TILE_FS_MARGIN, "tiles: a tile needs its size plus the margin");
   CHECK(tile_bytes_needed(0, 6u << 20) == 0 && tile_bytes_needed(TILE_FILE_MAX + 1, 6u << 20) == 0 &&
         tile_bytes_needed(UINT32_MAX, 6u << 20) == 0 && tile_bytes_needed(200000, 100000) == 0,
         "tiles: empty, huge, 4 GB and larger-than-the-disk files refused (no wrap, no evict-all)");
+  // A JPEG the boards cannot decode (past 64 KB, the T5's own fetch cap) is refused at fs_begin; a PNG keeps the 256 KB limit.
+  CHECK(tile_file_max("/tiles/14/2620/6332.jpg") == TILE_JPEG_MAX && tile_file_max("/tiles/14/2620/6332.png") == TILE_FILE_MAX &&
+        tile_bytes_needed(TILE_JPEG_MAX, 6u << 20, tile_file_max("/tiles/1/1/1.jpg")) == TILE_JPEG_MAX + TILE_FS_MARGIN &&
+        tile_bytes_needed(TILE_JPEG_MAX + 1, 6u << 20, tile_file_max("/tiles/1/1/1.jpg")) == 0 &&
+        tile_bytes_needed(100000, 6u << 20, tile_file_max("/tiles/1/1/1.png")) == 100000 + TILE_FS_MARGIN,
+        "tiles: a .jpg past 64 KB is refused, a .png up to 256 KB is not");
 }
 
 // ------------------------------------------------ timestamps across tasks
@@ -838,6 +1067,35 @@ static void test_wrap(void) {
   s_log_dirty = true; s_log_dirty_ms = 80000;
   CHECK(!log_due(79990) && log_due(80000 + LOG_SAVE_MS), "wrap: a log save stamped after now is not overdue");
   s_log_dirty = dirty; s_log_dirty_ms = dms;
+}
+
+// The log's clock across the 49.7-day millis() wrap: a contact stamped
+// after the wrap must read as later than the set point, not 4,294,967 s
+// earlier (a dongle left running, or a T5 without Wi-Fi, saw exactly that).
+static void test_clock_wrap(void) {
+  log_clear();
+  memset(g_tracks, 0, sizeof g_tracks);
+  s_rx_now = 4000000000u;
+  rx_tick(s_rx_now);
+  serial_cmd("{\"cmd\":\"set_time\",\"utc\":1790000000}\n");
+  uint32_t set_ms = s_rx_now;
+  CHECK(log_utc(set_ms + 5000) == 1790000005 && log_utc(set_ms - 5000) == 1789999995, "wrap: the clock runs both ways from the set point");
+  for (int k = 0; k < 4; k++) { s_rx_now += 100000000u; rx_tick(s_rx_now); }   // 4.6 days on: millis() has wrapped
+  CHECK(s_rx_now < set_ms && log_utc(s_rx_now) == 1790000000 + 400000, "wrap: 400,000 s later, past the wrap, the clock says 400,000 s later");
+  uint8_t pack[240];
+  build_signed(pack, false);
+  feed(SRC_WIFI_BEACON, M1, MSG(pack, 0), 25);
+  uint32_t first = s_rx_now;
+  s_rx_now += TRK_EXPIRE_MS + 10000;
+  rx_tick(s_rx_now);
+  const LogRec* r = s_log_n ? log_at(s_log_n - 1) : nullptr;
+  CHECK(r && r->first_utc == 1790000000 + (uint32_t)(((uint64_t)400000000 + (first - (set_ms + 400000000u))) / 1000),
+        "wrap: a contact heard after the wrap is logged at the right UTC");
+  int held = 0; uint32_t age = 0;
+  g_millis = s_rx_now;   // rx_log_stats reads millis() itself (the harness keeps two clocks)
+  rx_log_stats(&held, &age);
+  CHECK(held == 1 && age < 1000, "wrap: ...and its age on a screen is minutes, not decades");
+  log_clear();
 }
 
 // ------------------------------------------------ match log sync protocol
@@ -870,7 +1128,7 @@ static void test_log_sync(void) {
   std::string o = log_get("");
   CHECK(json_has("\"seq\":0,") && json_has("\"seq\":1,") && json_has("\"seq\":2,") && count_in(o, "\"seq\":null") == 1,
         "sync: ended records are numbered 0..2, the live contact is not");
-  CHECK(json_has("\"total\":3,") && json_has("\"next\":3,") && json_has("\"oldest\":0}") && json_has("\"live\":1,"),
+  CHECK(json_has("\"total\":3,") && json_has("\"next\":3,") && json_has("\"oldest\":0,") && json_has("\"live\":1,"),
         "sync: log_done says next = total = 3 (live not counted), oldest 0");
 
   o = log_get(",\"since\":2");
@@ -896,16 +1154,39 @@ static void test_log_sync(void) {
   // More than the ring holds: oldest moves up with the rotation.
   for (int i = 0; i < LOG_MAX; i++) { uint8_t m[6] = {2, 0, 0, 0, 0x20, (uint8_t)i}; end_contact(m, nullptr); }
   o = log_get(",\"since\":0");
-  char want[48]; snprintf(want, sizeof want, "\"oldest\":%u}", (unsigned)(s_log_total - LOG_MAX));
+  char want[48]; snprintf(want, sizeof want, "\"oldest\":%u,", (unsigned)(s_log_total - LOG_MAX));
   CHECK(json_has(want) && count_in(o, "\"type\":\"log\"") == LOG_MAX, "sync: oldest = total - LOG_MAX once the ring has rotated");
 
   // An explicit flush saves at once (power-off, mode switch).
   end_contact(M2, "FLUSH");
   CHECK(s_log_dirty, "flush: a new record is pending");
   rx_log_flush();
-  memset(s_log, 0, LOG_BYTES); s_log_n = 0; s_log_head = 0; s_log_total = 0;
+  uint32_t id_saved = s_log_id;
+  memset(s_log, 0, LOG_BYTES); s_log_n = 0; s_log_head = 0; s_log_total = 0; s_log_id = 0;
   log_load();
   CHECK(!s_log_dirty && s_log_n == LOG_MAX && !strcmp(log_at(LOG_MAX - 1)->uas, "FLUSH"), "flush: rx_log_flush writes it to NVS");
+  CHECK(s_log_id == id_saved && id_saved != 0, "flush: ...with the log's identity");
+
+  // The log identity: on every log_done, changed by a clear (announced on
+  // log_cleared), and a board without one (older NVS) makes one up and
+  // saves it.
+  {
+    char want[40]; snprintf(want, sizeof want, "\"log_id\":%lu}", (unsigned long)id_saved);
+    o = log_get(",\"since\":0");
+    CHECK(json_has(want), "sync: log_done carries log_id");
+    Serial.out.clear();
+    rx_log_clear_all();
+    snprintf(want, sizeof want, "\"log_cleared\",\"log_id\":%lu}", (unsigned long)(id_saved + 1));
+    CHECK(s_log_id == id_saved + 1 && json_has(want), "sync: a clear bumps log_id and log_cleared announces the new one");
+    s_log_id = 0; log_load();
+    CHECK(s_log_id == id_saved + 1, "sync: the bumped identity was saved at once with the clear");
+    shim_nvs().erase("orlog/id");
+    s_log_dirty = false; s_log_id = 0; log_load();
+    CHECK(s_log_id != 0 && s_log_dirty && log_due(s_rx_now), "sync: a log without an identity is given one, due to be saved");
+    rx_log_flush();
+    for (int i = 0; i < LOG_MAX; i++) { uint8_t m[6] = {2, 0, 0, 0, 0x21, (uint8_t)i}; end_contact(m, nullptr); }
+    end_contact(M2, "FLUSH");
+  }
 
   // v1 migration: numbers follow history order, not ring slots.
   {
@@ -1157,8 +1438,10 @@ int main(void) {
   test_sniffer();
   test_json_and_log();
   test_host_link_and_ble();
+  test_usb_backpressure();
   test_host_input_limits();
   test_wrap();
+  test_clock_wrap();
   test_log_sync();
   test_odid_extras();
   test_rid_fields();

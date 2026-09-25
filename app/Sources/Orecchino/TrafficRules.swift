@@ -305,7 +305,7 @@ public enum TrafficRules {
         let brg = compass8(a.bearingDeg ?? 0)
         a.text = "LOW TRAFFIC \(brg) \(dist)" + (a.onGround ? ", AIRCRAFT ON GROUND"
             : a.heightUnknown ? ", HEIGHT UNKNOWN" : (a.approx ? ", APPROX." : ""))
-        a.vertRel = a.vertM == nil ? .unknown : .above
+        a.vertRel = vertRel(a.vertM)
         a.action = "BE READY TO LAND DRONES"
         let v = a.vertM.map { Int(floor($0 + 0.5)) } ?? 0
         let ab = a.approx ? "ABOUT " : ""
@@ -409,7 +409,7 @@ public enum TrafficRules {
                 let eligible = canRaise && d.live && age < freshS
                 let nearRaw = eligible && horiz <= nearHM && (vert.isNaN || abs(vert) <= nearVM)
                 let convRaw = eligible && !cpaS.isNaN && cpaM < cpaMissM && (vcpa.isNaN || abs(vcpa) <= nearVM)
-                let hold = horiz <= holdHM && (vert.isNaN || abs(vert) <= holdVM)
+                let hold = d.live && horiz <= holdHM && (vert.isNaN || abs(vert) <= holdVM)
                 let kind: TrafficKind = nearRaw ? .near : .converging
                 let c = TrafficAlert(level: kind.level(onGround: a.onGround), kind: kind, held: false,
                                      heightUnknown: vert.isNaN, onGround: a.onGround,
@@ -424,15 +424,17 @@ public enum TrafficRules {
 
         // LOW: airborne aircraft in UAS airspace.
         let obsPos = known(obs.lat) && known(obs.lon)
-        var ground = Double.nan
+        // The fallback ground (see LOW in traffic.h): the observer's
+        // elevation, else the lowest live drone's alt_geo minus its height.
+        var fallback = Double.nan
         if altKnown(obs.elevM) {
-            ground = obs.elevM!
+            fallback = obs.elevM!
         } else {
             var lowest = Double.nan
             for d in drones {
                 guard d.live, let la = d.lat, let lo = d.lon, la.isFinite, lo.isFinite else { continue }
                 guard altKnown(d.altGeoM), let h = d.heightM, h.isFinite else { continue }
-                if lowest.isNaN || d.altGeoM! < lowest { lowest = d.altGeoM!; ground = d.altGeoM! - h }
+                if lowest.isNaN || d.altGeoM! < lowest { lowest = d.altGeoM!; fallback = d.altGeoM! - h }
             }
         }
         for (j, a) in ac.enumerated() {
@@ -462,6 +464,12 @@ public enum TrafficRules {
                 }
             }
             if !fromObs && anchor == nil { continue }
+            // Ground under the anchor: the anchor drone's alt_geo minus its
+            // height, else the fallback.
+            var ground = fallback
+            if let anchor, altKnown(drones[anchor].altGeoM), let dh = drones[anchor].heightM, dh.isFinite {
+                ground = drones[anchor].altGeoM! - dh
+            }
             var h = Double.nan
             var approx = false
             if altKnown(a.altGeomM) { h = a.altGeomM! } else if altKnown(a.altBaroM) { h = a.altBaroM!; approx = true }
@@ -512,7 +520,7 @@ public enum TrafficRules {
         let n = r.alerts.count
         if n == 0 { return "conflict watch on, no ADS-B conflicts, data \(a) s old" }
         let low = r.alerts.filter { $0.kind == .low }.count, conf = n - low
-        let l = low > 0 ? "\(low) low aircraft, " : ""
+        let l = low > 0 ? "low traffic, " : ""     // never a count of aircraft
         let c = conf > 0 ? "\(conf) ADS-B conflict\(conf == 1 ? "" : "s"), " : ""
         return "conflict watch on, \(l)\(c)data \(a) s old"
     }
@@ -640,7 +648,12 @@ public struct TrafficHostFeed {
             cand.append((d, i, a))
         }
         cand.sort { $0.d != $1.d ? $0.d < $1.d : $0.i < $1.i }
-        aircraft = cand.prefix(TrafficRules.maxAircraft).map { $0.a }
+        var taken: [TrafficAircraft] = []
+        var seen = Set<String>()
+        for c in cand where taken.count < TrafficRules.maxAircraft && seen.insert(c.a.hex).inserted {
+            taken.append(c.a)                       // one entry per hex, its nearest copy
+        }
+        aircraft = taken
         haveData = true
         self.dataMs = dataMs
     }

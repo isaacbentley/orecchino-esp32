@@ -42,6 +42,12 @@ public struct URLSessionAdsbFetcher: AdsbFetching {
         cfg.timeoutIntervalForRequest = timeout
         cfg.timeoutIntervalForResource = timeout * 2
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // Named, as TileSync's session is: adsb.lol asks that clients identify
+        // themselves. (Outside the .app bundle, say under swift test, there is
+        // no version string; 1.0 then.)
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        cfg.httpAdditionalHeaders =
+            ["User-Agent": "Orecchino/\(version) (macOS; manned traffic near an Orecchino receiver; 1 request/10 s)"]
         session = URLSession(configuration: cfg)
     }
 
@@ -79,9 +85,11 @@ public enum AdsbLol {
     public static func url(template: String = defaultTemplate, lat: Double, lon: Double,
                            radiusNM: Int = radiusNM) -> URL? {
         guard lat.isFinite, lon.isFinite, abs(lat) <= 90, abs(lon) <= 180 else { return nil }
+        // Two decimals (about 1 km) are plenty against a 6 NM radius, and the
+        // request then says less about where this Mac is.
         let s = template
-            .replacingOccurrences(of: "{lat}", with: String(format: "%.4f", lat))
-            .replacingOccurrences(of: "{lon}", with: String(format: "%.4f", lon))
+            .replacingOccurrences(of: "{lat}", with: String(format: "%.2f", lat))
+            .replacingOccurrences(of: "{lon}", with: String(format: "%.2f", lon))
             .replacingOccurrences(of: "{radius}", with: String(radiusNM))
         return URL(string: s)
     }

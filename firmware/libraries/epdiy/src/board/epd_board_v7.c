@@ -1,3 +1,12 @@
+/*
+ * Orecchino patch (see THIRD_PARTY.md): this file differs from epdiy 2.1.3.
+ * Board bring-up no longer aborts on an I2C error (ESP_ERROR_CHECK replaced
+ * by logged errors), CFG_INTR is pulled up, the bus and the PCA9555 get
+ * 15 ms to settle, pca9555_set_config is retried up to five times with an
+ * i2c_master_bus_reset between tries, and the PWRGOOD waits in
+ * epd_board_poweron and epd_board_measure_vcom give up after 200 tries of
+ * 1 ms instead of spinning forever. The file stays LGPL-3.0-or-later.
+ */
 #include <stdint.h>
 #include "epd_board.h"
 #include "epdiy.h"

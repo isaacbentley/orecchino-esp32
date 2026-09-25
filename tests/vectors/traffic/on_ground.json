@@ -10,6 +10,18 @@
   "t=26: only aircraft on the ground in the set; UAL274's NEAR warning is held (out of the set) until 20 s later.",
   "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation -28 m): a12b2e at t=5 'LOW TRAFFIC E 1.6 KM, AIRCRAFT ON GROUND' ('BE READY TO LAND DRONES; AIRCRAFT ON GROUND, 1.6 KM E'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
  ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a0ad1d",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 300.0,
+   "vert_m": null,
+   "bearing_deg": 270.0,
+   "why": "the drone was placed 300 m E of the parked UAL1668"
+  }
+ ],
  "observer": {
   "lat": 37.62,
   "lon": -122.38,
@@ -388,7 +400,7 @@
     "stale": false,
     "highest": "warning",
     "aircraft_count": 8,
-    "summary": "conflict watch on, 1 low aircraft, 6 ADS-B conflicts, data 1 s old",
+    "summary": "conflict watch on, low traffic, 6 ADS-B conflicts, data 1 s old",
     "alerts": [
      {
       "level": "warning",

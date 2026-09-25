@@ -50,8 +50,8 @@ private func loadVectors() throws -> [(String, [String: Any])] {
 @Suite struct TrafficRulesTests {
     @Test func everyVectorFile() throws {
         let vectors = try loadVectors()
-        #expect(vectors.count >= 12)
-        var ruleFiles = 0, steps = 0, alerts = 0, cases = 0
+        #expect(vectors.count >= 16)
+        var ruleFiles = 0, steps = 0, alerts = 0, cases = 0, hand = 0
         for (file, v) in vectors {
             if let cs = v["cases"] as? [[String: Any]] {
                 cases += try runHostLines(file, v, cs)
@@ -60,17 +60,51 @@ private func loadVectors() throws -> [(String, [String: Any])] {
                 let r = try runRules(file, v, st)
                 steps += r.0
                 alerts += r.1
+                hand += r.2
             } else {
                 Issue.record("\(file): unknown vector shape")
             }
         }
-        #expect(ruleFiles >= 11 && steps >= 37 && alerts >= 90 && cases >= 8,
-                "coverage: \(ruleFiles) rule files, \(steps) steps, \(alerts) alerts, \(cases) host cases")
+        #expect(ruleFiles >= 15 && steps >= 60 && alerts >= 180 && cases >= 9 && hand >= 40,
+                "coverage: \(ruleFiles) rule files, \(steps) steps, \(alerts) alerts, \(cases) host cases, \(hand) hand checks")
     }
 
-    private func runRules(_ file: String, _ v: [String: Any], _ steps: [[String: Any]]) throws -> (Int, Int) {
+    /// The vector's "hand_checks": numbers derived by hand from the scenario
+    /// (right triangles, the CPA formula), never from an implementation, so a
+    /// geometry slip shared by all three ports still fails. horiz/vert within
+    /// tol_m (0.5 m unless given), bearing within 0.05 deg, cpa within 0.05 s;
+    /// a null field must be unknown; an absent one is not checked.
+    private func runHandChecks(_ ctx: String, _ v: [String: Any], _ ts: Double, _ r: TrafficResult) -> Int {
+        var n = 0
+        for c in v["hand_checks"] as? [[String: Any]] ?? [] where dbl(c["t_s"]) == ts {
+            let m = r.alerts.filter { a in
+                a.hex == c["hex"] as? String
+                    && (c["drone"] == nil || a.droneId == c["drone"] as? String)
+                    && (c["kind"] == nil || a.kind.name == c["kind"] as? String)
+            }
+            #expect(m.count == 1, "\(ctx): hand check \(c["hex"] ?? "") finds one alert (\(m.count))")
+            guard m.count == 1, let a = m.first else { continue }
+            let tol = dbl(c["tol_m"]) ?? 0.5
+            if c.keys.contains("horiz_m") {
+                #expect(close(a.horizM, c["horiz_m"], tol), "\(ctx): hand \(a.hex) horiz \(String(describing: a.horizM)) want \(c["horiz_m"] ?? "")")
+            }
+            if c.keys.contains("vert_m") {
+                #expect(close(a.vertM, c["vert_m"], tol), "\(ctx): hand \(a.hex) vert \(String(describing: a.vertM)) want \(c["vert_m"] ?? "")")
+            }
+            if c.keys.contains("bearing_deg") {
+                #expect(close(a.bearingDeg, c["bearing_deg"], 0.05), "\(ctx): hand \(a.hex) bearing \(String(describing: a.bearingDeg)) want \(c["bearing_deg"] ?? "")")
+            }
+            if c.keys.contains("cpa_s") {
+                #expect(close(a.cpaS, c["cpa_s"], 0.05), "\(ctx): hand \(a.hex) cpa \(String(describing: a.cpaS)) want \(c["cpa_s"] ?? "")")
+            }
+            n += 1
+        }
+        return n
+    }
+
+    private func runRules(_ file: String, _ v: [String: Any], _ steps: [[String: Any]]) throws -> (Int, Int, Int) {
         var state = TrafficState()
-        var alertsChecked = 0
+        var alertsChecked = 0, hand = 0
         for step in steps {
             let ts = try #require(dbl(step["t_s"]))
             let ctx = "\(file) t=\(ts)"
@@ -127,8 +161,9 @@ private func loadVectors() throws -> [(String, [String: Any])] {
                 if let j = a.droneIndex { #expect(drones[j].id == a.droneId) }
                 alertsChecked += 1
             }
+            hand += runHandChecks(ctx, v, ts, r)
         }
-        return (steps.count, alertsChecked)
+        return (steps.count, alertsChecked, hand)
     }
 
     private func runHostLines(_ file: String, _ v: [String: Any], _ cases: [[String: Any]]) throws -> Int {

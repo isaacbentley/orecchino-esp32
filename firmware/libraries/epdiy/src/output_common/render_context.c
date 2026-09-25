@@ -1,3 +1,9 @@
+/*
+ * Orecchino patch (see THIRD_PARTY.md): this file differs from epdiy 2.1.3.
+ * prepare_context_for_next_frame clears the frame_started flag that the
+ * output_lcd/render_lcd.c patch added to RenderContext_t, so the LCD frame
+ * is started exactly once per frame. The file stays LGPL-3.0-or-later.
+ */
 #include "render_context.h"
 
 #include <string.h>

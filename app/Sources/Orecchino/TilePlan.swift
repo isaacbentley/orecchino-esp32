@@ -72,12 +72,36 @@ enum TilePlanner {
         if r < 0 { return false }
         let w = lonOf(Double(x), z), e = lonOf(Double(x) + 1, z)
         let n = latOf(Double(y), z), s = latOf(Double(y) + 1, z)
+        // The centre in the tile's frame (within 180° of the tile's middle):
+        // across the antimeridian its nearest edge is the one 360° away in
+        // raw longitude, which a plain clamp would miss.
+        let mid = (w + e) * 0.5
+        var lo = lon
+        if lo - mid > 180 { lo -= 360 } else if mid - lo > 180 { lo += 360 }
         let plat = lat < s ? s : (lat > n ? n : lat)
-        let plon = lon < w ? w : (lon > e ? e : lon)
-        return distM(lat, lon, plat, plon) <= r
+        let plon = lo < w ? w : (lo > e ? e : lo)
+        return distM(lat, lo, plat, plon) <= r
     }
 
+    /// The columns run west to east from x0 to x1 and may wrap past the
+    /// antimeridian: x0 > x1 means x0...lim, then 0...x1 (a circle
+    /// straddling ±180 holds tiles on both sides). Walk them with
+    /// boxColumns; rows never wrap. (tile_plan.h TileBox)
     struct Box { var x0, y0, x1, y1: Int32 }
+
+    /// How many columns the box spans (wrapping counted through).
+    static func boxCols(_ b: Box, z: Int) -> UInt32 {
+        let n = Int32(1 << z)
+        return b.x0 <= b.x1 ? UInt32(b.x1 - b.x0 + 1) : UInt32(n - b.x0 + b.x1 + 1)
+    }
+    /// The i-th column of the box (0 <= i < boxCols), wrapped.
+    static func boxCol(_ b: Box, z: Int, _ i: UInt32) -> Int32 {
+        Int32((UInt32(bitPattern: b.x0) &+ i) & UInt32((1 << z) - 1))
+    }
+    /// The box's columns, west to east, wrapped at the antimeridian.
+    static func boxColumns(_ b: Box, z: Int) -> [Int32] {
+        (0..<boxCols(b, z: z)).map { boxCol(b, z: z, $0) }
+    }
 
     static func circleBox(lat: Double, lon: Double, r rIn: Double, z: Int) -> Box {
         let r = rIn < 0 ? 0 : rIn
@@ -87,27 +111,35 @@ enum TilePlanner {
         var n = lat + dlat, s = lat - dlat
         if n > 85.0 { n = 85.0 }
         if s < -85.0 { s = -85.0 }
-        let a = tileOf(lat: n, lon: lon - dlon, z: z), b = tileOf(lat: s, lon: lon + dlon, z: z)
-        return Box(x0: a.x, y0: a.y, x1: b.x, y1: b.y)
+        // Across the antimeridian the west/east edges wrap round (x0 > x1);
+        // a circle wider than the world takes every column.
+        var w = lon - dlon, e = lon + dlon
+        if w < -180.0 { w += 360.0 }
+        if e > 180.0 { e -= 360.0 }
+        let a = tileOf(lat: n, lon: w, z: z), b = tileOf(lat: s, lon: e, z: z)
+        var box = Box(x0: a.x, y0: a.y, x1: b.x, y1: b.y)
+        if dlon >= 180.0 { box.x0 = 0; box.x1 = Int32(1 << z) - 1 }
+        return box
     }
 
     static func circleCount(lat: Double, lon: Double, r: Double, z: Int) -> UInt32 {
         if r < 0 { return 0 }
         let b = circleBox(lat: lat, lon: lon, r: r, z: z)
         var n: UInt32 = 0
-        if b.x0 <= b.x1 && b.y0 <= b.y1 {
-            for x in b.x0...b.x1 { for y in b.y0...b.y1 where inCircle(lat: lat, lon: lon, r: r, z: z, x: x, y: y) { n += 1 } }
+        if b.y0 <= b.y1 {
+            for x in boxColumns(b, z: z) { for y in b.y0...b.y1 where inCircle(lat: lat, lon: lon, r: r, z: z, x: x, y: y) { n += 1 } }
         }
         return n
     }
 
-    /// Every tile of the circle at zoom z (x, then y ascending).
+    /// Every tile of the circle at zoom z (columns west to east, then y
+    /// ascending; tile_plan_next's order).
     static func circleTiles(lat: Double, lon: Double, r: Double, z: Int) -> [(x: Int32, y: Int32)] {
         if r < 0 { return [] }
         let b = circleBox(lat: lat, lon: lon, r: r, z: z)
         var out: [(Int32, Int32)] = []
-        if b.x0 <= b.x1 && b.y0 <= b.y1 {
-            for x in b.x0...b.x1 { for y in b.y0...b.y1 where inCircle(lat: lat, lon: lon, r: r, z: z, x: x, y: y) { out.append((x, y)) } }
+        if b.y0 <= b.y1 {
+            for x in boxColumns(b, z: z) { for y in b.y0...b.y1 where inCircle(lat: lat, lon: lon, r: r, z: z, x: x, y: y) { out.append((x, y)) } }
         }
         return out
     }

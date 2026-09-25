@@ -1,17 +1,21 @@
 # Third-party components and licenses
 
-Compiled into or referenced by this project. Audited 2026-09-23.
+Compiled into or referenced by this project. Audited 2026-09-25.
 
 ## Firmware libraries (linked at build time, not vendored)
 
-| Component | License | Use |
-| --- | --- | --- |
-| [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) | Apache-2.0 | BLE host, extended/coded-PHY scanning |
-| [Arduino_GFX](https://github.com/moononournation/Arduino_GFX) | BSD-style (`license.txt`) | Panel drivers (ST7701 RGB, ST7789 SPI, SH8601 QSPI), canvases |
-| [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library) | BSD | `Fonts/` headers only, on every board with a screen (see fonts note) |
-| [PNGdec](https://github.com/bitbank2/PNGdec) | Apache-2.0 | Map tile decoding (older `.png` tiles) |
-| [PCA95x5](https://github.com/hideakitai/PCA95x5) | MIT | TCA9535 IO expander |
-| [arduino-esp32](https://github.com/espressif/arduino-esp32) / ESP-IDF | LGPL-2.1 / Apache-2.0 | Core, WiFi promiscuous, radio stacks; on the T5 also `esp_http_client`, mbedTLS and the ESP-IDF root certificate bundle (`esp_crt_bundle`, Mozilla's CA list) for the Wi-Fi fetches |
+Versions as pinned in `.github/workflows/ci.yml` (`arduino-cli lib install`
+and `ESP32_CORE`).
+
+| Component | Version | License | Use |
+| --- | --- | --- | --- |
+| [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) | 2.5.1 | Apache-2.0 | BLE host, extended/coded-PHY scanning |
+| [Arduino_GFX](https://github.com/moononournation/Arduino_GFX) ("GFX Library for Arduino") | 1.6.7 | BSD-style (`license.txt`) | Panel drivers (ST7701 RGB, ST7789 SPI, SH8601 QSPI), canvases |
+| [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library) | 1.12.6 | BSD | `Fonts/` headers only, on every board with a screen (see fonts note) |
+| [Adafruit BusIO](https://github.com/adafruit/Adafruit_BusIO) | 1.17.4 | MIT | Compiled only because Adafruit GFX's `Adafruit_SPITFT.cpp` includes it; nothing here calls it |
+| [PNGdec](https://github.com/bitbank2/PNGdec) | 1.1.6 | Apache-2.0 | Map tile decoding (older `.png` tiles) |
+| [PCA95x5](https://github.com/hideakitai/PCA95x5) | 0.1.3 | MIT | TCA9535 IO expander |
+| [arduino-esp32](https://github.com/espressif/arduino-esp32) / ESP-IDF | 3.3.11 | LGPL-2.1 / Apache-2.0 | Core, WiFi promiscuous, radio stacks; on the T5 also `esp_http_client`, mbedTLS and the ESP-IDF root certificate bundle (`esp_crt_bundle`: Mozilla's CA list, MPL-2.0) for the Wi-Fi fetches |
 
 ## Phone app (`mobile/`, Flutter packages fetched by `flutter pub get`, not vendored)
 
@@ -20,7 +24,7 @@ package's `LICENSE` in the pub cache. All are GPL-compatible.
 
 | Package | Version | License | Use |
 | --- | --- | --- | --- |
-| [Flutter](https://github.com/flutter/flutter) SDK (framework, engine) | ≥ 3.27 (CI: 3.47.5) | BSD-3-Clause | UI toolkit |
+| [Flutter](https://github.com/flutter/flutter) SDK (framework, engine) | pubspec ≥ 3.27; the lock file resolves to Dart ≥ 3.11 / Flutter ≥ 3.38.4 (CI: 3.47.5) | BSD-3-Clause | UI toolkit |
 | [flutter_blue_plus](https://pub.dev/packages/flutter_blue_plus) (+ `_android`, `_darwin`, `_platform_interface`) | 1.36.8 | BSD-3-Clause | BLE central: scan, bond, NUS link |
 | [drift](https://pub.dev/packages/drift) | 2.35.0 | MIT | Local database (history, detectors, settings) |
 | [sqlite3](https://pub.dev/packages/sqlite3), [sqlite3_flutter_libs](https://pub.dev/packages/sqlite3_flutter_libs) | 3.5.2, 0.5.42 | MIT (bundles SQLite, public domain) | SQLite for drift |
@@ -33,7 +37,7 @@ package's `LICENSE` in the pub cache. All are GPL-compatible.
 | [path_provider](https://pub.dev/packages/path_provider), [path](https://pub.dev/packages/path) | 2.1.6, 1.9.1 | BSD-3-Clause | Database location |
 | [flutter_map](https://pub.dev/packages/flutter_map) | 8.3.2 | BSD-3-Clause | Live screen's Map mode |
 | [latlong2](https://pub.dev/packages/latlong2) | 0.10.1 | Apache-2.0 | Coordinates for flutter_map |
-| [dart_earcut](https://pub.dev/packages/dart_earcut), [dart_polylabel2](https://pub.dev/packages/dart_polylabel2) | 1.2.0, 1.0.0 | MIT, BSD-3-Clause | Pulled in by flutter_map (polygons) |
+| [dart_earcut](https://pub.dev/packages/dart_earcut), [dart_polylabel2](https://pub.dev/packages/dart_polylabel2) | 1.2.0, 1.0.0 | MIT; BSD-3-Clause plus ISC (© 2016 Mapbox, the polylabel it ports) | Pulled in by flutter_map (polygons) |
 | [proj4dart](https://pub.dev/packages/proj4dart), [mgrs_dart](https://pub.dev/packages/mgrs_dart), [wkt_parser](https://pub.dev/packages/wkt_parser) | 3.0.0, 3.0.0, 2.0.0 | MIT | Pulled in by flutter_map / latlong2 (projections) |
 | [unicode](https://pub.dev/packages/unicode), [simple_sparse_list](https://pub.dev/packages/simple_sparse_list) | 1.1.9, 0.1.4 | BSD-3-Clause | Pulled in by latlong2 |
 | [archive](https://pub.dev/packages/archive), [posix](https://pub.dev/packages/posix) | 4.3.0, 6.5.2 | MIT | Pulled in by flutter_map's tile cache |
@@ -47,6 +51,11 @@ only compiled into a Linux desktop build, which this project does not
 ship; MPL-2.0 is GPL-compatible in any case. Build-time only (not shipped):
 `build_runner`, `drift_dev`, `flutter_lints` (BSD-3-Clause / MIT).
 
+The phone app does not yet show these packages' licence notices in-app
+(nothing calls Flutter's `showLicensePage` or reads `LicenseRegistry`);
+that is a follow-up, and until then this file is the notice that
+accompanies the binaries.
+
 Fonts bundled with the phone app (`mobile/assets/fonts/`, each folder with
 its `OFL.txt`), all under the SIL Open Font License 1.1, which allows
 bundling them in an app of any license:
@@ -54,16 +63,20 @@ bundling them in an app of any license:
 | Font | Use | Copyright |
 |---|---|---|
 | [Space Grotesk](https://github.com/floriankarsten/space-grotesk) (variable) | Display type and large numbers | 2020 The Space Grotesk Project Authors |
-| [Inter](https://github.com/rsms/inter) (variable) | Text | 2020 The Inter Project Authors |
+| [Inter](https://github.com/rsms/inter) (variable, 4.001) | Text | 2016 The Inter Project Authors (the TTF's copyright line; its `OFL.txt` header says 2020) |
 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) (variable) | UAS IDs, MACs, hex | 2020 The JetBrains Mono Project Authors |
 | [IBM Plex Sans Condensed](https://github.com/IBM/plex) 2.0.0 (Regular, SemiBold, Bold) | Flat theme: display type | 2017 IBM Corp., Reserved Font Name "Plex" |
 | [IBM Plex Sans](https://github.com/IBM/plex) 1.1.0 (Regular, Medium, SemiBold, Bold) | Flat theme: text | 2017 IBM Corp., Reserved Font Name "Plex" |
 | [IBM Plex Mono](https://github.com/IBM/plex) 2.5.0 (Regular, Medium, SemiBold, Bold) | Flat theme: identifiers, section heads | 2017 IBM Corp., Reserved Font Name "Plex" |
 
-The IBM Plex files are the unmodified TTFs from the official
-[IBM/plex](https://github.com/IBM/plex/releases) release zips
-(`@ibm/plex-sans-condensed@2.0.0`, `@ibm/plex-sans@1.1.0`,
-`@ibm/plex-mono@2.5.0`), only the weights the Flat theme uses.
+The IBM Plex files are the unmodified TTFs from the
+[IBM/plex](https://github.com/IBM/plex/releases) monorepo's npm release
+tags `@ibm/plex-sans-condensed@2.0.0`, `@ibm/plex-sans@1.1.0` and
+`@ibm/plex-mono@2.5.0` (those are the package versions above; the TTFs'
+own name tables say font versions 3.000, 3.005 and 2.005, copyright 2019,
+2018 and 2017 IBM Corp.), only the weights the Flat theme uses. The 2017
+in the table is the copyright line of each folder's `OFL.txt` and of the
+release's `LICENSE.txt`.
 
 The app icon and launch artwork (`mobile/branding/`) are original to this
 project.
@@ -79,7 +92,9 @@ project.
   includes, uses it.) Apache-2.0 is compatible with this project's
   GPL-3.0-or-later.
 - `firmware/libraries/Monocypher/` — [Monocypher](https://monocypher.org)
-  3.1.2 (BSD-2-Clause OR CC0-1.0), vendored with one change: a
+  3.1.2 (BSD-2-Clause OR CC0-1.0, `LICENSE`), vendored with one change,
+  marked `orecchino:` in `src/monocypher.cpp` and noted in its
+  `library.properties`: a
   `#pragma GCC optimize ("Os")` so the file builds for size even where a
   sketch asks for `-O2` (Ed25519 verification measured 24.2 ms at `-O2`,
   16.4 ms at `-Os` on an ESP32-S3). Ed25519 signing for the test beacon's
@@ -112,6 +127,15 @@ project.
     waited, so a feeder preempted by a radio task held a line the output
     interrupt needed and the refresh ended in "line buffer underrun" with
     the panel half driven.
+  - `src/board/epd_board_v7.c`: board bring-up no longer aborts on an I2C
+    error (`ESP_ERROR_CHECK` replaced by logged errors), pulls `CFG_INTR`
+    up, gives the bus and the PCA9555 15 ms to settle, retries the PCA9555
+    configuration up to five times with an `i2c_master_bus_reset` between
+    tries, and bounds the two PWRGOOD waits (`epd_board_poweron`,
+    `epd_board_measure_vcom`) to 200 tries of 1 ms instead of spinning
+    forever.
+  - `src/output_common/render_context.c`: `prepare_context_for_next_frame`
+    clears the `frame_started` flag the `render_lcd.c` patch added.
 - `firmware/orecchino_tembed/`, `firmware/orecchino_t5epd/`,
   `firmware/orecchino_amoled/` — written for this project. Pin and
   power-sequence facts come from the vendors' MIT-licensed example code:
@@ -204,7 +228,11 @@ contributors); they are used only as test input.
 - **ADS-B aircraft** (macOS app, phone app, and the T5 over Wi-Fi) are
   fetched live from [adsb.lol](https://www.adsb.lol/docs/open-data/api/),
   a community feed whose data is licensed ODbL 1.0; aircraft are held in
-  memory only while current (at most 60 s) and never redistributed. The T5 also fetches Esri tiles for
+  memory only while current (at most 60 s) and never redistributed. The
+  Mac app names adsb.lol in a tooltip, the phone app in its Detectors
+  view, and the T5 on its SYSTEM screen beside the ADS-B radius ("ADS-B
+  data: adsb.lol (ODbL)", and on the side view's panel when there is
+  room). The T5 also fetches Esri tiles for
   its own area (at most 4 a second, a 3 km circle by default, zooms 12-15)
   on the same terms as `tools/fetch_tiles.py` above.
 

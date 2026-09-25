@@ -48,8 +48,9 @@ class SeparationBridgeBadge extends StatelessWidget {
 
   const SeparationBridgeBadge({super.key, required this.alert});
 
-  // Dark text on the solid level colour: >= 8:1 for every level.
-  static final TextStyle _style =
+  // Dark text on the solid level colour: >= 8:1 for every level. A getter:
+  // the face and the colour follow the look.
+  static TextStyle get _style =>
       OrecchinoType.label.copyWith(color: OrecchinoColors.void0, fontWeight: FontWeight.w700, fontSize: 12);
 
   static String _vertText(TrafficAlert a) => a.vertM == null
@@ -112,7 +113,10 @@ class TrafficDetailCard extends StatelessWidget {
     final levelColor = al == null ? OrecchinoColors.aircraft : trafficColor(al.level);
     final ageS = aircraft.ageS(nowMs);
     final emergencySquawk = const [7500, 7600, 7700].contains(aircraft.squawk);
-    final altFt = aircraft.altBaroM == null ? null : (aircraft.altBaroM! / TrafficRules.ftToM + 0.5).floor();
+    // Barometric when reported, else geometric: what the alerts and the
+    // marks show (TrafficAircraftAltitude, traffic_words.dart).
+    final altM = aircraft.altitudeM;
+    final altFt = altM == null ? null : (altM / TrafficRules.ftToM + 0.5).floor();
     final kt = aircraft.gsMps == null ? null : (aircraft.gsMps! / TrafficRules.ktToMps + 0.5).floor();
 
     return Container(

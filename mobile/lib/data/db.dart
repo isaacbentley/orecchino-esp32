@@ -7,6 +7,9 @@
 //   detector's log epoch and a clear never overwrites older history;
 // - a detector is "pinned" (bonded) after its first verified pairing; only
 //   a pinned detector is given the phone's position.
+// Schema 3 adds the TFR-now and EU class columns to the records; schema 4
+// stores the board's log identity (`log_id`, bumped by every clear) beside
+// the cursor, so a clear the phone did not witness is still noticed.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -34,6 +37,10 @@ class Detectors extends Table {
   IntColumn get lastSyncUtc => integer().nullable()();
   BoolColumn get historyGap => boolean().withDefault(const Constant(false))();
   IntColumn get logEpoch => integer().withDefault(const Constant(0))();
+
+  /// The board's log identity the cursor belongs to (log_done `log_id`);
+  /// null until the firmware sent one.
+  IntColumn get logId => integer().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -104,7 +111,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.memory() : super(NativeDatabase.memory());
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -130,6 +137,11 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(detections, detections.classType);
             await m.addColumn(detections, detections.catEu);
             await m.addColumn(detections, detections.classEu);
+          }
+          if (from < 4) {
+            // The detectors table is never recreated above: every older
+            // schema needs the column.
+            await m.addColumn(detectors, detectors.logId);
           }
         },
       );
@@ -165,11 +177,14 @@ class AppDatabase extends _$AppDatabase {
       bonded: Value(false),
       lastSyncSeq: Value(0),
       oldestSeq: Value(null),
+      logId: Value(null),
     ));
   }
 
+  /// Store the cursor after a sync, with the log identity it belongs to
+  /// ([logId]: absent leaves it, as older firmware sends none).
   Future<void> updateSyncCursor(String detectorId, int nextSeq, int? oldestSeq,
-      {bool? gap, int? epoch, int? syncUtc}) async {
+      {bool? gap, int? epoch, int? syncUtc, int? logId}) async {
     await (update(detectors)..where((t) => t.id.equals(detectorId))).write(
       DetectorsCompanion(
         lastSyncSeq: Value(nextSeq),
@@ -177,6 +192,7 @@ class AppDatabase extends _$AppDatabase {
         historyGap: gap == null ? const Value.absent() : Value(gap),
         logEpoch: epoch == null ? const Value.absent() : Value(epoch),
         lastSyncUtc: syncUtc == null ? const Value.absent() : Value(syncUtc),
+        logId: logId == null ? const Value.absent() : Value(logId),
       ),
     );
   }
@@ -236,8 +252,10 @@ class AppDatabase extends _$AppDatabase {
 
   /// The detector's own log was cleared: its seqs start again, so start a
   /// new log epoch (new seqs never overwrite this phone's older records)
-  /// and sync from the beginning of the new log.
-  Future<void> resetDetectorLog(String detectorId) async {
+  /// and sync from the beginning of the new log, whose identity is
+  /// [logId] when the board said (null otherwise: the old one must not be
+  /// taken for a clear again).
+  Future<void> resetDetectorLog(String detectorId, {int? logId}) async {
     final d = await getDetector(detectorId);
     if (d == null) return;
     await (update(detectors)..where((t) => t.id.equals(detectorId))).write(DetectorsCompanion(
@@ -245,6 +263,7 @@ class AppDatabase extends _$AppDatabase {
       lastSyncSeq: const Value(0),
       oldestSeq: const Value(null),
       historyGap: const Value(false),
+      logId: Value(logId),
     ));
   }
 

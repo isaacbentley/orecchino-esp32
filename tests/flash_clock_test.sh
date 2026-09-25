@@ -75,6 +75,7 @@ os.execv("/bin/bash", ["/bin/bash", "-c", sys.argv[1], sys.argv[2]])'
 for sig in INT QUIT TERM HUP; do
   board_up silent
   set -m
+  # shellcheck disable=SC2016  # "$0" is for the inner bash -c: its $0 is $PORT, passed after the script
   python3 -c "$DRIVER" 'source tools/flash_t5epd.sh; set +e; T5_CLOCK_WAIT=30 set_clock "$0"; echo survived' "$PORT" > "$TMP/sig.out" 2>&1 &
   driver=$!
   set +m

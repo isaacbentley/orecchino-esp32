@@ -5,18 +5,23 @@
 // report ("BLE4 yes, BLE5 extended: yes, BLE5 coded: yes, NAN: no, Wi-Fi
 // beacon: slow (30 s)").
 //
-// The sources share one NativeRidDecoder, so authentication pages and the
-// once-a-second repeat rule are per transmitter across paths, as on a
-// detector. [messages] carries only fresh frames (a repeat within a second
-// is dropped, as the firmware drops it); [observations] carries every
-// frame for whoever wants the raw count.
+// The sources share one NativeRidDecoder, so authentication pages are
+// assembled per transmitter across paths, as on a detector. The
+// once-a-second repeat rule is per transmitter and path (rid_line.dart keys
+// it by the frame's source, as the firmware keys it by source index): the
+// same frame heard over Bluetooth and again over NAN is two fresh frames.
+// [messages] carries only fresh frames (a repeat within a second on the
+// same path is dropped, as the firmware drops it); [observations] carries
+// every frame for whoever wants the raw count.
 //
 // How hard each path works follows the power policy ([applyPolicy]): the
 // Bluetooth scan's duty (off in Saver's background, and on iOS whenever
 // the app is not in front: iOS delivers no Remote ID adverts to a
 // background scan), the beacon scan interval, and NAN only while Live or
 // Find is open (Balanced). [start] and [stop] remain the person's "use
-// this phone as a detector".
+// this phone as a detector". A Bluetooth path that could not start
+// (Bluetooth off, its permission not yet granted) is tried again when the
+// adapter turns on (the coordinator's [BleScanCoordinator.adapterOn]).
 //
 // This service only receives. Fusion with the detectors' lines is the
 // caller's (AppController): feed [messages] to ContactTracker.ingest, never
@@ -220,6 +225,11 @@ class NativeRxService extends ChangeNotifier {
       ..add(wifi.status.listen((s) {
         _state[s.path] = s.state;
         _changed();
+      }))
+      // Bluetooth turned on: a Bluetooth path that failed to start gets
+      // another go (the coordinator itself restarts a scan a lease holds).
+      ..add(coordinator.adapterOn.listen((on) {
+        if (on && _running && !_bleOn) unawaited(_queuePaths());
       }));
     await _queuePaths();
   }

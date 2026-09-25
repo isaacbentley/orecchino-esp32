@@ -26,6 +26,7 @@ import 'support/fakes.dart';
 class FakeBackend implements BleScanBackend {
   final advertCtl = StreamController<BleAdvert>.broadcast(sync: true);
   final scanningCtl = StreamController<bool>.broadcast(sync: true);
+  final adapterCtl = StreamController<bool>.broadcast(sync: true);
   final List<BleScanFilter> starts = [];
   final List<ScanDuty> duties = [];
   int stops = 0;
@@ -39,6 +40,8 @@ class FakeBackend implements BleScanBackend {
   Stream<bool> get scanning => scanningCtl.stream;
   @override
   bool get isScanningNow => on;
+  @override
+  Stream<bool> get adapterOn => adapterCtl.stream;
 
   @override
   Future<void> start(BleScanFilter filter, {ScanDuty duty = ScanDuty.lowLatency}) async {
@@ -70,6 +73,7 @@ class FakeBackend implements BleScanBackend {
   Future<void> close() async {
     await advertCtl.close();
     await scanningCtl.close();
+    await adapterCtl.close();
   }
 }
 
@@ -199,6 +203,30 @@ void main() {
       // The stop half of our own restart (still scanning when looked at) is not a stop.
       b.scanningCtl.add(false);
       await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(b.starts.length, 2);
+      c.dispose();
+    });
+
+    test('Bluetooth turning on restarts a held scan at once, not after the backoff', () async {
+      final b = FakeBackend();
+      final c = BleScanCoordinator(b, retryMin: const Duration(seconds: 10));
+      await c.acquire('remote-id', BleScanFilter.remoteId);
+      // Bluetooth goes off: the platform stops the scan; the retry is 10 s away.
+      b.failStart = StateError('Bluetooth is off');
+      b.platformStop();
+      b.adapterCtl.add(false);
+      await pump();
+      expect(b.starts.length, 1);
+      // Back on: started now.
+      b.failStart = null;
+      b.adapterCtl.add(true);
+      await pump();
+      await pump();
+      expect(b.starts.length, 2);
+      expect(c.scanning, isTrue);
+      // On again while the scan runs: nothing to do.
+      b.adapterCtl.add(true);
+      await pump();
       expect(b.starts.length, 2);
       c.dispose();
     });
@@ -530,6 +558,37 @@ void main() {
       expect(svc.pathStates['nan'], 'started');
       expect(svc.pathStates['beacon'], 'off');
       await svc.stop();
+      svc.dispose();
+    });
+
+    test('started with Bluetooth off, the Bluetooth path starts by itself when it is turned on', () async {
+      final b = FakeBackend()..failStart = StateError('Bluetooth is off');
+      final svc = build(android: true, backend: b);
+      await svc.start(nan: false, beacon: false);
+      expect(svc.pathStates['ble'], contains('Bluetooth is off'));
+      expect(b.starts, isEmpty);
+      // Still off: another try fails the same way, and no scan holds.
+      b.adapterCtl.add(true);
+      await pump();
+      await pump();
+      expect(b.starts, isEmpty);
+      expect(svc.pathStates['ble'], contains('Bluetooth is off'));
+      // On: the receiver's scan starts, no policy change or restart needed.
+      b.failStart = null;
+      b.adapterCtl.add(true);
+      await pump();
+      await pump();
+      expect(svc.pathStates['ble'], 'running');
+      expect(b.starts.length, 1);
+      // Once running, the adapter's events do nothing more.
+      b.adapterCtl.add(true);
+      await pump();
+      expect(b.starts.length, 1);
+      await svc.stop();
+      // Stopped: turning Bluetooth on starts nothing.
+      b.adapterCtl.add(true);
+      await pump();
+      expect(b.starts.length, 1);
       svc.dispose();
     });
   });

@@ -3,8 +3,9 @@
 // drones" high-importance channel on Android) with Show / Mute 10 min, a
 // haptic pattern (three short pulses for traffic, one for drone alerts), an
 // optional spoken callout, and on Android an ongoing notification for the
-// active warning (updated at most every 5 s) plus a foreground service
-// ("Orecchino connected to 1 detector") while a detector is connected.
+// active warning (updated at most every 5 s). The detector connection has
+// no notification of its own: Android's "Watch in the background" service
+// says "T5 connected" in its notification (core/background/watch_service.dart).
 //
 // The Live Activity / Dynamic Island needs a native widget extension; see
 // mobile/README.md ("Follow-ups").
@@ -29,7 +30,6 @@ abstract class AlertSink {
   Future<void> ongoing(AlertEvent? e);
   Future<void> haptic(AlertSource source);
   Future<void> speak(String text);
-  Future<void> foreground(String? text);
 }
 
 class SilentAlertSink implements AlertSink {
@@ -43,8 +43,6 @@ class SilentAlertSink implements AlertSink {
   Future<void> haptic(AlertSource source) async {}
   @override
   Future<void> speak(String text) async {}
-  @override
-  Future<void> foreground(String? text) async {}
 }
 
 class SystemAlertSink implements AlertSink {
@@ -54,9 +52,7 @@ class SystemAlertSink implements AlertSink {
   static const _chanTraffic = 'traffic_near_drones';
   static const _chanDrone = 'drone_alerts';
   static const _chanOngoing = 'traffic_ongoing';
-  static const _chanService = 'detector_connection';
   static const _idOngoing = 1;
-  static const _idService = 2;
 
   final _plugin = FlutterLocalNotificationsPlugin();
   FlutterTts? _tts;
@@ -192,28 +188,6 @@ class SystemAlertSink implements AlertSink {
       await tts.speak(text);
     } catch (e) {
       debugPrint('speech failed: $e');
-    }
-  }
-
-  @override
-  Future<void> foreground(String? text) async {
-    if (!_ready || !_android) return;
-    final a = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    try {
-      if (text == null) {
-        await a?.stopForegroundService();
-      } else {
-        await a?.startForegroundService(
-          id: _idService,
-          title: 'Orecchino',
-          body: text,
-          notificationDetails: const AndroidNotificationDetails(_chanService, 'Detector connection',
-              importance: Importance.low, priority: Priority.low, ongoing: true),
-          foregroundServiceTypes: {AndroidServiceForegroundType.foregroundServiceTypeConnectedDevice},
-        );
-      }
-    } catch (e) {
-      debugPrint('foreground service: $e');
     }
   }
 }

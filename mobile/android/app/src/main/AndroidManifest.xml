@@ -85,14 +85,11 @@
                 <action android:name="android.companion.CompanionDeviceService" />
             </intent-filter>
         </service>
-        <!-- flutter_local_notifications: action buttons and the foreground service. -->
+        <!-- flutter_local_notifications: the notifications' action buttons
+             (Show, Mute 10 min). Its foreground service is not used: the
+             only foreground service is OrecchinoWatchService above. -->
         <receiver android:exported="false"
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
-        <service
-            android:name="com.dexterous.flutterlocalnotifications.ForegroundService"
-            android:exported="false"
-            android:stopWithTask="true"
-            android:foregroundServiceType="connectedDevice" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

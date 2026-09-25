@@ -105,6 +105,61 @@ void main() {
     expect((await app.db.getDetector('A'))!.lastSyncSeq, 1); // the re-pin kept the cursor
   });
 
+  test('log_cleared with the new log id: the next sync is of that log, without a second restart', () async {
+    final p = t.peers['A'] = FakePeer('A');
+    await app.pair('A', 'Orecchino');
+    await settle();
+    Future<void> synced() async {
+      for (var i = 0; i < 40 && app.sync.isSyncing; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(app.sync.isSyncing, isFalse);
+    }
+
+    int logGets() => p.lines.where((l) => l.contains('"log_get"')).length;
+    p.notify('{"type":"log_done","n":0,"live":0,"total":3,"clock":true,"next":3,"oldest":0,"log_id":7}\n');
+    await synced();
+    expect((await app.db.getDetector('A'))!.logId, 7);
+    expect(logGets(), 1);
+
+    p.notify('{"type":"log_cleared","log_id":8}\n');
+    for (var i = 0; i < 40 && logGets() < 2; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    expect(logGets(), 2);
+    expect(app.sync.isSyncing, isTrue);
+    p.notify('{"type":"log_done","n":0,"live":0,"total":1,"clock":true,"next":1,"oldest":0,"log_id":8}\n');
+    await synced();
+    final d = (await app.db.getDetector('A'))!;
+    expect(d.logEpoch, 1);
+    expect(d.logId, 8);
+    expect(d.lastSyncSeq, 1);
+    expect(logGets(), 2); // the id matched: no restart from oldest
+    expect(app.sync.lastProgress.logCleared, isFalse);
+  });
+
+  test('a failed "Pair" of a second detector goes back to the pinned one', () async {
+    final t2 = FakeTransport();
+    final app2 = AppController(
+      db: AppDatabase(NativeDatabase.memory()),
+      ble: BleService(transport: t2, pairTimeout: const Duration(seconds: 2)),
+      location: FakeLocation(null),
+      adsb: AdsbSource(client: MockClient((_) async => http.Response('{"ac":[]}', 200))),
+      // Real timers: the reconnect is one.
+    );
+    await app2.start();
+    t2.peers['A'] = FakePeer('A');
+    expect(await app2.pair('A', 'T5'), isTrue);
+    expect(app2.detectorReady, isTrue);
+    expect(app2.reconnectPending, isFalse);
+    // Pairing B tears A's link down; B turns out not to be an Orecchino.
+    t2.peers['B'] = FakePeer('B', info: '{"fw":"other","proto":1}');
+    expect(await app2.pair('B', 'Nordic_UART'), isFalse);
+    expect(app2.detectorReady, isFalse);
+    expect(app2.reconnectPending, isTrue);
+    app2.dispose();
+  });
+
   test('a device that fails verification gets nothing, and is not pinned', () async {
     final p = t.peers['X'] = FakePeer('X', info: '{"fw":"nus-echo","proto":1}');
     expect(await app.pair('X', 'Nordic_UART'), isFalse);

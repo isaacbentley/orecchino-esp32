@@ -41,6 +41,7 @@ struct Fake {
   bool     jobs_ok = true;
   std::vector<uint32_t> job_reqs;
   std::vector<uint16_t> budgets;
+  std::vector<NetJobReq> reqs;
   bool     running = false;
   bool     done = false;
   int      cancels = 0;
@@ -71,6 +72,7 @@ static bool f_jobs_start(const NetJobReq* r) {
   if (!F.jobs_ok) return false;
   F.job_reqs.push_back(r->jobs);
   F.budgets.push_back(r->tile_budget);
+  F.reqs.push_back(*r);
   F.running = true;
   F.done = false;
   return true;
@@ -301,17 +303,17 @@ static void test_stay_mode() {
   char line[120];
   net_status_line(line, sizeof(line));
   CHECK(!strcmp(line, "CONNECTED to Desk (ch 6)"), "stay: SYSTEM line");
-  net_tick(t += 5000);
-  CHECK(F.job_reqs.size() == 1, "stay: no fetch before 10 s");
-  net_tick(t += 5000);
-  CHECK(F.job_reqs.size() == 2 && F.job_reqs[1] == NET_JOB_ADSB, "stay: ADS-B every 10 s");
+  net_tick(t += 14000);
+  CHECK(F.job_reqs.size() == 1, "stay: no fetch before 15 s (10 s ran into adsb.lol's limit)");
+  net_tick(t += 1000);
+  CHECK(F.job_reqs.size() == 2 && F.job_reqs[1] == NET_JOB_ADSB, "stay: ADS-B every 15 s");
   F.result = result_ok(0);
   F.result.failed = NET_JOB_ADSB;
   snprintf(F.result.err, sizeof(F.result.err), "ADS-B: HTTP 503");
   F.done = true;
   net_tick(t += 100);
   net_tick(t += 10000);
-  CHECK(F.job_reqs.size() == 2, "stay: a failing ADS-B source backs off (not every 10 s)");
+  CHECK(F.job_reqs.size() == 2, "stay: a failing ADS-B source backs off (not every 15 s)");
   net_tick(t += 50000);
   CHECK(F.job_reqs.size() == 3 && F.job_reqs[2] == NET_JOB_ADSB, "stay: retried after 1 min");
   F.result = result_ok(NET_JOB_ADSB);
@@ -738,7 +740,7 @@ static void test_phone_pause() {
   net_tick(t += 1100);
   CHECK(F.begins.size() == 3 && F.hold, "stay+phone: then STAY rejoins");
   // STAY after a person's CONNECT: the manual window ends when STAY goes
-  // online, so STAY's own 10 s ADS-B fetches are cancelled by a phone.
+  // online, so STAY's own 15 s ADS-B fetches are cancelled by a phone.
   reset(NET_MODE_STAY, {saved("Desk", "password1")});
   net_connect("Desk", NULL);
   net_tick(t = 1000);
@@ -862,19 +864,32 @@ static void test_adsb() {
   CHECK(fabs(a->gs_mps - 283.2 * 1852.0 / 3600.0) < 1e-6 && fabs(a->track_deg - 147.54) < 1e-9 &&
         fabs(a->vs_mps - 2624 * 0.3048 / 60.0) < 1e-9, "adsb: speed m/s, track, geometric rate preferred");
   CHECK(a->squawk == 1736 && !a->emergency && a->seen_ms == 100000 - 417, "adsb: squawk, emergency, position age");
-  bool tisb = false, ground = false;
+  bool tisb = false;
+  int ground = 0, ground_ok = 0, airborne_ok = 0;
   for (int i = 0; i < set.n; i++) {
     if (!strcmp(ac[i].hex, "a5668e")) tisb = true;
-    if (isnan(ac[i].alt_baro_m) && isnan(ac[i].alt_geom_m)) ground = true;
+    if (ac[i].on_ground) {
+      ground++;
+      // "alt_baro":"ground" carries no pressure altitude and these have no alt_geom either.
+      if (isnan(ac[i].alt_baro_m) && isnan(ac[i].alt_geom_m)) ground_ok++;
+    } else if (isfinite(ac[i].alt_baro_m) && isfinite(ac[i].alt_geom_m)) airborne_ok++;
   }
   CHECK(tisb, "adsb: a ~ (non-ICAO) address keeps its hex digits");
-  CHECK(ground, "adsb: alt_baro \"ground\" and no alt_geom read as unknown heights");
+  // The fixture has 5 on the ground (a2b8b8, a4497f, a0ad1b, 485f85, ~a5668e) and 6 airborne. Without
+  // on_ground a parked airliner 300 m from a drone would be a flashing WARNING and CONVERGING would
+  // be computed for a taxiing one; the apps map "ground" to "gnd":1 and traffic.h treats it as a caution.
+  CHECK(ground == 5 && ground_ok == 5 && airborne_ok == 6,
+        "adsb: alt_baro \"ground\" sets on_ground (5 of 11), with both heights unknown; the rest airborne with both");
   TrafficAircraft x;
   CHECK(!net_adsb_parse_ac("{\"hex\":\"abc123\",\"seen\":1}", 0, &x), "adsb: no position, dropped");
   CHECK(!net_adsb_parse_ac("{\"hex\":\"abc123\",\"lat\":1,\"lon\":2,\"seen_pos\":61}", 100000, &x), "adsb: position older than 60 s, dropped");
   CHECK(net_adsb_parse_ac("{\"hex\":\"ABC123\",\"lat\":1,\"lon\":2,\"seen_pos\":0,\"squawk\":\"7700\",\"emergency\":\"general\",\"baro_rate\":-640}", 5000, &x) &&
         !strcmp(x.hex, "abc123") && x.squawk == 7700 && x.emergency && fabs(x.vs_mps + 640 * 0.3048 / 60) < 1e-9 &&
-        isnan(x.alt_geom_m) && isnan(x.track_deg), "adsb: emergency, squawk 7700, baro rate fallback, missing fields NaN");
+        isnan(x.alt_geom_m) && isnan(x.track_deg) && !x.on_ground, "adsb: emergency, squawk 7700, baro rate fallback, missing fields NaN, airborne");
+  CHECK(net_adsb_parse_ac("{\"hex\":\"abc124\",\"lat\":1,\"lon\":2,\"seen_pos\":0,\"alt_baro\":\"ground\",\"gs\":3.1}", 5000, &x) &&
+        x.on_ground && isnan(x.alt_baro_m), "adsb: alt_baro \"ground\" -> on_ground, no pressure altitude");
+  CHECK(net_adsb_parse_ac("{\"hex\":\"abc125\",\"lat\":1,\"lon\":2,\"seen_pos\":0,\"alt_baro\":\"grounded\"}", 5000, &x) && !x.on_ground,
+        "adsb: another word in alt_baro is not on the ground");
   // A cap smaller than the answer keeps the nearest.
   TrafficAircraft few[3];
   double fd[3];
@@ -1002,9 +1017,12 @@ static void test_tfr() {
   CHECK(all && l.n <= 24 && net_poly_contains(&l, 40.015, -99.985), "tfr: a concave outline grows to its hull (never inside)");
   char url[400];
   net_url_tfr(url, sizeof(url), 37.7749, -122.4194);
-  CHECK(strstr(url, "&bbox=-124.6949,35.9763,-120.1439,39.5735,EPSG:4326") != NULL, "tfr: bbox is lon,lat,lon,lat (the order the FAA accepts)");
+  CHECK(strstr(url, "&bbox=-124.70,35.97,-120.14,39.57,EPSG:4326") != NULL,
+        "tfr: bbox is lon,lat,lon,lat (the order the FAA accepts), 200 km around home rounded to 0.01 deg");
   net_url_adsb(url, sizeof(url), 37.62, -122.38, 10000);
-  CHECK(!strcmp(url, "https://api.adsb.lol/v2/point/37.6200/-122.3800/6"), "adsb: URL, 10 km asks for 6 NM (rounded up)");
+  CHECK(!strcmp(url, "https://api.adsb.lol/v2/point/37.62/-122.38/6"), "adsb: URL, 10 km asks for 6 NM (rounded up)");
+  net_url_adsb(url, sizeof(url), 37.624999, -122.385001, 10000);
+  CHECK(!strcmp(url, "https://api.adsb.lol/v2/point/37.62/-122.39/6"), "adsb: the position leaves at 0.01 deg (about 1 km), as the phone sends it");
   CHECK(net_adsb_nm(9260) == 5 && net_adsb_nm(9261) == 6 && net_adsb_nm(30000) == 17, "adsb: km to whole NM, rounded up");
 }
 
@@ -1037,8 +1055,188 @@ static void test_tiles() {
   net_url_tile(url, sizeof(url), 15, 5241, 12665);
   CHECK(!strcmp(url, "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/15/12665/5241"),
         "tiles: Esri World Dark Gray, z/y/x (row before column)");
-  // The defaults the fetch asks tile_plan.h for (tests/tile_plan_test.cpp has the rest).
-  CHECK(NET_TILE_KM_DEFAULT == 3 && TILE_PLAN_ZMIN == 12 && TILE_PLAN_ZMAX == 15, "tiles: 3 km, zooms 12-15 by default");
+  // What a fresh board's first window asks the worker for: the 3 km map and
+  // 10 km ADS-B defaults, 8 tiles (tests/tile_plan_test.cpp has the plan).
+  uint32_t t = 1000;
+  reset(NET_MODE_SYNC, {saved("Home", "password1")});
+  net_tick(t);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.reqs.size() == 1 && F.reqs[0].tile_radius_m == 3000 && F.reqs[0].adsb_radius_m == 10000 &&
+        F.reqs[0].tile_budget == NET_TILE_BUDGET_AUTO, "tiles: the first window asks for the 3 km map and 10 km ADS-B defaults");
+}
+
+static void test_rate_limit() {
+  CHECK(net_retry_after_s("120") == 120 && net_retry_after_s(" 5 \r\n") == 5 && net_retry_after_s("0") == 0,
+        "429: Retry-After in seconds");
+  CHECK(net_retry_after_s("Wed, 21 Oct 2026 07:28:00 GMT") == 0 && net_retry_after_s("12abc") == 0 &&
+        net_retry_after_s("") == 0 && net_retry_after_s(NULL) == 0, "429: an HTTP-date or nothing reads as unknown (the minimum applies)");
+  CHECK(net_retry_after_s("99999999999") == NET_RATE_LIMIT_MAX_S, "429: a huge Retry-After is cut to an hour, no overflow");
+  // STAY: adsb.lol answers 429 with Retry-After 90: ADS-B waits 90 s, not 15.
+  uint32_t t = 1000;
+  reset(NET_MODE_STAY, {saved("Desk", "password1")});
+  net_tick(t);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  F.result = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES, 1790000000, t);
+  F.done = true;
+  net_tick(t += 100);
+  net_tick(t += NET_ADSB_EVERY_MS);
+  CHECK(F.job_reqs.size() == 2 && F.job_reqs[1] == NET_JOB_ADSB, "429: (STAY's ADS-B fetch under way)");
+  F.result = result_ok(0);
+  F.result.failed = NET_JOB_ADSB;
+  F.result.rate_limited = NET_JOB_ADSB;
+  F.result.retry_after_s = 90;
+  snprintf(F.result.err, sizeof(F.result.err), "ADS-B: HTTP 429");
+  F.done = true;
+  F.lines.clear();
+  net_tick(t += 100);
+  CHECK(!strcmp(net_last_error(), "ADS-B: rate limited, 90 s") && has_line("\"failed\":[\"adsb\"]") &&
+        has_line("\"err\":\"ADS-B: rate limited, 90 s\""), "429: the status says rate limited and for how long");
+  char line[120];
+  net_status_line(line, sizeof(line));
+  CHECK(!strcmp(line, "CONNECTED to Desk (ch 6)"), "429: STAY stays online meanwhile");
+  net_tick(t += 89000);
+  CHECK(F.job_reqs.size() == 2, "429: no ADS-B fetch inside the 90 s");
+  net_tick(t += 1100);
+  CHECK(F.job_reqs.size() == 3 && F.job_reqs[2] == NET_JOB_ADSB, "429: fetched again once Retry-After has passed");
+  F.result = result_ok(NET_JOB_ADSB);
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(!strcmp(net_last_error(), ""), "429: a good answer clears it");
+  // Without a Retry-After (or a short one): 60 s at least, never the 15 s cadence.
+  net_tick(t += NET_ADSB_EVERY_MS);
+  CHECK(F.job_reqs.size() == 4, "429: (the next fetch, 15 s on)");
+  F.result = result_ok(0);
+  F.result.failed = F.result.rate_limited = NET_JOB_ADSB;
+  F.result.retry_after_s = 10;
+  snprintf(F.result.err, sizeof(F.result.err), "ADS-B: HTTP 429");
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(!strcmp(net_last_error(), "ADS-B: rate limited, 60 s"), "429: a Retry-After under a minute holds a minute");
+  net_tick(t += 59000);
+  CHECK(F.job_reqs.size() == 4, "429: held for the minute");
+  net_tick(t += 1100);
+  CHECK(F.job_reqs.size() == 5, "429: then fetched again");
+  // A second 429 in a row: the back-off (2 min) is longer than the minimum.
+  F.result = result_ok(0);
+  F.result.failed = F.result.rate_limited = NET_JOB_ADSB;
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(!strcmp(net_last_error(), "ADS-B: rate limited, 120 s"), "429: repeated, the back-off grows past the minimum");
+  net_tick(t += 119000);
+  CHECK(F.job_reqs.size() == 5, "429: held for the 2 min");
+  F.result = result_ok(NET_JOB_ADSB);
+  net_tick(t += 1100);
+  F.done = true;
+  net_tick(t += 100);
+  // Tiles: a 429 mid-plan leaves the job "ok" (it fetched some), but held:
+  // the next STAY fetch does not take it up again at once.
+  net_update_map();
+  net_tick(t += 100);
+  CHECK(F.running && (F.job_reqs.back() & NET_JOB_TILES), "429: (UPDATE MAP under way)");
+  F.result = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES);
+  F.result.rate_limited = NET_JOB_TILES;
+  F.result.retry_after_s = 300;
+  F.result.tiles_new = 3;
+  F.result.tiles_left = 40;
+  snprintf(F.result.err, sizeof(F.result.err), "MAP: HTTP 429");
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(!strcmp(net_last_error(), "MAP: rate limited, 300 s"), "429: a tile source's limit is reported the same way");
+  net_tick(t += NET_ADSB_EVERY_MS + 100);
+  CHECK(F.running && F.job_reqs.back() == NET_JOB_ADSB, "429: the next fetch leaves the map alone");
+  F.result = result_ok(NET_JOB_ADSB);
+  F.done = true;
+  net_tick(t += 100);
+  net_tick(t += 300000);
+  CHECK(F.running && (F.job_reqs.back() & NET_JOB_TILES), "429: after Retry-After the incomplete map is fetched again");
+}
+
+static void test_fetch_guard() {
+  // A fetch without tiles that runs past NET_FETCH_GUARD_MS is cancelled,
+  // and that cancel counts as a failure (the jobs back off); one with
+  // tiles is left alone (a map can take minutes).
+  uint32_t t = 1000;
+  reset(NET_MODE_SYNC, {saved("Home", "password1")});
+  net_tick(t);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.running && (F.job_reqs[0] & NET_JOB_TILES), "guard: (the first window fetches tiles)");
+  net_tick(t += NET_FETCH_GUARD_MS + 60000);
+  CHECK(F.cancels == 0 && F.hold, "guard: a fetch with tiles is not cut short");
+  F.result = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES, 1790000000, t);
+  F.done = true;
+  net_tick(t += 100);
+  uint32_t start = 1000;
+  net_tick(t = start + 15 * 60000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.running && F.job_reqs[1] == (NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB), "guard: (a window without tiles)");
+  net_tick(t += NET_FETCH_GUARD_MS - 1);
+  CHECK(F.cancels == 0, "guard: nothing before 2 min");
+  net_tick(t += 1);
+  CHECK(F.cancels == 1 && F.hold && net_get_state() == NET_STATE_CONNECTED, "guard: cancelled at 2 min, still online until the worker stops");
+  net_tick(t += 30000);
+  CHECK(F.cancels == 1, "guard: cancelled once");
+  F.result = result_ok(0);
+  F.result.cancelled = NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB;
+  snprintf(F.result.err, sizeof(F.result.err), "SYNC: cancelled");
+  F.done = true;
+  F.lines.clear();
+  net_tick(t += 100);
+  CHECK(F.leaves == 2 && !F.hold && has_line("\"cancelled\":[\"time\",\"tfr\",\"adsb\"]"), "guard: the window ends, the hop resumes");
+  CHECK(g_net.job_wait[0] && g_net.job_wait[1] && g_net.job_wait[2] && g_net.job_fails[0] == 1 && g_net.job_fails[2] == 1,
+        "guard: the guard's cancel counts as a failure: every job backs off");
+  CHECK(!strcmp(net_last_error(), "SYNC: cancelled"), "guard: reported");
+  net_tick(t = start + 30 * 60000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.job_reqs.size() == 3 && F.job_reqs[2] == (NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB), "guard: the jobs run again at the next window");
+}
+
+static void test_scan_timeout() {
+  uint32_t t = 1000;
+  reset(NET_MODE_OFF, {saved("Home", "password1")});
+  net_scan_request(net__mask(1));
+  net_tick(t);
+  CHECK(F.scan_starts == 1 && F.hold && net_is_scanning(), "scan timeout: (a scan the driver never finishes)");
+  net_tick(t += NET_SCAN_TIMEOUT_MS - 1);
+  CHECK(net_is_scanning() && F.hold, "scan timeout: still waiting just under 15 s");
+  net_tick(t += 1);
+  CHECK(!net_is_scanning() && !F.hold && has_line("{\"type\":\"wifi_scan_done\",\"n\":0,\"err\":\"scan failed\"}", 1),
+        "scan timeout: given up at 15 s, reported as failed, hop released");
+  // The pick scan before a window: a timeout still joins a saved network.
+  reset(NET_MODE_SYNC, {saved("Home", "password1"), saved("Barn", "password2")});
+  net_tick(t += 100);
+  CHECK(F.scan_starts == 1 && F.begins.empty(), "scan timeout: (picking among two saved networks)");
+  net_tick(t += NET_SCAN_TIMEOUT_MS);
+  CHECK(F.begins.size() == 1 && F.hold, "scan timeout: the pick falls back to a saved network in turn");
+}
+
+static void test_jobs_refused() {
+  // The worker cannot start (no task, no PSRAM): every job fails at once,
+  // the window ends, and they are retried at the next one.
+  uint32_t t = 1000;
+  reset(NET_MODE_SYNC, {saved("Home", "password1")});
+  F.jobs_ok = false;
+  net_tick(t);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.job_reqs.empty() && !F.running, "refused: nothing started");
+  CHECK(!strcmp(net_last_error(), "fetch could not start") && has_line("\"failed\":[\"time\",\"tfr\",\"adsb\",\"tiles\"]") &&
+        has_line("\"err\":\"fetch could not start\""), "refused: said so in the status and the synced line");
+  CHECK(F.leaves == 1 && !F.hold && net_get_state() == NET_STATE_DISCONNECTED, "refused: the window ends, hop resumes");
+  CHECK(g_net.job_wait[0] && g_net.job_wait[3] && !net_is_clock_synced(), "refused: the jobs back off, nothing counts as done");
+  char line[120];
+  net_status_line(line, sizeof(line));
+  CHECK(!strcmp(line, "SYNC every 15 min, not yet"), "refused: SYSTEM line (no window succeeded yet)");
+  F.jobs_ok = true;
+  net_tick(t = 1000 + 15 * 60000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.job_reqs.size() == 1 && F.job_reqs[0] == (NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES),
+        "refused: every job runs at the next window");
 }
 
 static void test_adsb_area() {
@@ -1140,6 +1338,48 @@ static void test_radius_config() {
   net_status_line(line, sizeof(line));
   CHECK(!strncmp(line, "Map: 10 km z12-14, ", 19) && strstr(line, "storage full"), "config: SYSTEM line shows the shrunk map and a full store");
   CHECK(has_line("\"storage_full\":true"), "config: the synced line says storage_full");
+  // A stored radius bigger than the flash holds (set before any plan, or
+  // the flash filled up): the plan's arrival cuts it and stores it, so the
+  // next window plans from it instead of shrinking 30 km in 250 m steps.
+  reset(NET_MODE_SYNC, {saved("Home", "password1")});
+  net_set_tile_radius_km(30);
+  CHECK(net_get_tile_radius_km() == 30 && F.nvs.tile_km == 30, "config: before a plan, 30 km is accepted");
+  net_tick(t = 1000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.reqs.back().tile_radius_m == 30000, "config: (the window plans from 30 km)");
+  r = result_ok(NET_JOB_TIME | NET_JOB_TFR | NET_JOB_ADSB | NET_JOB_TILES, 1790000000, t);
+  r.have_plan = true;
+  tile_plan_make(&r.plan, 37.8, -122.4, 30000, 0x5E0000, 0, NULL, 0);
+  r.tile_max_m = 2750;
+  r.tiles_left = 5;
+  F.result = r;
+  F.done = true;
+  int stores = F.stores;
+  net_tick(t += 100);
+  CHECK(net_get_tile_radius_km() == 2 && F.nvs.tile_km == 2 && F.stores == stores + 1,
+        "config: the plan's max radius cuts the stored setting to 2 km");
+  net_tick(t = 1000 + 15 * 60000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  CHECK(F.reqs.back().tile_radius_m == 2000, "config: the next window plans from 2 km");
+  r = result_ok(NET_JOB_ADSB | NET_JOB_TILES);
+  r.have_plan = true;
+  tile_plan_make(&r.plan, 37.8, -122.4, 2000, 0x5E0000, 0, NULL, 0);
+  r.tile_max_m = 2750;
+  F.result = r;
+  F.done = true;
+  stores = F.stores;
+  net_tick(t += 100);
+  CHECK(net_get_tile_radius_km() == 2 && F.stores == stores, "config: a setting that fits is left alone, nothing stored");
+  r.tile_max_m = 600;   // the flash filled up (other files): under 1 km
+  net_tick(t = 1000 + 30 * 60000);
+  F.link = NET_LINK_UP;
+  net_tick(t += 100);
+  F.result = r;
+  F.done = true;
+  net_tick(t += 100);
+  CHECK(net_get_tile_radius_km() == 1 && F.nvs.tile_km == 1, "config: never under 1 km");
 }
 
 int main(void) {
@@ -1157,6 +1397,10 @@ int main(void) {
   test_phone_pause();
   test_adsb_area();
   test_radius_config();
+  test_rate_limit();
+  test_fetch_guard();
+  test_scan_timeout();
+  test_jobs_refused();
   test_json();
   test_split();
   test_adsb();

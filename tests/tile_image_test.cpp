@@ -45,12 +45,17 @@ static int draw_cb(JPEGDRAW* d) {
 }
 
 static JPEGDEC g_jpeg;   // ~18 KB: not on the stack
+static int g_err;        // JPEGDEC's last error (JPEG_SUCCESS...) after decode()
+static bool g_opened;    // openRAM accepted the header
 
 static bool decode(std::vector<uint8_t>& data, int type) {
   g_px = 0;
-  if (!g_jpeg.openRAM(data.data(), (int)data.size(), draw_cb)) return false;
+  g_opened = g_jpeg.openRAM(data.data(), (int)data.size(), draw_cb);
+  g_err = g_jpeg.getLastError();
+  if (!g_opened) return false;
   g_jpeg.setPixelType(type);   // after open, as the boards do
   bool ok = g_jpeg.getWidth() == 256 && g_jpeg.getHeight() == 256 && g_jpeg.decode(0, 0, 0) == 1;
+  g_err = g_jpeg.getLastError();
   g_jpeg.close();
   return ok;
 }
@@ -101,9 +106,19 @@ static void test_bad_data() {
   std::vector<uint8_t> junk(2000, 0x55);
   CHECK(!decode(junk, EIGHT_BIT_GRAYSCALE), "decode: junk is refused");
   auto data = read_file("tests/vectors/tiles/dark_gray_synthetic.jpg");
+  CHECK(decode(data, EIGHT_BIT_GRAYSCALE) && g_err == JPEG_SUCCESS, "decode: (the whole tile decodes clean)");
+  // Cut at a third (a download stopped short, before the fetch's rename
+  // guard existed): the header opens, the rows it holds are drawn, then
+  // decode() fails with JPEG_DECODE_ERROR instead of reading past the end
+  // (ASan would say). The screens treat that as "no tile", not a crash.
   std::vector<uint8_t> cut(data.begin(), data.begin() + data.size() / 3);
-  decode(cut, EIGHT_BIT_GRAYSCALE);   // may draw part of it; must not crash (ASan)
-  CHECK(true, "decode: a truncated tile does not crash");
+  bool ok = decode(cut, EIGHT_BIT_GRAYSCALE);
+  char name[120];
+  snprintf(name, sizeof(name), "decode: a tile cut at a third opens, draws %d of 65536 px, then fails (error %d)", g_px, g_err);
+  CHECK(!ok && g_opened && g_err == JPEG_DECODE_ERROR && g_px > 0 && g_px < 256 * 256, name);
+  // Cut inside the header: it does not even open.
+  std::vector<uint8_t> head(data.begin(), data.begin() + data.size() / 10);
+  CHECK(!decode(head, EIGHT_BIT_GRAYSCALE) && !g_opened && g_px == 0, "decode: a tile cut inside its header does not open, draws nothing");
 }
 
 // Optional: real tiles (not in the repo).

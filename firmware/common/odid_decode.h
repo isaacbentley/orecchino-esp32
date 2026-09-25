@@ -138,7 +138,10 @@ static inline void odid_decode_msg(const uint8_t* m, OdidUas* u) {
       } else {
         odid_copy_text(u->uas_id[slot], sizeof(u->uas_id[slot]), m + 2, 20);
       }
-      if (slot == 0) {
+      // The raw message a signature is checked against: the serial's when
+      // the frame carries one (a pack may list the CAA registration first),
+      // else the first Basic ID seen.
+      if (!u->has_basic_raw || u->id_type[slot] == 1 || (u->basic_raw[1] >> 4) != 1) {
         memcpy(u->basic_raw, m, 25);
         u->has_basic_raw = true;
       }

@@ -36,6 +36,9 @@ final class SerialManager: @unchecked Sendable {
 
     var onLine: (@Sendable (String) -> Void)?
     var onStatus: (@Sendable (SerialStatus) -> Void)?
+    /// The candidate ports, whenever the list changes (the reconnect timer
+    /// lists /dev every 2 s; views read the copy rather than /dev).
+    var onPorts: (@Sendable ([String]) -> Void)?
 
     static func candidatePorts() -> [String] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
@@ -50,7 +53,7 @@ final class SerialManager: @unchecked Sendable {
         queue.async {
             self.preferredPath = preferred
             self.closePort()
-            self.tryOpen()
+            self.tryOpen(self.listPorts())
             self.startReconnectTimer()
         }
     }
@@ -66,19 +69,37 @@ final class SerialManager: @unchecked Sendable {
 
     /// Write one line to the device (used by the tile sync protocol).
     /// Buffered: bytes the port can't take yet are retried via asyncAfter so
-    /// the shared queue (drain, reconnect timer) is never blocked.
+    /// the shared queue (drain, reconnect timer) is never blocked. The
+    /// buffer is capped at `txCap`: a receiver that stops draining USB (a
+    /// Wi-Fi fetch, an e-paper refresh) loses the oldest whole lines, and
+    /// the retry backs off from 2 ms to 50 ms while it stays full.
     func send(_ line: String) {
         queue.async {
             guard self.fd >= 0 else { return }
             self.txBuf.append(contentsOf: (line + "\n").utf8)
+            self.txBuf = Self.capped(self.txBuf, at: Self.txCap)
             self.flushTx()
         }
+    }
+
+    static let txCap = 64 * 1024
+
+    /// `buf` cut to at most `cap` bytes by dropping its oldest whole lines
+    /// (the last line is kept whole even when it alone is over the cap, so
+    /// a partial line is never sent).
+    nonisolated static func capped(_ buf: Data, at cap: Int) -> Data {
+        var out = buf
+        while out.count > cap, let nl = out.firstIndex(of: 0x0A), nl < out.index(before: out.endIndex) {
+            out.removeSubrange(out.startIndex...nl)
+        }
+        return out
     }
 
     // MARK: - queue-confined
 
     private var txBuf = Data()
     private var txRetryPending = false
+    private var txRetryMs = 2
 
     private func flushTx() {
         guard fd >= 0 else {
@@ -89,16 +110,18 @@ final class SerialManager: @unchecked Sendable {
             let n = txBuf.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
             if n > 0 {
                 txBuf.removeFirst(n)
+                txRetryMs = 2
             } else if n < 0 && errno == EINTR {
                 continue
             } else if n < 0 && errno == EAGAIN {
                 if !txRetryPending {
                     txRetryPending = true
-                    queue.asyncAfter(deadline: .now() + .milliseconds(2)) { [weak self] in
+                    queue.asyncAfter(deadline: .now() + .milliseconds(txRetryMs)) { [weak self] in
                         guard let self else { return }
                         self.txRetryPending = false
                         self.flushTx()
                     }
+                    txRetryMs = min(50, txRetryMs * 2)
                 }
                 return
             } else {
@@ -111,7 +134,24 @@ final class SerialManager: @unchecked Sendable {
 
     private var candidateIdx = 0
     private var openedAt = Date.distantPast
+    private var lastByteAt = Date.distantPast
     private var sawJson = false
+    private var lastPorts: [String]?
+
+    /// An open port that has said nothing for this long is closed and
+    /// opened again: a receiver that reset, or was pulled without the
+    /// driver delivering EOF, leaves the descriptor open but dead.
+    static let silentReopenAfter: TimeInterval = 15
+
+    /// /dev listed once per tick, and published when it changes.
+    private func listPorts() -> [String] {
+        let ports = Self.candidatePorts()
+        if ports != lastPorts {
+            lastPorts = ports
+            onPorts?(ports)
+        }
+        return ports
+    }
 
     private func startReconnectTimer() {
         reconnect?.cancel()
@@ -119,8 +159,9 @@ final class SerialManager: @unchecked Sendable {
         t.schedule(deadline: .now() + 2, repeating: 2)
         t.setEventHandler { [weak self] in
             guard let self else { return }
+            let ports = self.listPorts()
             if self.fd < 0 {
-                self.tryOpen()
+                self.tryOpen(ports)
             } else if self.preferredPath == nil, !self.sawJson,
                       Date().timeIntervalSince(self.openedAt) > 6 {
                 // Connected but silent — multi-port devices (e.g. the
@@ -129,7 +170,18 @@ final class SerialManager: @unchecked Sendable {
                 self.candidateIdx += 1
                 self.closePort()
                 self.onStatus?(.searching)
-                self.tryOpen()
+                self.tryOpen(ports)
+            } else if self.sawJson,
+                      Date().timeIntervalSince(self.lastByteAt) > Self.silentReopenAfter {
+                // It spoke, then went quiet with the port still open: open
+                // the same port again rather than wait for an EOF that may
+                // never come.
+                self.dlog("silent for \(Int(Self.silentReopenAfter)) s, reopening")
+                self.closePort()
+                self.onStatus?(.searching)
+                // The descriptor closes in the source's cancel handler,
+                // queued behind this block: open the same port after it.
+                self.queue.asyncAfter(deadline: .now() + .milliseconds(100)) { self.tryOpen(ports) }
             }
         }
         t.resume()
@@ -159,8 +211,7 @@ final class SerialManager: @unchecked Sendable {
         _ = bytes.withUnsafeBytes { Darwin.write(f, $0.baseAddress, $0.count) }
     }
 
-    private func tryOpen() {
-        let cands = Self.candidatePorts()
+    private func tryOpen(_ cands: [String]) {
         let path = preferredPath ?? (cands.isEmpty ? nil : cands[candidateIdx % cands.count])
         guard let path else {
             dlog("no candidates")
@@ -171,6 +222,9 @@ final class SerialManager: @unchecked Sendable {
         let f = Darwin.open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard f >= 0 else {
             dlog("open failed errno=\(errno)")
+            // A port another program holds (EBUSY) must not stop the
+            // search: the next tick tries the next candidate.
+            if preferredPath == nil { candidateIdx += 1 }
             onStatus?(.searching)
             return
         }
@@ -185,11 +239,20 @@ final class SerialManager: @unchecked Sendable {
             tio.c_cflag |= tcflag_t(CLOCAL | CREAD)
             tcsetattr(f, TCSANOW, &tio)
         }
+        attach(fd: f, path: path)
+    }
 
+    /// Read lines from an open descriptor as if it were the receiver's
+    /// port; the tests feed one end of a pipe() through here.
+    func attach(fd f: Int32, path: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        // drain() reads until EAGAIN: a blocking descriptor would hold the queue.
+        _ = fcntl(f, F_SETFL, fcntl(f, F_GETFL) | O_NONBLOCK)
         fd = f
         currentPath = path
         buffer.removeAll()
         openedAt = Date()
+        lastByteAt = openedAt
         sawJson = false
 
         let src = DispatchSource.makeReadSource(fileDescriptor: f, queue: queue)
@@ -198,6 +261,11 @@ final class SerialManager: @unchecked Sendable {
         src.resume()
         source = src
         onStatus?(.connected(path))
+    }
+
+    /// `attach` from off the queue (tests).
+    func attachAsync(fd f: Int32, path: String) {
+        queue.async { self.attach(fd: f, path: path) }
     }
 
     private func closePort() {
@@ -214,6 +282,7 @@ final class SerialManager: @unchecked Sendable {
         while true {
             let n = read(fd, &chunk, chunk.count)
             if n > 0 {
+                lastByteAt = Date()
                 buffer.append(contentsOf: chunk[0..<n])
                 if buffer.count > 1 << 20 { buffer.removeAll() }  // runaway garbage
                 continue

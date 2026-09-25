@@ -11,6 +11,30 @@
   "t=20: the drone has flown 200 m N, UAL123 1234.7 m W: horiz 283.5 m <= 1000, vert 50 -> the pair becomes TRAFFIC NEAR DRONE D9A03 (cpa_s still 4.4 s): 'GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 280 M E, CLOSEST IN 4 S'.",
   "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): 0b1c2d at t=0 'LOW TRAFFIC N 1.5 KM' ('BE READY TO LAND DRONES; AIRCRAFT 130 M ABOVE GROUND, 1.5 KM N'); e5f6a7 at t=0 'LOW TRAFFIC E 1.5 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.5 KM E'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
  ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "converging",
+   "horiz_m": 1529.7,
+   "vert_m": 50.0,
+   "bearing_deg": 78.69,
+   "cpa_s": 24.44,
+   "tol_m": 1.0,
+   "why": "r = (1500, 300): |r| = 1529.7 (1529.3 at the pair's own mean latitude, hence tol_m 1); t = (1500*61.733 + 300*10) / (61.733^2 + 10^2) = 24.44 s"
+  },
+  {
+   "t_s": 20,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 283.5,
+   "bearing_deg": 69.35,
+   "cpa_s": 4.44,
+   "why": "r = (1500 - 61.733*20, 300 - 200) = (265.3, 100): |r| = 283.5; t = (265.3*61.733 + 1000) / 3910.97 = 4.44 s"
+  }
+ ],
  "observer": {
   "lat": 37.7749,
   "lon": -122.4194,
@@ -95,7 +119,7 @@
     "stale": false,
     "highest": "warning",
     "aircraft_count": 4,
-    "summary": "conflict watch on, 2 low aircraft, 1 ADS-B conflict, data 2 s old",
+    "summary": "conflict watch on, low traffic, 1 ADS-B conflict, data 2 s old",
     "alerts": [
      {
       "level": "warning",
@@ -202,7 +226,7 @@
     "stale": false,
     "highest": "warning",
     "aircraft_count": 1,
-    "summary": "conflict watch on, 2 low aircraft, 1 ADS-B conflict, data 2 s old",
+    "summary": "conflict watch on, low traffic, 1 ADS-B conflict, data 2 s old",
     "alerts": [
      {
       "level": "warning",

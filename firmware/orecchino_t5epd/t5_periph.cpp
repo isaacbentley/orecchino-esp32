@@ -6,6 +6,7 @@
 #include "../common/solar.h"
 #include "../common/bq27220.h"
 #include "../common/bq27220_profiles.h"
+#include "t5_nmea.h"
 #include <Preferences.h>
 #include <esp_sleep.h>
 #include <sys/time.h>
@@ -423,7 +424,11 @@ static inline time_t utc_to_epoch(int y, int m, int d, int h, int min, int s) {
 // takes the hourly slot, so a set in the first hour after a reset would
 // otherwise never reach the chip and the next reset would undo it.
 static bool set_utc(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s, bool persist) {
-  if (y < 2024 || m < 1 || m > 12 || d < 1 || d > 31 || h > 23 || min > 59 || s > 59) return false;
+  // The year must be one this firmware could be running in: a receiver
+  // without a fix invents 1980 (read as 2080) or 2000, and neither may
+  // reach the clock or the RTC chip (nmea_year_plausible, t5_nmea.h).
+  if (!nmea_year_plausible(y, atoi(__DATE__ + 7))) return false;
+  if (m < 1 || m > 12 || d < 1 || d > 31 || h > 23 || min > 59 || s > 59) return false;
   time_t epoch = utc_to_epoch((int)y, (int)m, (int)d, (int)h, (int)min, (int)s);
   if (epoch <= 0) return false;
   struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
@@ -482,8 +487,8 @@ static void bl_eval(uint32_t now) {
   if (s_have_utc_time) {
     uint16_t y; uint8_t mo, d, h, mi, s;
     periph_get_utc_time(&y, &mo, &d, &h, &mi, &s);
-    double lat = g_home_set ? g_home_lat : 37.7749; // fallback coords if no fix
-    double lon = g_home_set ? g_home_lon : -122.4194;
+    double lat = 37.7749, lon = -122.4194;   // fallback coords if no fix
+    rx_get_home(&lat, &lon);                  // the board's position, under the receiver lock
     s_sun_elev = solar_elevation_deg(lat, lon, y, mo, d, h, mi, s);
     s_after_sundown = (s_sun_elev <= SOLAR_SUNDOWN_ELEVATION_DEG);
   } else {
@@ -573,83 +578,27 @@ static bool s_gps_disabled = false;
 static uint8_t s_gps_hunt_attempts = 0;
 static const uint8_t GPS_MAX_HUNT_ATTEMPTS = 6; // 2 probe cycles across the 3 baud rates (~20s)
 
-static bool nmea_valid(const char* s) {
-  if (!s || s[0] != '$' || strlen(s) < 9) return false;
-  const char* star = strchr(s, '*');
-  if (star && star[1] && star[2]) {
-    uint8_t csum = 0;
-    for (const char* p = s + 1; p < star; p++) csum ^= (uint8_t)*p;
-    char hex[3];
-    snprintf(hex, sizeof(hex), "%02X", csum);
-    return (toupper(star[1]) == hex[0] && toupper(star[2]) == hex[1]);
-  }
-  return (strncmp(s + 3, "GGA", 3) == 0 || strncmp(s + 3, "RMC", 3) == 0 ||
-          strncmp(s + 3, "GSA", 3) == 0 || strncmp(s + 3, "GSV", 3) == 0);
-}
-
-static double nmea_coord(const char* f, const char* hemi) {
-  if (!f[0]) return NAN;
-  double v = atof(f);
-  int deg = (int)(v / 100);
-  double m = v - deg * 100;
-  double d = deg + m / 60.0;
-  if (hemi[0] == 'S' || hemi[0] == 'W') d = -d;
-  return d;
-}
-
+// The sentences are parsed in t5_nmea.h (host-tested). Only a sentence
+// that carries a fix may set the clock: without one the module sends a
+// placeholder date that would read as the year 2080 and override SNTP.
 static void nmea_line(const char* s, uint32_t now) {
-  if (!nmea_valid(s)) return;
+  NmeaMsg m;
+  if (!nmea_parse(s, &m)) return;
   s_gps_last_sentence = now;
   s_gps_detected = true;
   s_gps_hunt_attempts = 0;
-
-  char f[16][16] = {{0}};
-  int fi = 0, fc = 0;
-  for (const char* p = s; *p && fi < 16; p++) {
-    if (*p == ',' || *p == '*') { f[fi][fc] = 0; fi++; fc = 0; if (*p == '*') break; }
-    else if (fc < 15) f[fi][fc++] = *p;
-  }
-
-  if (strncmp(s + 3, "GGA", 3) == 0) {
-    int quality = atoi(f[6]);
-    s_gps_sats = atoi(f[7]);
-    if (quality > 0) {
-      double lat = nmea_coord(f[2], f[3]), lon = nmea_coord(f[4], f[5]);
-      if (!isnan(lat) && !isnan(lon) && (lat != 0 || lon != 0)) {
-        gps_post_fix(lat, lon);
-        s_gps_fix = true; s_gps_fix_ms = now;
-        // f[9] altitude above MSL, f[11] geoid separation (both metres).
-        if (f[9][0] && f[11][0]) s_gps_elev_m = (float)(atof(f[9]) + atof(f[11]));
-        else if (f[9][0]) s_gps_elev_m = (float)atof(f[9]);   // MSL: well inside the rules' margins
-      }
-    }
-    if (strlen(f[1]) >= 6 && s_have_utc_time) {
-      int h = (f[1][0] - '0') * 10 + (f[1][1] - '0');
-      int m = (f[1][2] - '0') * 10 + (f[1][3] - '0');
-      int sec = (f[1][4] - '0') * 10 + (f[1][5] - '0');
-      uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
-      periph_get_utc_time(&cy, &cm, &cd, &ch, &cmi, &cs);
-      periph_set_utc_time(cy, cm, cd, h, m, sec);
-    }
-  } else if (strncmp(s + 3, "RMC", 3) == 0) {
-    bool valid = (f[2][0] == 'A');
-    if (strlen(f[1]) >= 6 && strlen(f[9]) >= 6) {
-      int h   = (f[1][0] - '0') * 10 + (f[1][1] - '0');
-      int min = (f[1][2] - '0') * 10 + (f[1][3] - '0');
-      int sec = (f[1][4] - '0') * 10 + (f[1][5] - '0');
-      int d   = (f[9][0] - '0') * 10 + (f[9][1] - '0');
-      int mo  = (f[9][2] - '0') * 10 + (f[9][3] - '0');
-      int yr  = 2000 + (f[9][4] - '0') * 10 + (f[9][5] - '0');
-      periph_set_utc_time(yr, mo, d, h, min, sec);
-      bl_eval(now);
-    }
-    if (valid) {
-      double lat = nmea_coord(f[3], f[4]), lon = nmea_coord(f[5], f[6]);
-      if (!isnan(lat) && !isnan(lon) && (lat != 0 || lon != 0)) {
-        gps_post_fix(lat, lon);
-        s_gps_fix = true; s_gps_fix_ms = now;
-      }
-    }
+  if (!strcmp(m.kind, "GGA")) s_gps_sats = m.sats;
+  if (!m.fix) return;
+  gps_post_fix(m.lat, m.lon);
+  s_gps_fix = true; s_gps_fix_ms = now;
+  if (m.has_elev) s_gps_elev_m = m.elev_m;
+  if (m.has_time && m.has_date) {                      // RMC: the whole clock
+    periph_set_utc_time(m.yr, m.mo, m.d, m.h, m.mi, m.s);
+    bl_eval(now);
+  } else if (m.has_time && s_have_utc_time) {          // GGA: the time of day, on a date already known
+    uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
+    periph_get_utc_time(&cy, &cm, &cd, &ch, &cmi, &cs);
+    periph_set_utc_time(cy, cm, cd, m.h, m.mi, m.s);
   }
 }
 
@@ -783,8 +732,9 @@ void periph_begin() {
     s_have_rtc = (s_rtc != nullptr);
     if (s_have_rtc) {
       uint16_t yr; uint8_t mo, d, h, mi, s;
-      if (rtc_read_time(&yr, &mo, &d, &h, &mi, &s)) {
-        periph_set_utc_time(yr, mo, d, h, mi, s);
+      // A chip holding an impossible year (a GPS placeholder date an
+      // earlier firmware wrote through) is treated like one with no time.
+      if (rtc_read_time(&yr, &mo, &d, &h, &mi, &s) && set_utc(yr, mo, d, h, mi, s, false)) {
         Serial.printf("[RTC] Valid time restored: %04u-%02u-%02uT%02u:%02u:%02uZ\n", yr, mo, d, h, mi, s);
       } else {
         if (parse_build_time(&yr, &mo, &d, &h, &mi, &s)) {
@@ -796,6 +746,11 @@ void periph_begin() {
     }
   }
   periph_bl_init();
+  // The input task that drains this UART is starved for the length of every
+  // panel refresh (the core-0 feeder spins), and a full GC16 takes 1-1.5 s:
+  // at 9600 baud that is ~1.4 KB of NMEA, more than the default 256-byte
+  // buffer, so every refresh used to lose sentences. 2 KB holds it.
+  Serial1.setRxBufferSize(2048);
   Serial1.begin(GPS_BAUDS[0], SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
   s_gps_baud_since = millis();
 

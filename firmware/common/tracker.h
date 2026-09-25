@@ -24,6 +24,8 @@ struct OdidAuthAssembly {
   uint32_t auth_ts;
   uint16_t auth_pages_seen;
   bool     verified;          // the pages held form a complete, verified set
+  bool     verify_due;        // something changed since the last verdict
+  uint32_t verify_ms;         // when a signature was last checked (0: never)
   uint8_t  auth_data[ODID_AUTH_MAX_BYTES];
 };
 
@@ -32,7 +34,11 @@ struct Track {
   uint8_t  mac[6];
   uint8_t  alt_macs[TRK_ALT_MACS][6];  // earlier addresses of the same aircraft
   uint8_t  alt_mac_count;
-  char     uas[41];
+  char     uas[41];     // the identity the contact is keyed on (a serial when it has one)
+  uint8_t  uas_type;    // ODID ID type of uas: 0 none yet, 2 a CAA registration heard
+                        // alone, anything else a serial / UUID / session ID
+  char     uas2[41];    // its CAA registration, when it also sends a serial (F3411
+                        // allows both; BLE4 sends them in separate frames)
   uint8_t  ua_type;     // ODID UA type from the Basic ID, 0 unknown
   int8_t   rssi;
   uint8_t  src_mask;    // bit0 wifi, bit1 nan, bit2 ble
@@ -92,9 +98,15 @@ extern Track* g_trk_live;
 /// log's chance to record it. Defined in rx_core.h.
 void trk_on_end(const Track* t);
 
+/// `id_type` is the ODID ID type of `uas` (ignored without one). A CAA
+/// registration (type 2) names the same aircraft as the serial it flies
+/// with, so it joins the contact heard on the address rather than start
+/// one: keyed as uas2 beside a serial, or as uas until the serial arrives.
 static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
-                                    uint32_t now, bool* created) {
+                                    uint32_t now, bool* created, uint8_t id_type = 1) {
   if (created) *created = false;
+  bool has_id = uas && uas[0];
+  bool alt = has_id && id_type == 2;
   Track* by_uas = nullptr;
   Track* by_mac = nullptr;
   Track* free_slot = nullptr;
@@ -105,7 +117,8 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
       if (!free_slot) free_slot = t;
       continue;
     }
-    if (uas && uas[0] && strncmp(t->uas, uas, sizeof(t->uas)) == 0) by_uas = t;
+    if (has_id && (strncmp(t->uas, uas, sizeof(t->uas)) == 0 ||
+                   (alt && strncmp(t->uas2, uas, sizeof(t->uas2)) == 0))) by_uas = t;
     bool match_mac = (memcmp(t->mac, mac, 6) == 0);
     if (!match_mac) {
       for (uint8_t m = 0; m < t->alt_mac_count; m++) {
@@ -122,9 +135,15 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
   // safe when there is no identity conflict — otherwise two aircraft that
   // share a MAC (randomised addresses, a spoofer, or one transmitter
   // sending several UAS IDs) collapse into a single contact whose ID
-  // flip-flops, hiding one of them entirely.
+  // flip-flops, hiding one of them entirely. The one identity that never
+  // conflicts is a registration beside a serial (or a serial beside a
+  // registration heard first): the two names of one aircraft.
   Track* t = by_uas;
-  if (!t && by_mac && (!uas || !uas[0] || !by_mac->uas[0])) t = by_mac;
+  if (!t && by_mac) {
+    if (!has_id || !by_mac->uas[0]) t = by_mac;
+    else if (alt && by_mac->uas_type != 2 && !by_mac->uas2[0]) t = by_mac;
+    else if (!alt && by_mac->uas_type == 2) t = by_mac;
+  }
   if (!t) {
     t = free_slot ? free_slot : oldest;   // LRU eviction, never slot 0 forever
     if (t->used) trk_on_end(t);
@@ -167,9 +186,18 @@ static inline Track* tracker_upsert(const uint8_t* mac, const char* uas,
     }
     memcpy(t->mac, mac, 6);
   }
-  if (uas && uas[0]) {
-    strncpy(t->uas, uas, sizeof(t->uas) - 1);
-    t->uas[sizeof(t->uas) - 1] = 0;
+  if (has_id) {
+    if (alt && t->uas[0] && t->uas_type != 2) {
+      strncpy(t->uas2, uas, sizeof(t->uas2) - 1);     // the registration beside the serial
+      t->uas2[sizeof(t->uas2) - 1] = 0;
+    } else {
+      if (!alt && t->uas_type == 2 && t->uas[0]) {     // the serial arrives: the registration steps aside
+        memcpy(t->uas2, t->uas, sizeof(t->uas2));
+      }
+      strncpy(t->uas, uas, sizeof(t->uas) - 1);
+      t->uas[sizeof(t->uas) - 1] = 0;
+      t->uas_type = alt ? 2 : (id_type ? id_type : 1);
+    }
   }
   t->last_ms = now;
   t->msgs++;
@@ -190,13 +218,6 @@ static inline int tracker_expire(uint32_t now) {
       n++;
     }
   }
-  return n;
-}
-
-static inline int tracker_count() {
-  int n = 0;
-  for (int i = 0; i < TRK_MAX; i++)
-    if (g_tracks[i].used) n++;
   return n;
 }
 

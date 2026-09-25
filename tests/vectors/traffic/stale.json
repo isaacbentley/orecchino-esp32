@@ -8,6 +8,17 @@
   "t=75: 19 s out -> still shown. t=76: 20 s out -> cleared. t=80: no ADS-B source at all -> 'CONFLICT WATCH OFF: no ADS-B source'.",
   "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): b2c3d4 at t=0 'LOW TRAFFIC N 1.5 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.5 KM N'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
  ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 600.0,
+   "vert_m": 50.0,
+   "bearing_deg": 0.0
+  }
+ ],
  "observer": {
   "lat": 37.7749,
   "lon": -122.4194,
@@ -57,7 +68,7 @@
     "stale": false,
     "highest": "warning",
     "aircraft_count": 2,
-    "summary": "conflict watch on, 1 low aircraft, 1 ADS-B conflict, data 5 s old",
+    "summary": "conflict watch on, low traffic, 1 ADS-B conflict, data 5 s old",
     "alerts": [
      {
       "level": "warning",

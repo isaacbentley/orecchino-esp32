@@ -466,7 +466,7 @@ class WifiSetupSheetState extends State<WifiSetupSheet> {
       child: Material(
         color: Colors.white.withValues(alpha: 0.04),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: Glass.flatRadius(BorderRadius.circular(16)),
           side: BorderSide(color: OrecchinoColors.line),
         ),
         clipBehavior: Clip.antiAlias,

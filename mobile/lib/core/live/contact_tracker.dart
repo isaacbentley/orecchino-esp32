@@ -70,6 +70,16 @@ class Contact {
   /// The phone's own receiver heard it at least once.
   bool get heardByPhone => heardBy.values.any((h) => h.isPhone);
 
+  /// When the phone's own receiver last heard it, on any of its paths
+  /// (null: never).
+  int? get phoneLastMs {
+    int? last;
+    for (final h in heardBy.values) {
+      if (h.isPhone && (last == null || h.lastMs > last)) last = h.lastMs;
+    }
+    return last;
+  }
+
   // Everything else the rid lines carry, for the details view. Each
   // message kind replaces what it carries (an "unknown" stays unknown).
   List<RidBasicId> basicIds = const [];

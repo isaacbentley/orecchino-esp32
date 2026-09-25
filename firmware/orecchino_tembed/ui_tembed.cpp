@@ -316,10 +316,11 @@ static void draw_scope() {
   if (!isnan(t->speed))  snprintf(sb, sizeof(sb), "%.1fm/s", t->speed);
   snprintf(b, sizeof(b), "%d dBm  %s", t->rssi, ui_status_name(t->status));
   small(x, y, t->status == 3 ? C_DANGER : C_MUTED, b); y += 12;
-  if (t->has_pos && g_home_set) {
-    double brg = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon);
+  double hl, ho;   // the board's position, under the receiver lock
+  if (t->has_pos && rx_get_home(&hl, &ho)) {
+    double brg = ui_bearing(hl, ho, t->lat, t->lon);
     needle(x + 13, y + 14, 13, brg, stale ? C_MUTED : col);
-    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(hl, ho, t->lat, t->lon));
     bold(x + 32, y + 12, C_TEXT, r);
     snprintf(b, sizeof(b), "brg %03d", (int)brg); small(x + 32, y + 17, C_MUTED, b);
     y += 32;
@@ -346,7 +347,7 @@ static void draw_scope() {
   }
   snprintf(b, sizeof(b), "src %s%s%s  %us ago", (t->src_mask & 1) ? "W" : "",
            (t->src_mask & 2) ? "N" : "", (t->src_mask & 4) ? "B" : "",
-           (unsigned)((s_now - t->last_ms) / 1000));
+           (unsigned)ui_since_s(s_now, t->last_ms));
   small(x, H - 10, C_MUTED, b);
   draw_bl_toast();
   present();
@@ -371,11 +372,12 @@ static void draw_detail() {
   bool danger = ui_danger(t, s_now);
   char b[48];
   // the big numbers: range + bearing if we know where we are, else height
-  if (g_home_set && t->has_pos) {
-    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+  double hl, ho;   // the board's position, under the receiver lock
+  if (t->has_pos && rx_get_home(&hl, &ho)) {
+    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(hl, ho, t->lat, t->lon));
     snprintf(b, sizeof(b), "%s", r);
     bold(8, 58, C_TEXT, b, &FreeSansBold12pt7b);
-    double brg = ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon);
+    double brg = ui_bearing(hl, ho, t->lat, t->lon);
     snprintf(b, sizeof(b), "%03d", (int)brg);
     bold(120, 58, C_ACCENT, b, &FreeSansBold12pt7b);
     small(120, 62, C_MUTED, "bearing");
@@ -407,7 +409,7 @@ static void draw_detail() {
            (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
            (t->src_mask & 4) ? "B" : "", t->msgs);
   small(8, 138, C_MUTED, b);
-  snprintf(b, sizeof(b), "%us ago | side key or click: back", (unsigned)((s_now - t->last_ms) / 1000));
+  snprintf(b, sizeof(b), "%us ago | side key or click: back", (unsigned)ui_since_s(s_now, t->last_ms));
   small(8, 156, C_MUTED, b);
   draw_bl_toast();
   present();
@@ -790,7 +792,8 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
       struct tm tm_utc;
       gmtime_r(&t_now, &tm_utc);
       // The sun where the app last said we are; San Francisco until it has.
-      double lat = g_home_set ? g_home_lat : 37.7749, lon = g_home_set ? g_home_lon : -122.4194;
+      double lat = 37.7749, lon = -122.4194;
+      rx_get_home(&lat, &lon);
       double elev = solar_elevation_deg(lat, lon, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
                                         tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
       bool night = (elev <= SOLAR_SUNDOWN_ELEVATION_DEG);

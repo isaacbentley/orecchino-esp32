@@ -137,7 +137,6 @@ static const TxRate TX_RATES[2] = {
   { 250, 125, 250, 500, 100, 150, 250, 50, 200, 500 },
   { 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 2500 },
 };
-#define TX_SLOW_MS 5000
 
 // Flight sim defaults: Crissy Field.
 static double s_home_lat = 37.8039;
@@ -898,7 +897,8 @@ static void handle_line(char* line) {
     print_status();
   } else if (line[0] == 'h' && line[1] == ' ') {
     double la, lo;
-    if (sscanf(line + 2, "%lf %lf", &la, &lo) == 2) {
+    if (sscanf(line + 2, "%lf %lf", &la, &lo) == 2 &&
+        la >= -90 && la <= 90 && lo >= -180 && lo <= 180) {   // odid_build_location's int32 cast
       tx_lock();
       s_home_lat = la;
       s_home_lon = lo;

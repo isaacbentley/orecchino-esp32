@@ -172,8 +172,9 @@ class SkyPainter extends CustomPainter {
   /// Screen areas labels must keep clear of (the bridges' numbers).
   final List<Rect> reserved;
 
-  /// Edges labels keep clear of: the notch, and the tab rail of a phone on
-  /// its side (the sky is drawn under them, its words are not).
+  /// Edges labels keep clear of: the notch, the tab rail of a phone on its
+  /// side, the side panel and the sheet (the sky is drawn under them, its
+  /// words are not).
   final EdgeInsets labelInsets;
 
   static const double _sweepPeriodS = 4.0;
@@ -342,6 +343,7 @@ class SkyPainter extends CustomPainter {
   }
 
   void _dome(Canvas canvas, SkyCamera cam) {
+    if (Look.flat) return; // top-down: no dome
     final a = 0.10 * cam.heightFactor;
     final paint = Paint()
       ..style = PaintingStyle.stroke
@@ -586,21 +588,49 @@ class SkyPainter extends CustomPainter {
       return;
     }
     final pulse = t == null ? 0.5 : (t % 2.4) / 2.4;
-    canvas.drawCircle(
-        o.offset,
-        6 + 14 * pulse,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1
-          ..color = OrecchinoColors.aqua.withValues(alpha: 0.5 * (1 - pulse)));
-    canvas.drawCircle(o.offset, 4.5, Paint()..color = OrecchinoColors.ink);
-    canvas.drawCircle(
-        o.offset,
-        4.5,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2
-          ..color = OrecchinoColors.aqua);
+    canvas.drawCircle(o.offset, 6 + 14 * pulse, _pulsePaint..color = _aqua(0.5 * (1 - pulse)));
+    canvas.drawCircle(o.offset, 4.5, _fillPaint..color = OrecchinoColors.ink);
+    canvas.drawCircle(o.offset, 4.5, _ringPaint..color = OrecchinoColors.aqua);
+  }
+
+  // The live layer's paints, set up once and recoloured per draw (a canvas
+  // copies a paint as it draws, so one serves every mark in a frame).
+  static final Paint _pulsePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1;
+  static final Paint _alertRing = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.5;
+  static final Paint _fillPaint = Paint();
+  static final Paint _ringPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 2;
+  static final Paint _bridgeGlow = Paint()..strokeCap = StrokeCap.round;
+  static final Paint _bridgeCore = Paint()
+    ..strokeWidth = 1.8
+    ..strokeCap = StrokeCap.round;
+
+  /// A soft radial glow of [color] fading out at [radius], centred on the
+  /// origin (translate to the mark, then draw): cached by colour, alpha (in
+  /// steps of 0.02) and radius (whole pixels), so the live layer builds no
+  /// gradient or shader per mark per frame.
+  static final Map<(Color, int, int), Paint> _glowCache = {};
+  static Paint _glow(Color color, double alpha, double radius) {
+    final a = (alpha * 50).round(), r = radius.round();
+    if (_glowCache.length > 1024) _glowCache.clear();
+    return _glowCache.putIfAbsent(
+        (color, a, r),
+        () => Paint()
+          ..shader = RadialGradient(colors: [color.withValues(alpha: a / 50), color.withValues(alpha: 0.0)])
+              .createShader(Rect.fromCircle(center: Offset.zero, radius: r.toDouble())));
+  }
+
+  /// Draws [_glow] at [at].
+  void _drawGlow(Canvas canvas, Offset at, Color color, double alpha, double radius) {
+    canvas.save();
+    canvas.translate(at.dx, at.dy);
+    canvas.drawCircle(Offset.zero, radius.roundToDouble(), _glow(color, alpha, radius));
+    canvas.restore();
   }
 
   // --- Contacts ------------------------------------------------------------
@@ -667,27 +697,12 @@ class SkyPainter extends CustomPainter {
       }
       return;
     }
-    final glowR = (18 + 10 * boost) * s;
-    canvas.drawCircle(
-      p.offset,
-      glowR,
-      Paint()
-        ..shader = RadialGradient(colors: [
-          color.withValues(alpha: (0.45 + 0.4 * boost) * color.a),
-          color.withValues(alpha: 0.0),
-        ]).createShader(Rect.fromCircle(center: p.offset, radius: glowR)),
-    );
+    _drawGlow(canvas, p.offset, color, (0.45 + 0.4 * boost) * color.a, (18 + 10 * boost) * s);
     if (c.alerting && t != null) {
       final ph = (t % 1.6) / 1.6;
-      canvas.drawCircle(
-          p.offset,
-          (8 + 14 * ph) * s,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.5
-            ..color = color.withValues(alpha: 0.8 * (1 - ph)));
+      canvas.drawCircle(p.offset, (8 + 14 * ph) * s, _alertRing..color = color.withValues(alpha: 0.8 * (1 - ph)));
     }
-    canvas.drawCircle(p.offset, 5.5 * s, Paint()..color = color);
+    canvas.drawCircle(p.offset, 5.5 * s, _fillPaint..color = color);
     canvas.drawCircle(p.offset + Offset(-1.6 * s, -1.6 * s), 2.0 * s,
         Paint()..color = Colors.white.withValues(alpha: 0.75 * color.a));
     final trk = c.trackDeg;
@@ -724,18 +739,7 @@ class SkyPainter extends CustomPainter {
             ..color = color);
       return;
     }
-    if (boost > 0.02) {
-      final r = 20 * s;
-      canvas.drawCircle(
-        p.offset,
-        r,
-        Paint()
-          ..shader = RadialGradient(colors: [
-            color.withValues(alpha: 0.30 * boost),
-            color.withValues(alpha: 0.0),
-          ]).createShader(Rect.fromCircle(center: p.offset, radius: r)),
-      );
-    }
+    if (boost > 0.02) _drawGlow(canvas, p.offset, color, 0.30 * boost, 20 * s);
     final stroke = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = (c.id == selectedId ? 2.4 : 1.8)
@@ -813,23 +817,19 @@ class SkyPainter extends CustomPainter {
     }
     // The glow: two soft strokes (a blur here would cost an offscreen pass
     // on every frame of the live layer).
-    final glow = Paint()..strokeCap = StrokeCap.round;
     canvas.drawLine(
         p1.offset,
         p2.offset,
-        glow
+        _bridgeGlow
           ..strokeWidth = 10 + 16 * k
           ..color = color.withValues(alpha: 0.07 + 0.05 * k));
     canvas.drawLine(
         p1.offset,
         p2.offset,
-        glow
+        _bridgeGlow
           ..strokeWidth = 5 + 8 * k
           ..color = color.withValues(alpha: 0.10 + 0.07 * k));
-    final core = Paint()
-      ..strokeWidth = 1.8
-      ..strokeCap = StrokeCap.round
-      ..color = color.withValues(alpha: 0.9);
+    final core = _bridgeCore..color = color.withValues(alpha: 0.9);
     final seg = p2.offset - p1.offset;
     final len = seg.distance;
     if (len < 1) return;
@@ -880,15 +880,7 @@ class SkyPainter extends CustomPainter {
     final color = c.color;
     final dir = _out(cam, p);
     final s = p.scale.clamp(0.7, 1.4);
-    if (!Look.flat) {
-      canvas.drawCircle(
-        p.offset,
-        16 * s,
-        Paint()
-          ..shader = RadialGradient(colors: [color.withValues(alpha: 0.28 + 0.25 * boost), color.withValues(alpha: 0)])
-              .createShader(Rect.fromCircle(center: p.offset, radius: 16 * s)),
-      );
-    }
+    if (!Look.flat) _drawGlow(canvas, p.offset, color, 0.28 + 0.25 * boost, 16 * s);
     canvas.save();
     canvas.translate(p.offset.dx, p.offset.dy);
     canvas.rotate(math.atan2(dir.dy, dir.dx));
@@ -996,7 +988,8 @@ class SkyPainter extends CustomPainter {
         !_placed.any((o) => o.overlaps(r)) &&
         r.left >= labelInsets.left + 2 &&
         r.top >= labelInsets.top &&
-        r.right <= _canvas.width - labelInsets.right - 2;
+        r.right <= _canvas.width - labelInsets.right - 2 &&
+        r.bottom <= _canvas.height - labelInsets.bottom;
     // Try the full label, then the name alone; beside the mark on the right,
     // on the left, then a little lower each way.
     Offset? spot(double w, double h) {
@@ -1037,7 +1030,9 @@ class SkyPainter extends CustomPainter {
     if (at != null) {
       final size = withSub ? Size(fullW, fullH) : main;
       _placed.add((at & size).inflate(2));
-      CanvasText.paint(canvas, text, at, c.isOperator ? mainStyle.copyWith(color: c.color) : mainStyle,
+      // An operator's words in its colour; stale, the subtle ink (the colour
+      // at 45 % would fall under 4.5:1).
+      CanvasText.paint(canvas, text, at, c.isOperator && !c.stale ? mainStyle.copyWith(color: c.color) : mainStyle,
           scaler: textScaler);
       if (withSub) CanvasText.paint(canvas, hl!, at + Offset(0, main.height), subStyle, scaler: textScaler);
     }

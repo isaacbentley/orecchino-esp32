@@ -19,6 +19,9 @@ class FakePeer implements BlePeer {
   Completer<void>? holdPair; // pairing waits on this when set
   @override
   int mtu = 23;
+
+  /// What [requestMtu] negotiates (247 by default; Android grants 517).
+  int mtuGranted = 247;
   final List<int> mtuAsked = [];
   final List<List<int>> writes = [];
   final _down = Completer<void>();
@@ -45,7 +48,7 @@ class FakePeer implements BlePeer {
   @override
   Future<void> requestMtu(int m) async {
     mtuAsked.add(m);
-    mtu = 247;
+    mtu = mtuGranted;
   }
 
   @override

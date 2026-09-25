@@ -14,7 +14,7 @@ set -euo pipefail
 # time, read back after writing -- the time that survives a reset -- so
 # that, not the running clock, is what gets checked.
 set_clock() {
-  local port="$1" raw reader="" epoch="" reply rtc got drift tries sig
+  local port="$1" raw reader="" epoch="" reply rtc got drift sig
   # A dial-in tty.* node waits in open() for a carrier signal this board
   # never raises; its call-out cu.* twin is the same device without the wait.
   case "$port" in /dev/tty.*) port="/dev/cu.${port#/dev/tty.}" ;; esac
@@ -39,6 +39,7 @@ set_clock() {
     if [ -n "$raw" ]; then rm -f "$raw" || true; fi
     trap - INT TERM HUP QUIT
   }
+  # shellcheck disable=SC2064  # $sig is meant to expand now: each trap re-raises its own signal
   for sig in INT TERM HUP QUIT; do trap "finish; kill -$sig \$\$" "$sig"; done
   # In $TMPDIR (macOS's `mktemp -t` ignores it), so a caller -- the tests --
   # can give each run a directory of its own.
@@ -68,7 +69,7 @@ set_clock() {
   fi
   # One resend: set_time is idempotent, and a line can be lost (in beacon
   # mode two readers share the port).
-  for tries in 1 2; do
+  for _ in 1 2; do
     if [ ! -c "$port" ]; then
       finish
       echo "$port is not a serial device."

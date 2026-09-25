@@ -35,7 +35,7 @@ SENSECAP_FS = 0x5E0000         # orecchino_sensecap/partitions.csv littlefs
 
 URL = ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
        "World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}")   # note: z/y/x
-UA = "orecchino-esp32/0.7 (personal offline device map; one-time fetch; <= 3 tiles/s)"
+UA = "orecchino-esp32/0.7.0 (personal offline device map; one-time fetch; <= 3 tiles/s)"   # FW_VERSION (rx_core.h)
 DELAY = 0.35                   # seconds between requests: under 4 a second, as the boards
 
 
@@ -78,6 +78,13 @@ def in_circle(lat, lon, r, z, x, y):
         return False
     w, e = tile_lon(x, z), tile_lon(x + 1, z)
     n, s = tile_lat(y, z), tile_lat(y + 1, z)
+    # The centre in the tile's frame: across the antimeridian its nearest
+    # edge is the one 360 degrees away in raw longitude.
+    mid = (w + e) / 2
+    if lon - mid > 180:
+        lon -= 360
+    elif mid - lon > 180:
+        lon += 360
     plat = min(max(lat, s), n)
     plon = min(max(lon, w), e)
     return dist_m(lat, lon, plat, plon) <= r
@@ -88,9 +95,20 @@ def circle_tiles(lat, lon, r, z):
         return []
     dlat = math.degrees(r / EARTH_R)
     dlon = math.degrees(r / (EARTH_R * max(math.cos(math.radians(lat)), 0.02)))
-    x0, y0 = tile_of(min(lat + dlat, 85.0), lon - dlon, z)
-    x1, y1 = tile_of(max(lat - dlat, -85.0), lon + dlon, z)
-    return [(z, x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)
+    # Across the antimeridian the west/east edges wrap round (x0 > x1: x0..n-1
+    # then 0..x1), as tile_circle_box does; the tiles on both sides are in.
+    w, e = lon - dlon, lon + dlon
+    if w < -180.0:
+        w += 360.0
+    if e > 180.0:
+        e -= 360.0
+    n = 2 ** z
+    x0, y0 = tile_of(min(lat + dlat, 85.0), w, z)
+    x1, y1 = tile_of(max(lat - dlat, -85.0), e, z)
+    if dlon >= 180.0:
+        x0, x1 = 0, n - 1
+    cols = x1 - x0 + 1 if x0 <= x1 else n - x0 + x1 + 1
+    return [(z, x, y) for x in ((x0 + i) % n for i in range(cols)) for y in range(y0, y1 + 1)
             if in_circle(lat, lon, r, z, x, y)]
 
 

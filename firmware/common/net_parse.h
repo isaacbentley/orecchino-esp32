@@ -37,8 +37,11 @@
                     "&request=GetFeature&typeName=TFR:V_TFR_LOC&outputFormat=application/json"
 #endif
 #ifndef NET_ADSB_URL
-#define NET_ADSB_URL "https://api.adsb.lol/v2/point/%.4f/%.4f/%d"   // lat, lon, radius NM
+// lat, lon, radius NM. Positions leave the board at 0.01 deg (~1 km, as the
+// phone sends them): the query is 5-30 km wide, so 11 m buys nothing.
+#define NET_ADSB_URL "https://api.adsb.lol/v2/point/%.2f/%.2f/%d"
 #endif
+#define NET_POS_ROUND(v) (floor((v) * 100.0 + 0.5) / 100.0)   // to 0.01 deg
 #ifndef NET_TILE_URL
 #define NET_TILE_URL TILE_BASE_URL   // tile_path.h: Esri World Dark Gray, z/y/x
 #endif
@@ -345,6 +348,7 @@ static inline void net_split_feed(NetJsonSplit* s, const char* data, size_t n) {
 typedef struct {
   TrafficAircraft a;
   bool   has_hex;
+  bool   baro_ground;          // "alt_baro":"ground": taxiing or parked
   double seen_pos;
   double geom_rate, baro_rate;
   double alt_geom_ft, alt_baro_ft;
@@ -373,7 +377,10 @@ static inline const char* net_adsb_member(const char* key, const char* val, void
   else if (!strcmp(key, "lat")) a->lat = (isfinite(n) && fabs(n) <= 90.0) ? n : NAN;
   else if (!strcmp(key, "lon")) a->lon = (isfinite(n) && fabs(n) <= 180.0) ? n : NAN;
   else if (!strcmp(key, "alt_geom")) p->alt_geom_ft = n;
-  else if (!strcmp(key, "alt_baro")) p->alt_baro_ft = n;     // "ground" -> NaN
+  else if (!strcmp(key, "alt_baro")) {
+    p->alt_baro_ft = n;                                       // "ground" -> NaN, and on_ground
+    if (v.is_str && !strcmp(v.str, "ground")) p->baro_ground = true;
+  }
   else if (!strcmp(key, "gs")) a->gs_mps = (n >= 0.0) ? n * TRAFFIC_KT_TO_MPS : NAN;
   else if (!strcmp(key, "track")) a->track_deg = n;
   else if (!strcmp(key, "geom_rate")) p->geom_rate = n;
@@ -391,8 +398,8 @@ static inline const char* net_adsb_member(const char* key, const char* val, void
 }
 
 /// One adsb.lol aircraft object -> TrafficAircraft (seen_ms from seen_pos,
-/// relative to now_ms). False when it has no hex, no position, or a position
-/// older than traffic.h keeps (60 s).
+/// relative to now_ms; on_ground from "alt_baro":"ground"). False when it
+/// has no hex, no position, or a position older than traffic.h keeps (60 s).
 static inline bool net_adsb_parse_ac(const char* obj, uint32_t now_ms, TrafficAircraft* out) {
   NetAdsbParse st;
   memset(&st, 0, sizeof(st));
@@ -406,6 +413,7 @@ static inline bool net_adsb_parse_ac(const char* obj, uint32_t now_ms, TrafficAi
   st.a.alt_baro_m = isfinite(st.alt_baro_ft) ? st.alt_baro_ft * TRAFFIC_FT_TO_M : NAN;
   double rate = isfinite(st.geom_rate) ? st.geom_rate : st.baro_rate;
   st.a.vs_mps = isfinite(rate) ? rate * TRAFFIC_FT_TO_M / 60.0 : NAN;
+  st.a.on_ground = st.baro_ground;   // as the apps map it ("gnd":1 on the wire)
   st.a.seen_ms = now_ms - (uint32_t)llround(st.seen_pos * 1000.0);
   *out = st.a;
   return true;
@@ -781,17 +789,21 @@ static inline bool net_ntp_parse(const uint8_t* p, size_t n, uint32_t tx_sec, ui
 // ---------------------------------------------------------------------------
 // URLs
 
+/// The FAA bbox 200 km around home; home rounded to 0.01 deg first (the
+/// corners would give it away to the metre otherwise).
 static inline int net_url_tfr(char* out, size_t n, double lat, double lon) {
+  lat = NET_POS_ROUND(lat);
+  lon = NET_POS_ROUND(lon);
   double dlat = NET_TFR_RADIUS_KM / 111.195;
   double c = cos(lat * TRAFFIC_DEG);
   double dlon = NET_TFR_RADIUS_KM / (111.195 * (c < 0.05 ? 0.05 : c));
   double lat0 = fmax(lat - dlat, -90.0), lat1 = fmin(lat + dlat, 90.0);
   double lon0 = fmax(lon - dlon, -180.0), lon1 = fmin(lon + dlon, 180.0);
-  return snprintf(out, n, "%s&bbox=%.4f,%.4f,%.4f,%.4f,EPSG:4326", NET_TFR_URL, lon0, lat0, lon1, lat1);
+  return snprintf(out, n, "%s&bbox=%.2f,%.2f,%.2f,%.2f,EPSG:4326", NET_TFR_URL, lon0, lat0, lon1, lat1);
 }
 
 static inline int net_url_adsb(char* out, size_t n, double lat, double lon, double radius_m) {
-  return snprintf(out, n, NET_ADSB_URL, lat, lon, net_adsb_nm(radius_m));
+  return snprintf(out, n, NET_ADSB_URL, NET_POS_ROUND(lat), NET_POS_ROUND(lon), net_adsb_nm(radius_m));
 }
 
 /// Esri's tile URLs are z/y/x (row before column).

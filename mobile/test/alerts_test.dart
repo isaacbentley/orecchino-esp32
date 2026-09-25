@@ -1,5 +1,6 @@
 // alerts_test.dart — notification policy (rate limit, mute, held alerts,
-// drone alerts only with a detector), the words (the action first, then the
+// drone alerts only from a live source: a detector, or this phone's own
+// receiver for what it heard lately), the words (the action first, then the
 // geometry and the rule), the adsb.lol mapping onto the traffic wire
 // format, and where the phone asks for aircraft (AdsbArea).
 //
@@ -198,6 +199,45 @@ void main() {
               drones: [c],
               detectorConnected: true),
           isEmpty);
+    });
+
+    test('this phone\'s own receiver raises drone alerts without a detector, for what it heard lately', () {
+      RidMessage emergency(String src, String uas) => HostMessage.parse(jsonEncode({
+            'type': 'rid',
+            'src': src,
+            'mac': 'AA:BB:CC:DD:EE:${uas.substring(uas.length - 2)}',
+            'basic_id': [
+              {'id_type': 1, 'ua_type': 2, 'uas_id': uas}
+            ],
+            'loc': {'status': 3, 'lat': 37.81, 'lon': -122.46, 'alt_geo': 100.0, 'height': 50.0, 'height_ref': 0},
+          })) as RidMessage;
+      const obs = ObserverFix(37.8039, -122.4640);
+      final tr = ContactTracker();
+      final byPhone = tr.ingest(emergency('phone-ble4', '1581F20000D9A11'), now, obs)!;
+      final byDetector = tr.ingest(emergency('ble', '1581F20000D9A22'), now, obs, detector: 'T5')!;
+      List<String> raised(AlertPolicy p, int t, {required bool detector, required bool phone}) => [
+            for (final e in p.consider(
+                nowMs: t,
+                traffic: TrafficResult.empty,
+                aircraft: (_) => null,
+                drones: [byPhone, byDetector],
+                detectorConnected: detector,
+                phoneReceiving: phone))
+              e.droneId!
+          ];
+      // No detector connected, the phone receiving: only what the phone heard.
+      expect(raised(AlertPolicy(), now, detector: false, phone: true), [byPhone.key]);
+      // The phone's receiver off (or not running): nothing.
+      expect(raised(AlertPolicy(), now, detector: false, phone: false), isEmpty);
+      // A detector connected: both, as before.
+      expect(raised(AlertPolicy(), now, detector: true, phone: false), [byPhone.key, byDetector.key]);
+      // The phone last heard its contact 70 s ago; a detector's line kept
+      // the contact fresh, but the detector has since gone: not the phone's to raise.
+      tr.ingest(emergency('ble', '1581F20000D9A11'), now + 70000, obs, detector: 'T5');
+      expect(byPhone.ageS(now + 70000), 0);
+      expect(raised(AlertPolicy(), now + 70000, detector: false, phone: true), isEmpty);
+      expect(AlertPolicy.droneSourceLive(byPhone, now + 70000, detectorConnected: false, phoneReceiving: true), isFalse);
+      expect(AlertPolicy.droneSourceLive(byPhone, now + 59000, detectorConnected: false, phoneReceiving: true), isTrue);
     });
   });
 

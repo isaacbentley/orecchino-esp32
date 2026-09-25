@@ -265,8 +265,9 @@ static inline bool ts_field_dbl(const char* line, const char* key, double* out) 
   return true;
 }
 
-extern bool   g_home_set;          // rx_core.h
-extern double g_home_lat, g_home_lon;
+/// The observer's position, read under the track lock (rx_core.h); false
+/// until one is known.
+bool rx_get_home(double* lat, double* lon);
 
 /// Handle one "fs_*" host command, replying to `src`. Returns false for
 /// anything else.
@@ -303,7 +304,7 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
     }
     uint32_t size = 0;
     ts_field_u32(line, "size", &size);
-    uint64_t needed = tile_bytes_needed(size, LittleFS.totalBytes());
+    uint64_t needed = tile_bytes_needed(size, LittleFS.totalBytes(), tile_file_max(path));
     if (!needed) {
       host_print_to(src, "{\"type\":\"fs_err\",\"msg\":\"bad size\"}\n");
       return true;
@@ -348,7 +349,17 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
       return true;
     }
     s_ts_left -= rawlen;
-    s_ts_file.write(raw, rawlen);
+    if (s_ts_file.write(raw, rawlen) != rawlen) {
+      // Short write (the filesystem ran out after all): a truncated tile
+      // must not stay behind with a CRC that only covers what arrived.
+      char bad[TILE_PATH_MAX];
+      strncpy(bad, s_ts_file.path(), sizeof(bad) - 1);
+      bad[sizeof(bad) - 1] = 0;
+      s_ts_file.close();
+      LittleFS.remove(bad);
+      host_print_to(src, "{\"type\":\"fs_err\",\"msg\":\"write\"}\n");
+      return true;
+    }
     s_ts_crc = esp_rom_crc32_le(s_ts_crc, raw, rawlen);
     host_printf_to(src, "{\"type\":\"ack\",\"q\":%u}\n", (unsigned)seq);
   } else if (!strcmp(cmd, "fs_end")) {
@@ -374,9 +385,9 @@ static inline bool tile_store_host_line(const char* cmd, char* line, uint32_t no
     uint64_t cap = total > TILE_PLAN_RESERVE + other ? total - TILE_PLAN_RESERVE - other : 0;
     uint32_t avg = n >= TILE_PLAN_MIN_SAMPLE ? (uint32_t)(used / n) : TILE_PLAN_DEFAULT_BYTES;
     double lat = NAN, lon = NAN;
-    if (!(ts_field_dbl(line, "lat", &lat) && ts_field_dbl(line, "lon", &lon)) && g_home_set) {
-      lat = g_home_lat;
-      lon = g_home_lon;
+    if (!(ts_field_dbl(line, "lat", &lat) && ts_field_dbl(line, "lon", &lon)) && !rx_get_home(&lat, &lon)) {
+      lat = NAN;
+      lon = NAN;
     }
     char rad[32] = "";
     if (lat >= -85 && lat <= 85 && lon >= -180 && lon <= 180)

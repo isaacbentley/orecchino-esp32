@@ -17,6 +17,11 @@
 // [BleScanFilter.detectorAndRid] is the union the app should always use, so
 // the picker coming and going never restarts the Remote ID scan.
 //
+// Bluetooth turning on ([BleScanBackend.adapterOn]) restarts a scan that
+// leases still hold but that failed or was stopped, and is published as
+// [adapterOn] for clients whose lease never took (a receiver started with
+// Bluetooth off) to try again.
+//
 // The scan's duty follows the power policy ([setDuty]): Android's
 // LOW_LATENCY on Live and Find, BALANCED on the other tabs, LOW_POWER in
 // the background (power_policy.dart). A change restarts the scan through
@@ -163,6 +168,10 @@ abstract class BleScanBackend {
   /// Whether the platform scan runs right now.
   bool get isScanningNow;
 
+  /// True each time the Bluetooth adapter turns on, false when it turns
+  /// off (nothing while unknown).
+  Stream<bool> get adapterOn;
+
   /// Start (or restart) scanning with [filter] at [duty] (never
   /// [ScanDuty.off]: that is no scan); throws when it cannot.
   Future<void> start(BleScanFilter filter, {ScanDuty duty = ScanDuty.lowLatency});
@@ -217,6 +226,12 @@ class FbpScanBackend implements BleScanBackend {
 
   @override
   bool get isScanningNow => FlutterBluePlus.isScanningNow;
+
+  @override
+  Stream<bool> get adapterOn => FlutterBluePlus.adapterState
+      .where((s) => s == BluetoothAdapterState.on || s == BluetoothAdapterState.off)
+      .map((s) => s == BluetoothAdapterState.on)
+      .distinct();
 
   @override
   Future<void> start(BleScanFilter filter, {ScanDuty duty = ScanDuty.lowLatency}) async {
@@ -307,6 +322,7 @@ class BleScanCoordinator extends ChangeNotifier {
   })  : _now = now ?? DateTime.now,
         _sleep = sleep ?? Future<void>.delayed {
     _scanSub = backend.scanning.listen(_onScanning);
+    _adapterSub = backend.adapterOn.listen(_onAdapter);
   }
 
   final List<BleScanLease> _leases = [];
@@ -315,7 +331,7 @@ class BleScanCoordinator extends ChangeNotifier {
   ScanDuty? _runningDuty;
   BleScanFilter? _running; // the filter of the scan we started, while it runs
   Future<void> _chain = Future.value();
-  StreamSubscription<bool>? _scanSub;
+  StreamSubscription<bool>? _scanSub, _adapterSub;
   Timer? _retry, _refresh;
   Duration _backoff = Duration.zero;
   bool _disposed = false;
@@ -323,6 +339,10 @@ class BleScanCoordinator extends ChangeNotifier {
 
   /// Every advertisement of the shared scan.
   Stream<BleAdvert> get adverts => backend.adverts;
+
+  /// The adapter turning on (true) or off (false), for clients whose scan
+  /// could not start: a chance to acquire again.
+  Stream<bool> get adapterOn => backend.adapterOn;
 
   bool get scanning => _running != null;
   BleScanFilter? get runningFilter => _running;
@@ -456,6 +476,19 @@ class BleScanCoordinator extends ChangeNotifier {
     _onScanning(false);
   }
 
+  /// Bluetooth came on: a scan the leases want but that is down (it never
+  /// started, or the adapter going off stopped it) starts now, not at the
+  /// end of the backoff.
+  void _onAdapter(bool on) {
+    if (!on || _disposed || _leases.isEmpty) return;
+    if (_running != null && backend.isScanningNow) return; // up already
+    _retry?.cancel();
+    _backoff = Duration.zero;
+    _running = null;
+    _changed();
+    unawaited(_reconcile(force: true).catchError((Object _) => _onScanningFailed()));
+  }
+
   void _changed() {
     if (!_disposed) notifyListeners();
   }
@@ -466,6 +499,7 @@ class BleScanCoordinator extends ChangeNotifier {
     _retry?.cancel();
     _refresh?.cancel();
     unawaited(_scanSub?.cancel());
+    unawaited(_adapterSub?.cancel());
     if (_running != null) unawaited(backend.stop().catchError((Object _) {}));
     _running = null;
     super.dispose();

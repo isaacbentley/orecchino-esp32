@@ -4,6 +4,8 @@
 // plans before it downloads anything:
 //   1. The area is a CIRCLE around the centre, per zoom (12-15): a tile is
 //      in when the nearest point of its box is within that zoom's radius.
+//      A circle straddling the antimeridian keeps the tiles on both sides
+//      (the column range wraps; TileBox).
 //   2. Tiles already on the board are counted (a sorted list of what is on
 //      flash: key + on-flash bytes, built by walking /tiles).
 //   3. The missing ones are estimated at this board's measured average
@@ -95,12 +97,32 @@ static inline bool tile_in_circle(double lat, double lon, double r, int z, int32
   if (r < 0) return false;
   double w = tile_lon_of(x, z), e = tile_lon_of(x + 1, z);
   double n = tile_lat_of(y, z), s = tile_lat_of(y + 1, z);
+  // The centre in the tile's frame (within 180 deg of the tile's middle):
+  // across the antimeridian its nearest edge is the one 360 deg away in
+  // raw longitude, which a plain clamp would miss.
+  double mid = (w + e) * 0.5;
+  if (lon - mid > 180.0) lon -= 360.0;
+  else if (mid - lon > 180.0) lon += 360.0;
   double plat = lat < s ? s : (lat > n ? n : lat);
   double plon = lon < w ? w : (lon > e ? e : lon);
   return tile_dist_m(lat, lon, plat, plon) <= r;
 }
 
+/// The columns run WEST to EAST from x0 to x1 and may wrap past the
+/// antimeridian: x0 > x1 means x0..lim, then 0..x1 (a circle straddling
+/// +/-180 holds tiles on both sides). Walk them with tile_box_cols() and
+/// tile_box_col(); rows never wrap.
 typedef struct { int32_t x0, y0, x1, y1; } TileBox;
+
+/// How many columns the box spans (wrapping counted through).
+static inline uint32_t tile_box_cols(const TileBox* b, int z) {
+  int32_t n = (int32_t)(1L << z);
+  return b->x0 <= b->x1 ? (uint32_t)(b->x1 - b->x0 + 1) : (uint32_t)(n - b->x0 + b->x1 + 1);
+}
+/// The i-th column of the box (0 <= i < tile_box_cols), wrapped.
+static inline int32_t tile_box_col(const TileBox* b, int z, uint32_t i) {
+  return (int32_t)(((uint32_t)b->x0 + i) & (uint32_t)((1L << z) - 1));
+}
 
 /// The tile rows/columns the circle can touch at zoom z.
 static inline TileBox tile_circle_box(double lat, double lon, double r, int z) {
@@ -111,9 +133,15 @@ static inline TileBox tile_circle_box(double lat, double lon, double r, int z) {
   double n = lat + dlat, s = lat - dlat;
   if (n > 85.0) n = 85.0;
   if (s < -85.0) s = -85.0;
+  // Across the antimeridian the west/east edges wrap round (x0 > x1); a
+  // circle wider than the world takes every column.
+  double w = lon - dlon, e = lon + dlon;
+  if (w < -180.0) w += 360.0;
+  if (e > 180.0) e -= 360.0;
   TileBox b;
-  tile_of(n, lon - dlon, z, &b.x0, &b.y0);
-  tile_of(s, lon + dlon, z, &b.x1, &b.y1);
+  tile_of(n, w, z, &b.x0, &b.y0);
+  tile_of(s, e, z, &b.x1, &b.y1);
+  if (dlon >= 180.0) { b.x0 = 0; b.x1 = (int32_t)(1L << z) - 1; }
   return b;
 }
 
@@ -121,10 +149,12 @@ static inline TileBox tile_circle_box(double lat, double lon, double r, int z) {
 static inline uint32_t tile_circle_count(double lat, double lon, double r, int z) {
   if (r < 0) return 0;
   TileBox b = tile_circle_box(lat, lon, r, z);
-  uint32_t n = 0;
-  for (int32_t x = b.x0; x <= b.x1; x++)
+  uint32_t n = 0, cols = tile_box_cols(&b, z);
+  for (uint32_t i = 0; i < cols; i++) {
+    int32_t x = tile_box_col(&b, z, i);
     for (int32_t y = b.y0; y <= b.y1; y++)
       if (tile_in_circle(lat, lon, r, z, x, y)) n++;
+  }
   return n;
 }
 
@@ -268,10 +298,12 @@ static inline bool tile_plan_next(const TilePlan* p, int* z, int32_t* x, int32_t
     double r = p->radius_m[*z - TILE_PLAN_ZMIN];
     if (r < 0) continue;
     TileBox b = tile_circle_box(p->lat, p->lon, r, *z);
-    int32_t cx, cy;
-    if (*x == INT32_MIN) { cx = b.x0; cy = b.y0; }
-    else { cx = *x; cy = *y + 1; }
-    for (; cx <= b.x1; cx++, cy = b.y0) {
+    uint32_t cols = tile_box_cols(&b, *z), i;   // columns west to east, wrapped at the antimeridian
+    int32_t cy;
+    if (*x == INT32_MIN) { i = 0; cy = b.y0; }
+    else { i = ((uint32_t)*x - (uint32_t)b.x0) & (uint32_t)((1L << *z) - 1); cy = *y + 1; }
+    for (; i < cols; i++, cy = b.y0) {
+      int32_t cx = tile_box_col(&b, *z, i);
       for (; cy <= b.y1; cy++) {
         if (tile_in_circle(p->lat, p->lon, r, *z, cx, cy)) { *x = cx; *y = cy; return true; }
       }

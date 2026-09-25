@@ -8,6 +8,7 @@
   "uas:1581F20000D9A04: prefix dropped, D9A04. DJI-1: 5 characters, whole.",
   "A:B:C:D:E:F:0 (13 characters, not a MAC): last 5 'E:F:0' starts with a letter, kept. 1581F20000_-_D9A05: last 5 'D9A05'."
  ],
+ "hand_checks": [],
  "observer": {
   "lat": 37.7749,
   "lon": -122.4194,

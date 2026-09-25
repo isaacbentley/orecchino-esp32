@@ -92,7 +92,9 @@ class _DetectorsViewState extends State<DetectorsView> {
                 const Eyebrow('Settings'),
                 Glass(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                  child: Column(children: [
+                  // Stretched: the Theme and Power blocks line up with the
+                  // rows on a wide screen instead of floating in the middle.
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                     _phoneRx(),
                     _divider(),
                     _power(),
@@ -726,7 +728,7 @@ class _DetectorsViewState extends State<DetectorsView> {
               child: Container(
                 padding: const EdgeInsets.fromLTRB(4, 6, 6, 6),
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: Glass.flatRadius(BorderRadius.circular(16)),
                   border: Border.all(color: OrecchinoColors.line),
                 ),
                 child: Row(children: [

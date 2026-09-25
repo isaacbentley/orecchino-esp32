@@ -30,12 +30,12 @@ Read first: `README.md` (what every board does), `firmware/common/rx_core.h`
 | Milestone | State | Where |
 | --- | --- | --- |
 | M1 BLE link | Built | `host_link.h` (routing, `HostSrc`, feed), `ble_link.h` (NUS + info service, pairing, rings, notify task, fake transport for host tests); `feed` / `feed_status`; `ble_drop`, `ble_rx_drop` in `hb`; T5 passkey screen (`rx_hook_pairing`) |
-| M2 History, incremental | Built, differently | Still the 48-record NVS ring (`match_log.h`), now with a `seq` per record (`LOG_VERSION` 2, v1 converted on load); `log_get` `since` / `after_utc`, `log_done` `next` / `oldest`; no LittleFS log (below) |
+| M2 History, incremental | Built, differently | Still the 48-record NVS ring (`match_log.h`), now with a `seq` per record (`LOG_VERSION` 3: `seq`, then `tfr_id` and `eu_class`; v1 and v2 rings converted on load); `log_get` `since` / `after_utc`, `log_done` `next` / `oldest`; no LittleFS log (below) |
 | M3-M4 Phone app | Built | `mobile/` (see `mobile/README.md`, including its follow-ups) |
 | M5 T5 Wi-Fi core | Built | `net_sync.h` (state machine, modes, `wifi_*` commands), `net_fetch.h` (HTTPS jobs on a worker task), `net_parse.h` (streaming parsers, URLs), `rx_hop_hold()` in `rx_core.h`; host tests `tests/net_test.cpp` |
 | M6 T5 Wi-Fi UI | Built | WI-FI section on SYSTEM, networks screen, keyboard, joining/result screens in `ui_epd.cpp`; render scenes in `tests/t5_render_test.cpp` |
 | M7 ADS-B and tiles on the T5 | Built | ADS-B through `net_fetch.h` + `traffic.h` (no separate `adsb.h`); tile fetch in `net_fetch.h` (no `tile_fetch.h`) |
-| M8 App polish and release | Partly | Notifications, Wi-Fi over BLE, accessibility done; store metadata, TestFlight / Play track, export and the history timeline not done |
+| M8 App polish and release | Partly | Notifications, Wi-Fi over BLE, accessibility and the scrubbable history timeline (`mobile/lib/features/history/history_timeline.dart`) done; store metadata, TestFlight / Play track and CSV export not done |
 | M9 Traffic alerts | Built, on the T5 only among boards | `traffic.h` + `tests/vectors/traffic/` + `tests/traffic_test.cpp`; `TrafficRules.swift`, `traffic_rules.dart`; T5 drawing; Mac app (`TrafficService.swift`, `TrafficNotifier.swift`, `TrafficViews.swift`, menu bar extra) |
 
 The hardware acceptance tests (B1-B4, the M4-M7 and M9 field tests) are
@@ -44,7 +44,9 @@ not recorded in the repository.
 **Changed from the plan while building it:**
 
 - **No LittleFS match log** (section 3.4's LittleFS log was not
-  written). The NVS ring of 48 kept its size, gained a `seq`, and is saved
+  written). The NVS ring of 48 kept its size, gained a `seq` (`LOG_VERSION`
+  2), then the TFR id and EU class (`tfr_id`, `eu_class`; `LOG_VERSION` 3,
+  80-byte records, older rings converted on load), and is saved
   at most every 10 minutes (was once a minute) plus at the explicit save
   points (T5 power-off, mode switch), to spare the flash. The incremental
   protocol (`since`, `after_utc`, `seq`, `next`, `oldest`) is as planned;
@@ -53,9 +55,11 @@ not recorded in the repository.
   NVS too (`orhome`, source `"saved"` until a fresh one arrives).
 - **Fixed, published passkey.** Every board pairs with passkey 123456
   (DisplayOnly IO capability; the T5 shows it, the others do not need to).
-  It encrypts the link against passers-by, not a determined attacker, and
-  the T5's pairing screen says so. A peer that has not paired within 10 s
-  is dropped. The headless stick does not use Just Works with a 2-minute
+  The link must be authenticated by it: a Just Works pairing (a peer
+  claiming NoInputNoOutput) is refused and its bond deleted, since NimBLE
+  only asks for MITM protection. It keeps passers-by out, not a determined
+  attacker, and the T5's pairing screen says so. A peer that has not
+  paired within 10 s is dropped. The headless stick does not use Just Works with a 2-minute
   window, and there is no "Forget phones" item yet.
 - **TFR limits unchanged** (16 polygons x 24 points). Instead of raising
   them, the Mac (`TFRShape.swift`) and the T5 (`net_poly_fit`) send the 16
@@ -66,13 +70,16 @@ not recorded in the repository.
   buffer) and small field readers; SNTP is a plain UDP query.
 - **The FAA WFS bbox is lon0,lat0,lon1,lat1** (section 4.1 fixed): the
   lat-first order returns an ORA-13200 error page. **adsb.lol's radius is
-  in nautical miles**, verified; the T5 and the Mac ask for 17 NM (31.5 km,
-  just over the rules' 30 km horizon).
+  in nautical miles**, verified; the T5 and the Mac ask for 10 km by default
+  (5–30 km, `NET_ADSB_KM_DEFAULT` / `_MIN` / `_MAX`), rounded up to whole
+  miles: 6 NM (`v2/point/{lat}/{lon}/6`), widened around live drones more
+  than 3 km out so each has 9 km, never past 30 km.
 - **TLS memory.** Every HTTPS request first checks the internal heap (at
-  least 40 KB free and an 18 KB block, `NET_TLS_MIN_FREE` /
-  `NET_TLS_MIN_BLOCK`); below that the job fails with "low memory" in
-  words. The `synced` status line reports `heap_int`, `heap_blk` and
-  `heap_tls`.
+  least 65 KB free and an 18 KB block, `NET_TLS_MIN_FREE` /
+  `NET_TLS_MIN_BLOCK`; a session takes ~52 KB, measured on the board:
+  `heap_int` 76,648 -> `heap_tls` 24,320); below that the job fails with
+  "low memory" in words. The `synced` status line reports `heap_int`,
+  `heap_blk` and `heap_tls`.
 - **Wi-Fi mode default is SYNC**, not Off, but nothing joins until a
   network is saved (the SYSTEM line reads `NOT SET UP, no network saved`).
   The window scans only when two or more networks are saved. Up to 8 new
@@ -89,11 +96,12 @@ not recorded in the repository.
   `traffic.h` and pinned by the vectors): aircraft reported on the ground
   (`"alt_baro":"ground"`, wire `"gnd":1`) never raise LOW or CONVERGING;
   one within 1 km of a drone is raised as a *caution* with the words
-  `, AIRCRAFT ON GROUND`, not a warning; emergencies are still raised.
-  The count shown on every surface (`near_count`) is **airborne** aircraft
-  within 3 km; ground ones are counted separately. If NEAR and CONVERGING
-  both hold, the pair shows NEAR. Hysteresis runs on the wall clock (20 s
-  outside 1.3 km / 200 m), never on evaluation counts.
+  `, AIRCRAFT ON GROUND`, not a warning; there is no emergency-squawk
+  rule. LOW anchors on the observer or the nearest live drone and takes
+  the ground under that anchor. If NEAR and CONVERGING both hold, the pair
+  shows NEAR. Hysteresis runs on the wall clock (20 s outside 1.3 km /
+  200 m, or with the drone no longer live), never on evaluation counts.
+  §8.2 below is the table as built.
 - **`traffic` lines** carry a top-level `t` and `age_s`, and each set ends
   with `traffic_done` (which installs an empty set when no lines came
   before it). Only boards built with `ORECCHINO_TRAFFIC` take them (the
@@ -123,7 +131,7 @@ break them.
 - **Boards.** T5 E-Paper S3 Pro (ESP32-S3, 16 MB flash, 8 MB PSRAM, 960x540
   e-paper, touch, GPS, RTC, LittleFS 13 MB partition), T-Embed CC1101
   (ESP32-S3, 320x170 LCD, knob, no touch), SenseCAP Indicator (ESP32-S3,
-  LittleFS 5.8 MB), Waveshare AMOLED (ESP32-C6), XIAO ESP32-C3 USB stick (headless), XIAO
+  LittleFS 5.9 MB), Waveshare AMOLED (ESP32-C6), XIAO ESP32-C3 USB stick (headless), XIAO
   ESP32-C3 test beacon (`orecchino_tx`, transmit only). Build commands for
   each are in `tools/flash_*.sh` and the README.
 - **Receiver core.** `rx_core.h` decodes Remote ID from Wi-Fi beacons, Wi-Fi
@@ -135,7 +143,7 @@ break them.
   directly on NimBLE's GAP layer (`ble_gap_ext_disc`, `rx_gap_event`); the
   `NimBLEScan` path remains only as the fallback for builds without it.
 - **LittleFS.** The T5, T-Embed and AMOLED all have a 13 MB `littlefs`
-  partition in their `partitions.csv`, and the SenseCAP 5.8 MB, but only the
+  partition in their `partitions.csv`, and the SenseCAP 5.9 MB, but only the
   T5 and SenseCAP mount it today (through `tile_store.h`). The T-Embed and
   AMOLED sketches must call `LittleFS.begin(true)` before using it.
 - **Radio sharing.** An ESP32 has one 2.4 GHz radio. Wi-Fi promiscuous
@@ -319,8 +327,10 @@ GPS fix is newer than 2 minutes.
 - *(Not built; see section 0.)* The plan was a LittleFS log for boards
   with LittleFS (T5, T-Embed, AMOLED), 8 MB of version-2 records rotated
   between two files. What was built instead: a version-2 `LogRec` (the 60
-  bytes plus a `uint32_t seq`, 64 bytes; `LOG_VERSION` 2, the v1 ring
-  converted on load) in the same 48-record NVS ring on every board, with
+  bytes plus a `uint32_t seq`, 64 bytes), since grown to version 3 (a
+  14-character `tfr_id` and `eu_class`, 80 bytes; `LOG_VERSION` 3, v1 and
+  v2 rings converted on load) in the same 48-record NVS ring on every
+  board, with
   writes kept on the loop (never the decode task) and debounced.
 - `log_get` keeps its meaning (everything held, then live, then `log_done`).
   New: `{"cmd":"log_get","since":<seq>}` returns only records with
@@ -366,7 +376,7 @@ GPS fix is newer than 2 minutes.
 | --- | --- | --- | --- |
 | Clock | SNTP `pool.ntp.org` (fallback `time.google.com`) | each sync | system clock + RTC chip (`periph_set_utc_time_host`) |
 | TFRs | FAA WFS (section 1) with `&bbox=<lon0>,<lat0>,<lon1>,<lat1>,EPSG:4326` (longitude first; verified: lat-first returns an ORA-13200 error page) around home, 200 km | every 15 min | the core's TFR table (built: limits kept at 16 x 24, each TFR fitted as an enclosing polygon; section 0) |
-| ADS-B | adsb.lol `v2/point/{lat}/{lon}/17` (radius in NM, verified) | every 10 s in STAY mode; else each sync window | built: 64 staged in PSRAM by `net_fetch.h`, handed to `traffic_ingest()` (32 kept within 30 km, dropped after 60 s) |
+| ADS-B | adsb.lol `v2/point/{lat}/{lon}/6` (radius in whole NM, rounded up from 10 km by default, 5–30 km; verified; lat/lon at 0.01°) | every 15 s in STAY mode (`NET_ADSB_EVERY_MS`; 10 s drew a 429, which now holds the job for `Retry-After`, a minute at least); else each sync window | built: 64 staged in PSRAM by `net_fetch.h`, handed to `traffic_ingest()` (32 kept within 30 km, dropped after 60 s) |
 | Map tiles | CARTO `dark_all` | on demand ("Update map") and weekly | `/tiles/{z}/{x}/{y}.png` via `tile_store.h` |
 
 All HTTPS. Use `WiFiClientSecure` with the Mozilla root bundle compiled in
@@ -411,7 +421,7 @@ Three user-selectable **Wi-Fi modes** (stored in NVS):
 - **Sync.** A sync window every 15 minutes (configurable 5-60), plus on
   demand. Typical window 5-10 s: Remote ID Wi-Fi coverage drops to one
   channel for about 1% of the time. ADS-B refreshes only at sync time.
-- **Stay connected.** Associate and stay. Live ADS-B every 10 s. Remote ID
+- **Stay connected.** Associate and stay. Live ADS-B every 15 s. Remote ID
   Wi-Fi reception is then limited to the access point's channel (BLE is
   unaffected); the footer shows `WI-FI CH 6 ONLY` (or whichever) so the user
   knows. This is the mode for a board on a desk next to its router.
@@ -847,52 +857,139 @@ header, `firmware/common/traffic.h`, ported line for line to the apps
 ### 8.1 Where the aircraft come from
 
 - **T5 on Wi-Fi:** its own fetch (section 4.1).
-- **Any board, from an app:** new command
-  `{"cmd":"traffic","t":<unix s of the data>,"ac":[{"hex":"a1b2c3","cs":"UAL123","ty":"B738","lat":37.8,"lon":-122.4,"altg_m":820,"altb_ft":2650,"gs_kt":180,"trk":270,"vr_fpm":-640,"sq":"7700","em":1,"age_s":3}, ...]}`,
+- **Any board, from an app:** the `traffic` lines (format and every field
+  at the top of `firmware/common/traffic.h`):
+  `{"cmd":"traffic","t":<unix s of the data>,"age_s":<s since fetched>,"ac":[{"hex":"a1b2c3","cs":"UAL123","ty":"B738","lat":37.8,"lon":-122.4,"altg_m":820,"altb_ft":2650,"gs_kt":180,"trk":270,"vr_fpm":-640,"sq":"7700","em":1,"gnd":0,"age_s":3}, ...]}`,
   at most 6 aircraft per line (8 would come to about 1,500 of the host line
-  buffer's 1,600 bytes; send several lines), nearest first, plus `{"cmd":"traffic_done","n":<total>}`.
-  The Mac app and the phone send it every 10 s while they have data, so the
-  T-Embed and SenseCAP get traffic alerts without Wi-Fi of their own.
-- Keep at most 32 aircraft within 30 km of the observer; drop any whose
-  position is older than 60 s.
+  buffer's 1,600 bytes; send several lines), nearest first, then
+  `{"cmd":"traffic_done","n":<total>,"age_s":<s>}`, which installs the set
+  (an empty set when no `traffic` line came before it). `age_s` on an
+  aircraft is its position age (required; without it, or over 60 s, the
+  aircraft is dropped); `age_s` at the top level is the set's age (the one
+  on `traffic_done` wins; absent 0, `null` or negative makes the set
+  stale). `gnd` (or `"altb_ft":"ground"`) marks an aircraft on the ground.
+  A mismatch between `n` and what arrived marks the set partial (it is
+  still used). The Mac app and the phone send it every 10 s while they have
+  data, so the T-Embed and SenseCAP get traffic alerts without Wi-Fi of
+  their own.
+- Keep at most 32 aircraft within 30 km of the observer, one per `hex`;
+  drop any whose position is older than 60 s.
 
 ### 8.2 The rules
 
+> **As built.** The reference is the header comment of
+> `firmware/common/traffic.h` (the rule table, every choice made where the
+> first draft of this section left room, the words). What follows is that
+> table; where they differ, the header and the vectors win. The first
+> draft's emergency-squawk advisory (`HIJACK` / `RADIO FAILURE` /
+> `EMERGENCY`) was dropped with the UAS-first decision: ADS-B is used only
+> for conflicts with drones, and the ADVISORY level went with it.
+
 Definitions: an aircraft *position* is fresh when `seen_pos` (or `age_s`)
-is under 30 s; a drone is live when heard within 60 s and has a position.
-Heights are compared like with like, and never as though they were:
+is under 30 s and present when it is 60 s old or less (older ones are
+ignored); a drone is *live* when heard within 60 s and has a position (a
+drone without a position never pairs). Heights are compared like with like,
+and never as though they were:
 
 - Drone height for comparison: the Location message's geodetic altitude
   (`alt_geo`, metres, height above the WGS-84 ellipsoid), with ADS-B
   `alt_geom` (feet, geometric altitude, also above the WGS-84 ellipsoid)
   converted to metres. Same reference, so they compare directly; drone
-  `height` (above take-off or ground) is never used for this.
+  `height` (above take-off or ground) is never used for this. The
+  ODID/firmware "unknown" marker (-1000, anything at or below -999) reads
+  as unknown on either side.
 - If either geometric value is missing, the vertical test is **unknown**,
-  not passed: the alert is raised with the words `height unknown` instead of
-  a separation, never silently dropped and never shown as safe.
+  not passed: the alert is raised with the words `, HEIGHT UNKNOWN` instead
+  of a separation, never silently dropped and never shown as safe.
 - ADS-B `alt_baro` is pressure altitude above mean sea level; it is shown
-  (as FL or feet) but not compared with drone heights.
+  (as FL or feet) but never compared with a drone. LOW alone falls back to
+  it for the aircraft's own height (then `, APPROX.` / `ABOUT`).
 
-| Class | Condition | Words (all surfaces) |
-| --- | --- | --- |
-| **Traffic near a drone** (warning) | live drone and fresh aircraft within 1.0 km horizontally and 150 m (500 ft) vertically, or unknown vertical within 1.0 km | `TRAFFIC NEAR DRONE <id>` |
-| **Converging** (warning) | closest approach between drone and aircraft, from both velocity vectors (aircraft `gs`/`track`, drone speed/heading), within 60 s and under 500 m horizontally and 150 m vertically; if either velocity is missing this rule is skipped (the proximity rule above still applies) | `TRAFFIC CONVERGING WITH <id>, <n> S` |
-| **Low traffic near you** (caution) | fresh aircraft within 3 km of the observer and below observer elevation + 460 m (1,500 ft); observer elevation from GPS (T5), the phone, or the Mac's position; unknown elevation: use 460 m above sea level and say `approx.` | `LOW TRAFFIC <bearing> <km>` |
-| **Emergency squawk** (advisory) | `squawk` 7500 / 7600 / 7700 or `emergency` set, within 30 km | `HIJACK` / `RADIO FAILURE` / `EMERGENCY` + callsign |
+| Level | Kind | Condition | Words (all surfaces) |
+| --- | --- | --- | --- |
+| **WARNING** | NEAR | live drone and fresh airborne aircraft within 1,000 m horizontally and 150 m vertically, or the vertical unknown within 1,000 m | `TRAFFIC NEAR DRONE <id>` |
+| **WARNING** | CONVERGING | both velocities known (aircraft `gs`/`track`, drone speed/heading): closest point of approach in (0, 60] s, miss distance under 500 m and the vertical at CPA (aircraft vertical rate applied; the drone's is not) within 150 m, or unknown. Either velocity missing: the rule is skipped (NEAR still applies). Not computed for an aircraft on the ground | `TRAFFIC CONVERGING WITH <id>, <n> S` |
+| **CAUTION** | NEAR | as NEAR, the aircraft reported on the ground (`"alt_baro":"ground"`, wire `gnd`): shown, but it must not flash, notify like a warning or push airborne warnings out of the list | `TRAFFIC NEAR DRONE <id>, AIRCRAFT ON GROUND` |
+| **CAUTION** | LOW | a fresh airborne aircraft within 3 km of the observer *or of any live drone*, below 460 m (1,500 ft) above ground, or with that height unknown (see below); one alert per aircraft | `LOW TRAFFIC <bearing> <dist>` (+ `, HEIGHT UNKNOWN` / `, APPROX.`) |
 
-- **Hysteresis:** an alert clears only when the pair is beyond 1.3 km or
-  200 m for 20 s, so it cannot flap.
-- **Stale data:** when the newest ADS-B data is older than 30 s, no new
-  traffic alert is raised, existing ones show `ADS-B <n> S OLD`, and every
-  surface shows `TRAFFIC DATA STALE` instead of a traffic count.
+LOW, the details (UAS airspace intrusion):
+
+- **Anchor:** the observer when the aircraft is within 3 km of it
+  (`from_observer`, no drone id), else the nearest live drone within 3 km.
+  Distance and bearing are from the anchor.
+- **Ground, per anchor:** an aircraft anchored on a drone uses that drone's
+  `alt_geo` minus its `height` (above take-off or ground) when both are
+  known; otherwise, and for one anchored on the observer, the fallback: the
+  observer's elevation (the T5's GPS with the geoid separation added, the
+  Mac's ellipsoidal altitude, the phone's altitude; see the mobile README
+  for the phone's reference) when known, else the lowest live drone's
+  `alt_geo` minus `height`, else unknown. The observer may sit in a valley
+  with a drone on a ridge 30 km away: the ground that matters is the one
+  under the anchor.
+- **Height unknown** is raised, never silent, with `, HEIGHT UNKNOWN`, with
+  one bound: with the ground unknown but the aircraft's own height known,
+  only when that height is below 3,500 m MSL (UAS airspace is at most 460 m
+  above ground, and ground rarely lies above 3,000 m where drones fly;
+  without the bound every airliner overhead would read `HEIGHT UNKNOWN`
+  whenever the ground is unknown).
+- An aircraft on the ground never raises LOW (an existing LOW clears 20 s
+  after it lands, reading `, AIRCRAFT ON GROUND` meanwhile). A warning for
+  the same aircraft supersedes its LOW (kept by the hysteresis, not shown).
+
+Every alert carries a **resolution advisory** for the drone, grounded in
+14 CFR 107.37(a) (a small unmanned aircraft yields the right of way to all
+aircraft and may not pass over, under or ahead of one unless well clear):
+`action` is the short instruction, `resolution` the action plus the
+geometry that justifies it.
+
+| Aircraft | Action |
+| --- | --- |
+| LOW (any) | `BE READY TO LAND DRONES` |
+| on the ground | `KEEP CLEAR OF AIRCRAFT ON GROUND` |
+| more than 30 m below the drone | `GIVE WAY: MOVE <away>, THEN LAND <id>` (descending would close on it; `<away>` is the 8-point direction opposite the aircraft) |
+| above, level (within 30 m) or height unknown | `GIVE WAY: DESCEND AND LAND <id>` |
+
+The geometry reads `AIRCRAFT <v> M ABOVE` / `BELOW` / `LEVEL WITHIN 30 M` /
+`HEIGHT UNKNOWN` / `ON GROUND`, then `, <dist> <bearing>` from the drone
+(`<n> M` to the nearest 10 m under 1 km, else `<d.d> KM`), then
+`, CLOSEST IN <n> S` when a closest approach within 60 s is known; for LOW
+`AIRCRAFT <v> M ABOVE GROUND` (`ABOUT <v>` when barometric, `NEAR GROUND
+LEVEL` at or below it) — e.g. `GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT
+90 M ABOVE, 800 M NE, CLOSEST IN 24 S`, `BE READY TO LAND DRONES; AIRCRAFT
+240 M ABOVE GROUND, 2.4 KM W`. The words advise; they never claim the drone
+is out of danger. `<id>` is a readable tail of the drone's id (a MAC reads
+`MAC 4C:C5:A2`, a long UAS id its last 5 characters grown past leading
+punctuation).
+
+- **Hysteresis (wall clock, never evaluation counts):** an alert, once
+  raised, is kept while its condition holds or while it is *in hold*: the
+  drone live, both present, within 1.3 km and (vertical unknown or within
+  200 m). It is removed after 20 s continuously out of hold, so it cannot
+  flap; a drone that goes silent releases its holds. NEAR stays NEAR while
+  in hold even if only CONVERGING is raised; outside hold a raised
+  CONVERGING replaces it. A held pair keeps its last numbers when its
+  aircraft leaves the set; a held CONVERGING with no CPA now reads without
+  the seconds. LOW holds while its condition holds. At most 16 alerts,
+  ordered level, kind (NEAR, CONVERGING, LOW), distance; a new one replaces
+  the last only if it ranks before it.
+- **Stale data:** when the newest ADS-B data is older than 30 s (or its age
+  is unknown), no new alert is raised, existing ones are held with their
+  last numbers and `ADS-B <n> s old`, and every surface shows
+  `TRAFFIC DATA STALE, data <n> s old`. No source at all:
+  `CONFLICT WATCH OFF: no ADS-B source`.
 - **Absence is not safety.** Not every aircraft broadcasts ADS-B (gliders,
   some helicopters, older light aircraft), and the feed has gaps. No surface
-  ever says "clear", "no traffic" or "safe": the most it says is
-  `no ADS-B traffic reported within 3 km`, with the data age.
+  ever says "clear" (other than `KEEP CLEAR OF`), "no traffic" or "safe":
+  the one status line is `conflict watch on, no ADS-B conflicts, data <n> s
+  old`, `conflict watch on, 2 ADS-B conflicts, data <n> s old` or
+  `conflict watch on, low traffic, 1 ADS-B conflict, data <n> s old` —
+  `low traffic` whenever a LOW alert shows, one or many; conflicts count
+  pair alerts. Aircraft are never counted anywhere.
 - **Wording:** these are reported positions, not predictions of collision.
-  Never use "collision", "conflict" or "TCAS". Always show the data age.
-  The T5 footer's existing `QUIET <n> MIN` is about Remote ID only (no drone
-  heard lately); traffic must never reuse that word.
+  Never "collision", "safe", "conflict resolved" or "TCAS"; "conflict
+  watch" and "ADS-B conflicts" are the user's terms. Always show the data
+  age. The T5 footer's existing `QUIET <n> MIN` is about Remote ID only (no
+  drone heard lately); traffic must never reuse that word.
 - **Rate limits:** a notification (phone, Mac) at most once per
   drone-aircraft pair per 5 minutes; the on-screen alert stays for as long
   as the condition does.

@@ -32,37 +32,42 @@ echo "== T5 flash script clock step (bash against a fake board on a pty)"
 tests/flash_clock_test.sh
 
 echo "== ODID decoder (C, golden vectors from opendroneid/wireshark-dissector)"
-cc -std=c11 -Wall -Wextra -O2 tests/odid_test.c -o "$BIN/odid_test"
+cc -std=c11 -Wall -Wextra -Werror -O2 tests/odid_test.c -o "$BIN/odid_test"
 "$BIN/odid_test"
 
 echo "== Solar position & sundown engine (C, NOAA algorithms)"
-cc -std=c11 -Wall -Wextra -O2 tests/solar_test.c -lm -o "$BIN/solar_test"
+cc -std=c11 -Wall -Wextra -Werror -O2 tests/solar_test.c -lm -o "$BIN/solar_test"
 "$BIN/solar_test"
 
 echo "== Radio cores (C++ against host shims: contact merge, auth assembly, TX off switches and schedule)"
-c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I tests/host_shim -I firmware/common -I firmware/libraries/Monocypher/src \
   tests/core_test.cpp tests/host_shim/shim.cpp \
   firmware/libraries/Monocypher/src/monocypher.cpp -o "$BIN/core_test"
 "$BIN/core_test"
 
+echo "== T5 GPS (C++: NMEA sentences with and without a fix, the placeholder date, the clock's year gate)"
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
+  -I firmware/orecchino_t5epd tests/t5_gps_test.cpp -o "$BIN/t5_gps_test"
+"$BIN/t5_gps_test"
+
 echo "== Fuel gauges (C++ against simulated BQ27220 and AXP2101 chips)"
-c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I firmware/common tests/gauge_test.cpp -o "$BIN/gauge_test"
 "$BIN/gauge_test"
 
 echo "== Traffic Rules Engine & Alerts (C++ against golden vectors)"
-c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I firmware/common tests/traffic_test.cpp -o "$BIN/traffic_test"
 "$BIN/traffic_test"
 
 echo "== T5 Wi-Fi (C++: the real net_sync.h state machine on fake radio/clock/fetch ops, wifi_* commands, TFR/ADS-B/SNTP/tile parsing)"
-c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I firmware/common tests/net_test.cpp -o "$BIN/net_test"
 "$BIN/net_test"
 
 echo "== Map tile plan (C++: circle of tiles, flash budget and shrinking, eviction, sync stopping at the reserve)"
-c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I firmware/common tests/tile_plan_test.cpp -o "$BIN/tile_plan_test"
 "$BIN/tile_plan_test"
 
@@ -71,7 +76,7 @@ echo "== Map tile images (C++: format sniffing, the vendored JPEGDEC to grey and
 # built without UBSan, the test with it.
 c++ -std=c++17 -g -O1 -fsanitize=address -w -c -I firmware/libraries/JPEGDEC/src \
   firmware/libraries/JPEGDEC/src/JPEGDEC.cpp -o "$BIN/jpegdec.o"
-c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I firmware/common -I firmware/libraries/JPEGDEC/src tests/tile_image_test.cpp "$BIN/jpegdec.o" -o "$BIN/tile_image_test"
 "$BIN/tile_image_test"
 
@@ -84,12 +89,12 @@ if ! wanted render; then
 elif [ ! -d "$GFX/Fonts" ]; then
   skip render "Adafruit GFX library with its Fonts/ not found at $GFX"
 else
-  c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+  c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
     -I tests/host_shim -I firmware/common -I firmware/orecchino_t5epd -I "$GFX" \
     tests/t5_render_test.cpp tests/host_shim/shim.cpp -o "$BIN/t5_render"
   T5_OUT="${T5_OUT:-/tmp}" "$BIN/t5_render"            # scenes land in /tmp/t5_*.pgm
   echo "== T-Embed handheld render (C++ against host shims: text on screen and clear, range rate, partial flush)"
-  c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra \
+  c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
     -I tests/host_shim -I firmware/common -I firmware/orecchino_tembed -I "$GFX" \
     tests/tembed_render_test.cpp tests/host_shim/shim.cpp -o "$BIN/tembed_render"
   TEMBED_OUT="${TEMBED_OUT:-/tmp}" "$BIN/tembed_render"  # scenes land in /tmp/tembed_*.ppm

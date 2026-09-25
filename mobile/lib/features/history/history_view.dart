@@ -642,7 +642,7 @@ class _ReplayState extends State<_Replay> with SingleTickerProviderStateMixin {
           // Sized once; only the painter's inputs change as the replay runs.
           // The viewport is chosen so the tilted dome (about 0.9 of the ring
           // radius above and below its centre) stays inside the box, clear
-          // of the progress bar under it.
+          // of the progress bar under it. Flat: the top-down radar, no dome.
           child: ClipRect(child: LayoutBuilder(builder: (context, box) {
             final size = Size(box.maxWidth, box.maxHeight);
             return AnimatedBuilder(
@@ -652,7 +652,7 @@ class _ReplayState extends State<_Replay> with SingleTickerProviderStateMixin {
                 final cam = SkyCamera.fit(
                   size: size,
                   viewport: Rect.fromLTWH(0, -size.height * 0.12, size.width, size.height * 1.18),
-                  tiltDeg: 58,
+                  tiltDeg: Look.flat ? 0 : 58,
                   yawDeg: -25 + 50 * p,
                   rangeM: range,
                 );
@@ -792,11 +792,11 @@ class _RecordCard extends StatelessWidget {
           color: selected
               ? color.withValues(alpha: 0.10)
               : OrecchinoColors.glassOver(OrecchinoColors.void0).withValues(alpha: 0.75),
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: Glass.flatRadius(BorderRadius.circular(18)),
           border: Border.all(color: selected ? color.withValues(alpha: 0.7) : OrecchinoColors.glassEdge),
         ),
         child: InkWell(
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: Glass.flatRadius(BorderRadius.circular(18)),
           onTap: onTap,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 14, 12),

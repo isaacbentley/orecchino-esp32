@@ -1,10 +1,20 @@
 // traffic_words.dart — the order every traffic surface uses: the alert's
 // action first ("GIVE WAY: DESCEND AND LAND D9A11"), then the geometry that
-// justifies it (the rest of the rules' resolution), then the rule's words.
+// justifies it (the rest of the rules' resolution), then the rule's words;
+// and the one altitude every surface shows for an aircraft
+// ([TrafficAircraftAltitude.altitudeM]).
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'traffic_rules.dart';
+
+/// The altitude an aircraft is shown at, everywhere: its pressure altitude
+/// as reported (what a pilot reads), else its geometric altitude, else
+/// none. The alert words (AlertWords.altitudeFt), the Live list and the
+/// traffic widgets all show the same figure this way.
+extension TrafficAircraftAltitude on TrafficAircraft {
+  double? get altitudeM => altBaroM ?? altGeomM;
+}
 
 /// What to do: 'GIVE WAY: DESCEND AND LAND D9A03', 'BE READY TO LAND
 /// DRONES'. Every surface leads with it.

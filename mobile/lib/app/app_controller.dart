@@ -14,7 +14,11 @@
 //   foreground and the visible tab ([setVisibility]); the location, the
 //   compass, the phone's receiver and ADS-B follow it. The compass heading
 //   has its own listenable ([heading]): turning the phone repaints the sky
-//   and Find's pointer, not the whole app.
+//   and Find's pointer, not the whole app. Whether the app starts in the
+//   foreground comes from its lifecycle state (main.dart): a headless
+//   start (Android waking the app for an associated detector, iOS
+//   relaunching it for Bluetooth) runs the background policy from the
+//   first moment, not the foreground one until the screen is opened.
 // - Reconnecting: to a pinned detector the app keeps one pending connect
 //   (no timeout, no scanning) where the platform has one: on iPhone
 //   always, on Android once the detector is associated with the app
@@ -120,17 +124,21 @@ class AppController extends ChangeNotifier {
     this.nativeRx,
     this.watch,
     this.startTimers = true,
+    bool foreground = true,
   })  : ble = ble ?? BleService(),
         sim = sim ?? SimulatedDetector(),
         location = location ?? LocationService(),
         alerts = alerts ?? SilentAlertSink(),
-        adsb = adsb ?? AdsbSource() {
+        adsb = adsb ?? AdsbSource(),
+        _foreground = foreground {
     sync = SyncEngine(db: db, sendCommand: (c) => link.send(c));
   }
 
   /// The real app: one Bluetooth scan coordinator shared by the detector
   /// picker (BleService) and the phone's own receiver, switched together.
-  factory AppController.platform({required AppDatabase db, AlertSink? alerts}) {
+  /// [foreground]: whether the app starts on screen (main.dart reads the
+  /// lifecycle state; a headless start is not).
+  factory AppController.platform({required AppDatabase db, AlertSink? alerts, bool foreground = true}) {
     final coordinator = BleScanCoordinator(FbpScanBackend());
     return AppController(
       db: db,
@@ -138,6 +146,7 @@ class AppController extends ChangeNotifier {
       ble: BleService(transport: CoordinatedBleTransport(coordinator)),
       nativeRx: NativeRxService.platform(coordinator: coordinator),
       watch: WatchService.platform(),
+      foreground: foreground,
     );
   }
 
@@ -226,7 +235,7 @@ class AppController extends ChangeNotifier {
 
   // ------------------------------------------------------------------ power
 
-  bool _foreground = true;
+  bool _foreground; // from the constructor, then setVisibility
   AppTab _tab = AppTab.live;
   bool _reduceMotion = false;
   late PowerPolicy _power = _policyNow();
@@ -266,9 +275,12 @@ class AppController extends ChangeNotifier {
     if (_foreground && !wasFg) {
       // Back in front: fresh time and position to the detector, and the
       // traffic picture if it is due; a watch stopped from its
-      // notification may start again, and a pause ends.
+      // notification may start again, and a pause ends, with the mute it
+      // set (a "Mute 10 min" of the person's own is not the pause's).
       _watchStopped = false;
       _watchPausedUntilMs = 0;
+      if (_pauseMuteUntilMs != 0 && policy.mutedUntilMs == _pauseMuteUntilMs) policy.unmute();
+      _pauseMuteUntilMs = 0;
       unawaited(pushContext());
       if (adsbDue(nowMs())) unawaited(refreshTraffic());
     }
@@ -281,6 +293,13 @@ class AppController extends ChangeNotifier {
   Set<String> _companions = {};
   bool _watchStopped = false; // "Stop" in the notification, until the app is opened
   int _watchPausedUntilMs = 0; // "Pause 1 h"
+  int _pauseMuteUntilMs = 0; // the mute the pause set, ended with it
+  int _watchRetryMs = 0; // after a start Android refused, not before this
+  bool _watchStarting = false; // a start is awaiting Android's answer
+
+  /// How long after a refused start the service is tried again (while the
+  /// app stays on screen).
+  static const watchRetry = Duration(seconds: 30);
 
   /// Detectors associated through Android's CompanionDeviceManager.
   Set<String> get companions => Set.unmodifiable(_companions);
@@ -315,6 +334,7 @@ class AppController extends ChangeNotifier {
     await db.setSetting('watch_bg', on ? '1' : '0');
     if (on) {
       _watchStopped = false;
+      _watchRetryMs = 0; // the person asked: try now
       // Reconnecting in the background works best with the detector
       // associated (the system asks, once per detector).
       for (final d in await db.pinnedDetectors()) {
@@ -325,19 +345,32 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
+  /// The service should be running (on, and not stopped from its
+  /// notification).
+  bool get _watchWanted => settings.watchInBackground && !_watchStopped;
+
   /// Start, update or stop the service to match the setting. It starts
-  /// only while the app is on screen.
+  /// only while the app is on screen; a start Android refused (its
+  /// foreground start did not go through: a permission not yet granted) is
+  /// tried again [watchRetry] later, from the tick, while it stays on screen.
   Future<void> _syncWatch() async {
     final w = watch;
     if (w == null || !w.supported || _disposed) return;
-    final want = settings.watchInBackground && !_watchStopped;
-    if (!want) {
+    if (!_watchWanted) {
       if (w.running) await w.stop();
       return;
     }
     if (!w.running) {
-      if (!_foreground) return;
-      await w.start(watchText(), location: location.status == LocationStatus.ok);
+      if (!_foreground || _watchStarting) return; // a start can take seconds: one at a time
+      final now = nowMs();
+      if (now < _watchRetryMs) return;
+      _watchStarting = true;
+      try {
+        final ok = await w.start(watchText(), location: location.status == LocationStatus.ok);
+        _watchRetryMs = ok ? 0 : now + watchRetry.inMilliseconds;
+      } finally {
+        _watchStarting = false;
+      }
       _changed();
     } else {
       await w.update(watchText());
@@ -350,6 +383,7 @@ class AppController extends ChangeNotifier {
       case 'pause':
         _watchPausedUntilMs = now + const Duration(hours: 1).inMilliseconds;
         policy.mute(now, const Duration(hours: 1).inMilliseconds);
+        _pauseMuteUntilMs = policy.mutedUntilMs;
         unawaited(alerts.ongoing(null));
         _ongoingId = null;
         _applyPower();
@@ -618,7 +652,7 @@ class AppController extends ChangeNotifier {
     } else if (msg is NetStatusMessage && msg.map != null && msg.map!.isNotEmpty) {
       mapPlan = msg.map;
     } else if (msg is LogClearedMessage) {
-      unawaited(_onLogCleared());
+      unawaited(_onLogCleared(msg.logId));
     }
   }
 
@@ -631,7 +665,13 @@ class AppController extends ChangeNotifier {
     final existing = await db.getDetector(id);
     final info = await ble.connect(id, pinnedBoard: existing?.bonded == true ? existing!.board : null);
     _pairing = false;
-    if (info == null) return false;
+    if (info == null) {
+      // Connecting tore down any link there was (to a pinned detector):
+      // go back to it rather than sit disconnected until the person acts.
+      _reconnectDelayS = 5;
+      _scheduleReconnect();
+      return false;
+    }
     await _pin(id, name, info);
     // Android: associate it now, while the person is here, so later
     // reconnects wait for it instead of scanning.
@@ -641,12 +681,13 @@ class AppController extends ChangeNotifier {
 
   /// The detector's log was cleared, because this phone asked or from its
   /// own screen (it tells every connected app): start a new log epoch and
-  /// sync from the start of its new log. This phone's history stays.
-  Future<void> _onLogCleared() async {
+  /// sync from the start of its new log ([logId], when the board says
+  /// which). This phone's history stays.
+  Future<void> _onLogCleared(int? logId) async {
     final id = connectedDetectorId;
     if (id == null) return;
     sync.abort('the detector cleared its log');
-    await db.resetDetectorLog(id);
+    await db.resetDetectorLog(id, logId: logId);
     final wait = _clearWait;
     _clearWait = null;
     if (wait != null && !wait.isCompleted) wait.complete();
@@ -744,12 +785,15 @@ class AppController extends ChangeNotifier {
     _reconnectDelayS = (_reconnectDelayS * 2).clamp(5, 60);
   }
 
+  /// A reconnect to a pinned detector is on its timer (for the tests).
+  @visibleForTesting
+  bool get reconnectPending => _reconnect?.isActive ?? false;
+
   Future<void> disconnect() async {
     _reconnect?.cancel();
     sync.abort('disconnected');
     _pinnedId = null;
     await ble.disconnect();
-    unawaited(alerts.foreground(null));
     _changed();
   }
 
@@ -767,7 +811,6 @@ class AppController extends ChangeNotifier {
       // The link dropped (or was replaced): stop what needed it.
       _pinnedId = null;
       sync.abort();
-      unawaited(alerts.foreground(null));
       if (!_pairing) _scheduleReconnect();
     }
     _changed();
@@ -775,11 +818,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> _onLinkReady() async {
     if (!detectorReady) return;
-    // The connection's ongoing notification: Android's watch service when
-    // that is on (its own notification says so), otherwise the alerts'.
-    if (!settings.demo && !(watch?.supported ?? false)) {
-      unawaited(alerts.foreground('Orecchino connected to 1 detector'));
-    }
+    // The connection shows in Android's watch notification when that is
+    // on ("T5 connected"); iOS has no ongoing notification for it.
     unawaited(_syncWatch());
     await _send(HostCommands.feed(on: true));
     await pushContext();
@@ -864,8 +904,10 @@ class AppController extends ChangeNotifier {
       return;
     }
     try {
-      final list = await adsb.fetch(area, now);
-      traffic.update(list, now, area);
+      // Stamped when the answer arrives, not when it was asked for: a slow
+      // fetch must not make the set look older than it is.
+      final answer = await adsb.fetch(area, clock: nowMs);
+      traffic.update(answer.aircraft, answer.atMs, area);
       if (_adsbFailures > 0 && kDebugMode) debugPrint('adsb: back after $_adsbFailures failures');
       _adsbError = null;
       _adsbFailures = 0;
@@ -927,6 +969,7 @@ class AppController extends ChangeNotifier {
       aircraft: traffic.byHex,
       drones: tracker.contacts,
       detectorConnected: detectorReady,
+      phoneReceiving: settings.phoneRx && (nativeRx?.running ?? false),
       obsLat: o?.lat,
       obsLon: o?.lon,
       headingDeg: headingDeg,
@@ -953,7 +996,8 @@ class AppController extends ChangeNotifier {
     // In the background the scan follows whether a drone was heard lately
     // (and a pause's end).
     if (!_foreground) _applyPower();
-    if (watchRunning) unawaited(_syncWatch());
+    // The watch's words; or, after a refused start, another try in time.
+    if (watchRunning || (_watchWanted && _foreground)) unawaited(_syncWatch());
     // The phone's own records, every few seconds.
     if (now - _lastPhoneFlushMs >= 5000) {
       _lastPhoneFlushMs = now;

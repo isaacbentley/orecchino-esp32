@@ -26,15 +26,26 @@ import 'ui/living_background.dart';
 import 'ui/theme/theme.dart';
 import 'ui/traffic_widgets.dart';
 
+/// On screen: resumed, or inactive (a system sheet over the app, the app
+/// switcher). Paused, hidden, detached, or not yet known (a headless start:
+/// Android waking the app for an associated detector, iOS relaunching it in
+/// the background for Bluetooth) is not; the lifecycle listener in
+/// [MainShell] reports the change when a screen does open.
+bool lifecycleForeground(AppLifecycleState? s) => s == AppLifecycleState.resumed || s == AppLifecycleState.inactive;
+
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
+  final binding = WidgetsFlutterBinding.ensureInitialized();
   // iOS: opt into Core Bluetooth state restoration before anything else
   // touches Bluetooth, so a connection (or a pending connect) to the
   // detector survives iOS ending the app in the background, and iOS
   // relaunches it when the detector connects.
   if (!kIsWeb && Platform.isIOS) unawaited(FlutterBluePlus.setOptions(restoreState: true));
   final db = AppDatabase();
-  final app = AppController.platform(db: db, alerts: SystemAlertSink());
+  final app = AppController.platform(
+    db: db,
+    alerts: SystemAlertSink(),
+    foreground: lifecycleForeground(binding.lifecycleState),
+  );
   // The look first, so a Flat app never flashes the Sky while it starts.
   db.getSetting('look').then((v) => Look.apply(AppLook.parse(v)), onError: (Object _) {}).whenComplete(() {
     app.start();
@@ -90,15 +101,20 @@ class _MainShellState extends State<MainShell> {
   // The app in the foreground or not: tickers stop (TickerMode), the
   // ambient clock pauses, and the app's power policy follows (the compass,
   // location, the phone's scan, ADS-B). "inactive" (a system sheet over the
-  // app, the app switcher) still counts as in front.
-  bool _foreground = true;
+  // app, the app switcher) still counts as in front. It starts as the app
+  // does (main reads the lifecycle state; the tests' controllers start in
+  // front), then follows the lifecycle; the listener reports changes only,
+  // so a state known by the time the shell is built is read once too.
+  late bool _foreground = widget.app.foreground;
   bool? _reduced;
-  late final AppLifecycleListener _life = AppLifecycleListener(onStateChange: (s) {
-    final fg = s == AppLifecycleState.resumed || s == AppLifecycleState.inactive;
+  late final AppLifecycleListener _life = AppLifecycleListener(onStateChange: _onLifecycle);
+
+  void _onLifecycle(AppLifecycleState s) {
+    final fg = lifecycleForeground(s);
     AmbientClock.instance.paused = !fg;
     widget.app.setVisibility(foreground: fg);
     if (fg != _foreground && mounted) setState(() => _foreground = fg);
-  });
+  }
 
   // The shell rebuilds only when what it shows changes (the scene level
   // and the Live badge), not on every update of the app: each screen
@@ -122,6 +138,10 @@ class _MainShellState extends State<MainShell> {
     widget.app.addListener(_onApp);
     widget.app.power.addListener(_onPower);
     _life; // start listening
+    // A change between main() and this build (the activity resumed while
+    // the settings loaded) has no listener yet: read the state once.
+    final s = WidgetsBinding.instance.lifecycleState;
+    if (s != null && lifecycleForeground(s) != _foreground) _onLifecycle(s);
     _onApp();
     _onPower();
   }

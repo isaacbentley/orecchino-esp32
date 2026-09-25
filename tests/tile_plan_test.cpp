@@ -77,6 +77,73 @@ static void test_circle() {
   CHECK(seen.size() == p.total && std::adjacent_find(s2.begin(), s2.end()) == s2.end(), "walk: every plan tile once");
 }
 
+// A circle straddling +/-180 (Fiji, the Chukchi coast) keeps the tiles on
+// both sides: the column range wraps instead of clamping at the edge.
+static void test_antimeridian() {
+  double lat = 37.8, r = 3000;
+  char name[160];
+  for (double lon : { 179.99, -179.99 }) {
+    // Mirror: 0.01 deg from the antimeridian is the same tiling as 0.01
+    // deg from the prime meridian (both are tile edges at every zoom).
+    double mirror = lon > 0 ? -0.01 : 0.01;
+    uint32_t here = plan_tiles(lat, lon, r), there = plan_tiles(lat, mirror, r);
+    snprintf(name, sizeof(name), "antimeridian: 3 km at %.2f: %u tiles, as many as at %.2f (%u)", lon, here, mirror, there);
+    CHECK(here == there && here >= 60, name);
+    bool wrapped = true, both_sides = true, centres_in = true;
+    for (int z = 12; z <= 15; z++) {
+      int32_t lim = (int32_t)(1L << z) - 1;
+      TileBox b = tile_circle_box(lat, lon, r, z);
+      if (!(b.x0 > b.x1 && b.x1 < 8 && b.x0 > lim - 8)) wrapped = false;
+      uint32_t cols = tile_box_cols(&b, z);
+      if (cols != (uint32_t)(lim - b.x0 + 1) + (uint32_t)(b.x1 + 1)) wrapped = false;
+      bool west = false, east = false;
+      for (uint32_t i = 0; i < cols; i++) {
+        int32_t x = tile_box_col(&b, z, i);
+        for (int32_t y = b.y0; y <= b.y1; y++) {
+          bool in = tile_in_circle(lat, lon, r, z, x, y);
+          if (in && x == lim) west = true;
+          if (in && x == 0) east = true;
+          double clat = tile_lat_of(y + 0.5, z), clon = tile_lon_of(x + 0.5, z);
+          if (tile_dist_m(lat, lon, clat, clon) <= r && !in) centres_in = false;
+        }
+      }
+      if (!(west && east)) both_sides = false;
+    }
+    CHECK(wrapped, "antimeridian: the box wraps (x0 near the last column, x1 near the first)");
+    CHECK(both_sides && centres_in, "antimeridian: the last column and the first are both in; every tile centred inside is in");
+    // The plan and its walk: every tile once, on both sides, nothing outside.
+    TilePlan p;
+    tile_plan_make(&p, lat, lon, r, T5_FS, 0, NULL, 0);
+    std::vector<uint64_t> seen;
+    int z = 0;
+    int32_t x, y;
+    bool inside = true, first = false, last = false;
+    while (tile_plan_next(&p, &z, &x, &y)) {
+      seen.push_back(tile_key(z, x, y));
+      inside &= tile_in_circle(lat, lon, r, z, x, y) && tile_plan_contains(&p, z, x, y);
+      if (z == 15 && x == 0) first = true;
+      if (z == 15 && x == (1 << 15) - 1) last = true;
+    }
+    std::vector<uint64_t> s2 = seen;
+    std::sort(s2.begin(), s2.end());
+    CHECK(seen.size() == p.total && p.total == here && std::adjacent_find(s2.begin(), s2.end()) == s2.end() && inside && first && last,
+          "antimeridian: the walk visits every plan tile once, x = 0 and x = 32767 among them");
+    // On flash: a tile on the far side counts as present, one 300 km along
+    // the line as evictable.
+    int32_t fx, fy, ox, oy;
+    tile_of(lat, -lon, 15, &fx, &fy);      // just across the line
+    tile_of(lat + 2.7, lon, 15, &ox, &oy); // 300 km north
+    auto d = disk_of({ tile_key(15, fx, fy), tile_key(15, ox, oy) }, 11 * 1024);
+    tile_plan_make(&p, lat, lon, r, T5_FS, 2 * 11 * 1024, d.data(), (uint32_t)d.size());
+    CHECK(p.present == 1 && p.evictable == 11 * 1024, "antimeridian: a tile across the line is in the plan, a far one is evictable");
+  }
+  CHECK(plan_tiles(0.5, 179.99, r) == plan_tiles(0.5, -0.01, r), "antimeridian: at the equator too");
+  // The setting's top at the line is the same as anywhere on the parallel.
+  double at_line = tile_plan_max_radius_m(lat, 179.99, SENSECAP_FS - TILE_PLAN_RESERVE, 11 * 1024);
+  double away = tile_plan_max_radius_m(lat, -0.01, SENSECAP_FS - TILE_PLAN_RESERVE, 11 * 1024);
+  CHECK(at_line == away && at_line >= 6000, "antimeridian: max radius is the same as away from it");
+}
+
 static void test_budget_and_shrink() {
   double lat = 37.8, lon = -122.4;
   char name[160], line[120];
@@ -292,6 +359,7 @@ static void test_sync_run() {
 
 int main(void) {
   test_circle();
+  test_antimeridian();
   test_budget_and_shrink();
   test_eviction();
   test_sync_run();

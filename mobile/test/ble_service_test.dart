@@ -78,11 +78,18 @@ void main() {
     expect(ble.isReady, isFalse);
   });
 
-  test('no encryption (subscribe refused): failed, not ready', () async {
+  test('no encryption (subscribe refused): failed, not ready, and the passkey to enter is said', () async {
     t.peers['A'] = FakePeer('A')..refuseSubscribe = true;
     expect(await ble.connect('A'), isNull);
     expect(ble.state, BleLinkState.failed);
     expect(ble.isReady, isFalse);
+    expect(ble.error, contains('insufficient encryption'));
+    expect(ble.error, contains('123456'));
+    expect(ble.error, contains(BleService.passkeyHint));
+    // Outside the pairing step a failure is reported as it is.
+    t.peers['Y'] = FakePeer('Y')..hasInfo = false;
+    expect(await ble.connect('Y'), isNull);
+    expect(ble.error, isNot(contains('123456')));
   });
 
   test('the board drops us mid-pairing (10 s deadline): failed with words', () async {
@@ -95,6 +102,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(ble.state, BleLinkState.failed);
     expect(ble.error, contains('before pairing finished'));
+    expect(ble.error, contains('123456')); // a Just Works pairing is refused by the board
     p.holdPair!.complete();
     expect(await f, isNull); // the attempt does not come back to life
     expect(ble.isReady, isFalse);
@@ -135,6 +143,21 @@ void main() {
     expect(stream, '$big\n$small\n');
   });
 
+  test('send: an Android MTU of 517 writes 512-byte chunks (the attribute limit), never 514', () async {
+    final p = t.peers['A'] = FakePeer('A')..mtuGranted = 517;
+    await ble.connect('A');
+    expect(p.mtu, 517);
+    final big = jsonEncode({'cmd': 'traffic', 'pad': 'x' * 1500});
+    await ble.send(big);
+    expect(p.writes.map((w) => w.length).reduce((a, b) => a > b ? a : b), 512);
+    expect(p.writes.every((w) => w.length <= 512), isTrue);
+    expect(utf8.decode(p.writes.expand((w) => w).toList()), '$big\n');
+    // The default MTU (no negotiation) writes 20 at a time; iOS' 515 also 512.
+    expect(BleService.maxWrite(23), 20);
+    expect(BleService.maxWrite(515), 512);
+    expect(BleService.maxWrite(247), 244);
+  });
+
   test('send after the link dropped fails', () async {
     final p = t.peers['A'] = FakePeer('A');
     await ble.connect('A');
@@ -150,13 +173,17 @@ void main() {
     expect(ble.error, 'Bluetooth is off');
   });
 
-  test('scan results are exposed', () async {
+  // A widget test for its fake clock: the scan's timeout is a timer, moved
+  // by pump, so a loaded machine cannot make the test wait too little.
+  testWidgets('scan results are exposed, and the scan ends by itself after its timeout', (tester) async {
     await ble.startScan(timeout: const Duration(milliseconds: 50));
     expect(ble.state, BleLinkState.scanning);
     t.hits([const BleScanHit(id: 'A', name: 'Orecchino-1A2B', rssi: -60)]);
-    await Future<void>.delayed(Duration.zero);
+    await tester.pump();
     expect(ble.scanHits.single.name, 'Orecchino-1A2B');
-    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await tester.pump(const Duration(milliseconds: 49));
+    expect(ble.state, BleLinkState.scanning);
+    await tester.pump(const Duration(milliseconds: 1));
     expect(ble.state, BleLinkState.idle);
   });
 }

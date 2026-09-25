@@ -5,8 +5,28 @@
   "UAL123 1050 m N of D9A03 (vert +50): beyond 1000 m -> no NEAR; flying away -> no CPA.",
   "N12345 600 m S at 320 m: vert +170 > 150 -> nothing. N9 200 m from DJI-1, which is not live -> nothing. N10 424 m away but 31 s old (not fresh) -> nothing.",
   "SKW9 5.2 km N heading S at 120 kt while D9A03 flies E at 5 m/s: t_cpa = 5200*61.73/(61.73^2+5^2) = 83.7 s > 60 -> nothing.",
-  "Status: 'conflict watch on, 3 low aircraft, data 4 s old' - no drone-aircraft conflict is counted, and it never says 'clear', 'safe' or 'no traffic': not every aircraft broadcasts ADS-B.",
+  "Status: 'conflict watch on, low traffic, data 4 s old' - no drone-aircraft conflict is counted, and it never says 'clear', 'safe' or 'no traffic': not every aircraft broadcasts ADS-B.",
   "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): b2c3d4 at t=0 'LOW TRAFFIC S 600 M' ('BE READY TO LAND DRONES; AIRCRAFT 300 M ABOVE GROUND, 600 M S'); a1b2c3 at t=0 'LOW TRAFFIC N 1.1 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.1 KM N'); c3d4e5 at t=0 'LOW TRAFFIC W 2.8 KM' ('BE READY TO LAND DRONES; AIRCRAFT 80 M ABOVE GROUND, 2.8 KM W'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
+ ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "low",
+   "horiz_m": 1050.0,
+   "vert_m": 180.0,
+   "bearing_deg": 0.0
+  },
+  {
+   "t_s": 0,
+   "hex": "b2c3d4",
+   "drone": "1581F20000D9A03",
+   "kind": "low",
+   "horiz_m": 600.0,
+   "vert_m": 300.0,
+   "bearing_deg": 180.0
+  }
  ],
  "observer": {
   "lat": 37.7749,
@@ -99,7 +119,7 @@
     "stale": false,
     "highest": "caution",
     "aircraft_count": 5,
-    "summary": "conflict watch on, 3 low aircraft, data 4 s old",
+    "summary": "conflict watch on, low traffic, data 4 s old",
     "alerts": [
      {
       "level": "caution",

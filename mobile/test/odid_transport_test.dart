@@ -274,6 +274,8 @@ class _NullBackend implements BleScanBackend {
   @override
   bool get isScanningNow => false;
   @override
+  Stream<bool> get adapterOn => const Stream.empty();
+  @override
   Future<void> start(BleScanFilter filter, {ScanDuty duty = ScanDuty.lowLatency}) async {}
   @override
   Future<void> stop() async {}

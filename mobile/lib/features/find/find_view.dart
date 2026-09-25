@@ -358,20 +358,28 @@ class _FindViewState extends State<FindView> {
     final pointer = hasBearing
         ? AspectRatio(
             aspectRatio: 1,
+            // Locked on: a live region that says so once (its words never
+            // tick); the pointer's own words, with the range and the turn,
+            // are a separate node so they can change without an announcement.
             child: Semantics(
-              label: pointerLabel,
+              container: locked,
               liveRegion: locked,
-              child: RepaintBoundary(
-                child: CustomPaint(
-                  painter: _HudPainter(
-                    state: this,
-                    northUp: heading == null,
-                    headingDeg: heading ?? 0,
-                    color: color,
-                    aircraft: target.isAircraft,
-                    ease: _ease,
-                    // The lock pulse only while locked on.
-                    clock: locked ? _ambient : null,
+              label: locked ? 'On target, ${target.kindWord.toLowerCase()} ${target.label}' : null,
+              child: Semantics(
+                container: true,
+                label: pointerLabel,
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    painter: _HudPainter(
+                      state: this,
+                      northUp: heading == null,
+                      headingDeg: heading ?? 0,
+                      color: color,
+                      aircraft: target.isAircraft,
+                      ease: _ease,
+                      // The lock pulse only while locked on.
+                      clock: locked ? _ambient : null,
+                    ),
                   ),
                 ),
               ),
@@ -817,14 +825,14 @@ class _TargetPicker extends StatelessWidget {
                       ].join(', '),
                       excludeSemantics: true,
                       child: InkWell(
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: Glass.flatRadius(BorderRadius.circular(16)),
                         onTap: () => Navigator.pop(context, c.id),
                         child: Container(
                           constraints: const BoxConstraints(minHeight: 56),
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
                           decoration: BoxDecoration(
                             color: c.id == currentId ? OrecchinoColors.aqua.withValues(alpha: 0.10) : null,
-                            borderRadius: BorderRadius.circular(16),
+                            borderRadius: Glass.flatRadius(BorderRadius.circular(16)),
                           ),
                           child: Row(children: [
                             ContactGlyph(aircraft: c.isAircraft, operator: c.isOperator, color: contactColor(c), size: 32),

@@ -457,6 +457,10 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
                   selectedId: _selectedId,
                   headingDeg: heading,
                   showFacing: heading != null,
+                  // The words stay off the rail, the side panel and the
+                  // sheet (the sky itself runs under them).
+                  labelInsets: EdgeInsets.fromLTRB(
+                      viewport.left, 0, size.width - viewport.right, size.height - viewport.bottom),
                   // The sweep and the glows move on the shared ambient clock
                   // (24–30 frames a second; none with Reduce Motion).
                   clock: AmbientClock.of(context),
@@ -500,7 +504,7 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
                     ),
                   ),
                   if ((_headerH ?? 0) > headerCap + 1)
-                    const Positioned(
+                    Positioned(
                       left: 0,
                       right: 0,
                       bottom: -30,
@@ -508,11 +512,17 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
                       child: IgnorePointer(
                         child: DecoratedBox(
                           decoration: BoxDecoration(
+                            // The look's ground colour, so the band matches
+                            // the sky it fades into in both looks.
                             gradient: LinearGradient(
                               begin: Alignment.topCenter,
                               end: Alignment.bottomCenter,
-                              colors: [Color(0x0004060C), Color(0xD904060C), Color(0x0004060C)],
-                              stops: [0, 0.65, 1],
+                              colors: [
+                                OrecchinoColors.void0.withValues(alpha: 0),
+                                OrecchinoColors.void0.withValues(alpha: 0.85),
+                                OrecchinoColors.void0.withValues(alpha: 0),
+                              ],
+                              stops: const [0, 0.65, 1],
                             ),
                           ),
                         ),

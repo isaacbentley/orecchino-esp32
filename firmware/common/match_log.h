@@ -19,6 +19,9 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "ext_ram.h"
+#if defined(ESP_PLATFORM)
+#include <esp_random.h>
+#endif
 #define LOG_MAX      48
 #define LOG_SAVE_MS  600000  // at most one 3.75 KB NVS write every 10 minutes
 #define LOG_VERSION  3
@@ -93,21 +96,67 @@ static uint8_t  s_log_n    = 0;    // records held
 static uint32_t s_log_total = 0;   // records ever written (numbering for the host)
 static bool     s_log_dirty = false;
 static uint32_t s_log_dirty_ms = 0;
+// Which log this is: a client keeps it beside its sync cursor, and starts
+// again from `oldest` when it changes. Random at first, bumped by every
+// clear, saved with the records: a client away while the log was cleared
+// and refilled past its cursor would otherwise never notice.
+static uint32_t s_log_id = 0;
 
-// Wall clock: UTC seconds at millis() == 0, learned from the host's
-// set_time (or a board RTC). 0 until then, and records say so.
-static uint32_t s_utc_at_boot = 0;
-static inline void log_set_utc(uint32_t utc_now, uint32_t now_ms) {
-  if (utc_now > now_ms / 1000) s_utc_at_boot = utc_now - now_ms / 1000;
+static inline uint32_t log_new_id() {
+#if defined(ESP_PLATFORM)
+  uint32_t id = esp_random();
+#else
+  uint32_t id = (uint32_t)rand();
+#endif
+  return id ? id : 1;
 }
+
+// Wall clock. Contacts are stamped with the 32-bit millis(), which wraps
+// after 49.7 days, so the clock is kept as a 64-bit uptime (log_uptime_tick
+// from the loop, at least once a wrap) plus the UTC the host's set_time (or
+// a board RTC, or SNTP) gave at one point of it. 0 until set, and records
+// say so.
+static uint64_t s_uptime_ms = 0;    // 64-bit millis, advanced by the loop
+static uint64_t s_utc_set_up = 0;   // the uptime at which the clock was set
+static uint32_t s_utc_set = 0;      // UTC seconds then; 0: never set
+
+/// Advance the 64-bit uptime to the loop's `now` (under the lock).
+static inline void log_uptime_tick(uint32_t now_ms) {
+  s_uptime_ms += (uint32_t)(now_ms - (uint32_t)s_uptime_ms);
+}
+/// A 32-bit stamp as 64-bit uptime: the moment nearest the loop's, so a
+/// decode-task stamp a few ms ahead reads right, and so does one 24 days
+/// back.
+static inline uint64_t log_up64(uint32_t ms) {
+  return (uint64_t)((int64_t)s_uptime_ms + (int32_t)(ms - (uint32_t)s_uptime_ms));
+}
+static inline void log_set_utc(uint32_t utc_now, uint32_t now_ms) {
+  if (!utc_now) return;
+  s_utc_set = utc_now;
+  s_utc_set_up = log_up64(now_ms);
+}
+static inline bool log_clock_set() { return s_utc_set != 0; }
 static inline uint32_t log_utc(uint32_t ms) {
-  return s_utc_at_boot ? s_utc_at_boot + ms / 1000 : 0;
+  if (!s_utc_set) return 0;
+  int64_t u = (int64_t)s_utc_set + ((int64_t)log_up64(ms) - (int64_t)s_utc_set_up) / 1000;
+  return u <= 0 ? 0 : (u >= (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)u);
 }
 
 static inline void log_load() {
   Preferences p;
-  if (!p.begin("orlog", true)) return;
+  if (!p.begin("orlog", true)) {   // a fresh board: no namespace yet, but it still needs an identity
+    s_log_id = log_new_id();
+    s_log_dirty = true;
+    s_log_dirty_ms = 0;
+    return;
+  }
   uint8_t ver = p.getUChar("ver", 0);
+  s_log_id = p.getULong("id", 0);
+  if (!s_log_id) {   // never had one (older firmware, or a fresh board): saved with the next write
+    s_log_id = log_new_id();
+    s_log_dirty = true;
+    s_log_dirty_ms = 0;
+  }
   if (ver == LOG_VERSION && p.getBytesLength("recs") == LOG_BYTES) {
     p.getBytes("recs", s_log, LOG_BYTES);
     s_log_head  = p.getUChar("head", 0) % LOG_MAX;
@@ -146,13 +195,14 @@ static inline void log_load() {
 
 /// The flash side of a save. Takes a copy so the caller can snapshot the
 /// ring under its lock and let the slow NVS write happen outside it.
-struct LogImage { LogRec recs[LOG_MAX]; uint8_t head, n; uint32_t total; };
+struct LogImage { LogRec recs[LOG_MAX]; uint8_t head, n; uint32_t total, id; };
 
 static inline void log_snapshot(LogImage* img) {
   memcpy(img->recs, s_log, LOG_BYTES);
   img->head = s_log_head;
   img->n = s_log_n;
   img->total = s_log_total;
+  img->id = s_log_id;
   s_log_dirty = false;
 }
 
@@ -164,6 +214,7 @@ static inline void log_write(const LogImage* img) {
   p.putUChar("head", img->head);
   p.putUChar("n", img->n);
   p.putULong("total", img->total);
+  p.putULong("id", img->id);
   p.end();
 }
 
@@ -172,6 +223,7 @@ static inline void log_clear() {
   s_log_head = 0;
   s_log_n = 0;
   s_log_total = 0;
+  s_log_id = s_log_id + 1 ? s_log_id + 1 : 1;   // a new log, as far as any client can tell
   s_log_dirty = true;
   s_log_dirty_ms = 0;   // due at the next log_due()
 }

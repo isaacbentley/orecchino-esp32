@@ -7,7 +7,10 @@
 //   D9A11", "BE READY TO LAND DRONES"); the body the geometry, the rule's
 //   words, the aircraft and the data age. Aircraft never notify otherwise.
 // - Drones: EMERGENCY REPORTED and ID SIGNATURE INVALID, once per contact
-//   per 5 minutes, only while a detector is connected.
+//   per 5 minutes, only from a live source: while a detector is connected,
+//   or for a contact this phone's own receiver (running) heard in the last
+//   minute. A contact only a detector relayed before the link dropped is
+//   not raised again.
 // - "Mute 10 min" silences notifications, callouts and haptics (not the
 //   on-screen alert, which stays as long as the condition does).
 // Words: never "collision", "safe", "clear" (but the rules' "KEEP CLEAR OF"),
@@ -58,9 +61,10 @@ String _thousands(int v) {
 }
 
 class AlertWords {
-  /// '2,650 ft' (pressure altitude as reported), or null.
+  /// '2,650 ft' (the pressure altitude as reported, else geometric:
+  /// TrafficAircraftAltitude.altitudeM), or null.
   static String? altitudeFt(TrafficAircraft? a) {
-    final m = a?.altBaroM ?? a?.altGeomM;
+    final m = a?.altitudeM;
     if (m == null) return null;
     return '${_thousands((m / TrafficRules.ftToM).round())} ft';
   }
@@ -146,7 +150,7 @@ class AlertWords {
     final brg = Geo.bearingDeg(obsLat, obsLon, a.lat, a.lon);
     final d = Geo.distanceM(obsLat, obsLon, a.lat, a.lon);
     final parts = <String>['Traffic', Geo.clockWords(brg, headingDeg), '${TrafficRules.kmText(d)} kilometres'];
-    final m = a.altBaroM ?? a.altGeomM;
+    final m = a.altitudeM;
     // Hundreds of feet, rounded down as in the plan's example (2,650 -> 2,600).
     if (m != null) parts.add('${_thousands(((m / TrafficRules.ftToM) + 0.5).floor() ~/ 100 * 100)} feet');
     final t = trend(a);
@@ -171,6 +175,20 @@ class AlertPolicy {
   bool isMuted(int nowMs) => nowMs < _mutedUntilMs;
   void mute(int nowMs, [int forMs = muteMs]) => _mutedUntilMs = nowMs + forMs;
 
+  /// When the mute ends (0: none was set), so a caller can end the one it
+  /// set and no other.
+  int get mutedUntilMs => _mutedUntilMs;
+  void unmute() => _mutedUntilMs = 0;
+
+  /// A drone alert may be raised for [c]: a detector is connected, or the
+  /// phone's own receiver is running and heard it within the last minute.
+  static bool droneSourceLive(Contact c, int nowMs, {required bool detectorConnected, required bool phoneReceiving}) {
+    if (detectorConnected) return true;
+    if (!phoneReceiving) return false;
+    final last = c.phoneLastMs;
+    return last != null && nowMs - last <= ContactTracker.staleAfterS * 1000;
+  }
+
   bool _due(String id, int nowMs) {
     final last = _lastNotified[id];
     if (last != null && nowMs - last < repeatMs) return false;
@@ -179,13 +197,16 @@ class AlertPolicy {
   }
 
   /// The alerts to notify now. [aircraft] looks an aircraft up by hex.
-  /// Held alerts (kept by hysteresis) never notify.
+  /// Held alerts (kept by hysteresis) never notify. Drone alerts need a
+  /// live source: [detectorConnected], or [phoneReceiving] and the contact
+  /// heard by the phone lately ([droneSourceLive]).
   List<AlertEvent> consider({
     required int nowMs,
     required TrafficResult traffic,
     required TrafficAircraft? Function(String hex) aircraft,
     required List<Contact> drones,
     required bool detectorConnected,
+    bool phoneReceiving = false,
     double? obsLat,
     double? obsLon,
     double? headingDeg,
@@ -213,25 +234,24 @@ class AlertPolicy {
         droneId: al.droneId.isEmpty ? null : al.droneId,
       ));
     }
-    if (detectorConnected) {
-      for (final c in drones) {
-        final w = AlertWords.droneAlertWords(c);
-        if (w == null || ContactTracker.isStale(c, nowMs)) continue;
-        final id = 'd|$w|${c.key}';
-        if (!_due(id, nowMs)) continue;
-        out.add(AlertEvent(
-          id: id,
-          source: AlertSource.drone,
-          level: c.emergency ? TrafficLevel.warning : TrafficLevel.caution,
-          title: '$w · ${TrafficRules.droneLabel(c.label)}',
-          body: [
-            c.label,
-            if (c.rangeM != null) '${Geo.rangeText(c.rangeM!)} from you',
-            'heard ${c.ageS(nowMs).round()} s ago',
-          ].join(' · '),
-          droneId: c.key,
-        ));
-      }
+    for (final c in drones) {
+      final w = AlertWords.droneAlertWords(c);
+      if (w == null || ContactTracker.isStale(c, nowMs)) continue;
+      if (!droneSourceLive(c, nowMs, detectorConnected: detectorConnected, phoneReceiving: phoneReceiving)) continue;
+      final id = 'd|$w|${c.key}';
+      if (!_due(id, nowMs)) continue;
+      out.add(AlertEvent(
+        id: id,
+        source: AlertSource.drone,
+        level: c.emergency ? TrafficLevel.warning : TrafficLevel.caution,
+        title: '$w · ${TrafficRules.droneLabel(c.label)}',
+        body: [
+          c.label,
+          if (c.rangeM != null) '${Geo.rangeText(c.rangeM!)} from you',
+          'heard ${c.ageS(nowMs).round()} s ago',
+        ].join(' · '),
+        droneId: c.key,
+      ));
     }
     return out;
   }

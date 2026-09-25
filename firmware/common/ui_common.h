@@ -11,6 +11,11 @@
 extern bool     g_home_set;
 extern double   g_home_lat, g_home_lon;
 extern char     g_home_src[16]; // "gps", "app", "saved" (NVS at boot), ...
+/// The board's position read under the receiver lock (rx_core.h): a
+/// double is two stores on the Xtensa and the home is written from other
+/// tasks, so the screens read it through this, never the doubles above.
+/// False, leaving the outputs alone, until a position is known.
+bool rx_get_home(double* lat, double* lon);
 extern uint32_t g_seen_count;
 extern uint8_t  g_tfr_n;        // TFR polygons the host has pushed
 extern bool     g_tfr_loaded;   // ...if it ever has
@@ -70,6 +75,14 @@ static inline void ui_fmt_range(char* out, size_t n, double m) {
 /// Signed: the table copy can carry a last_ms newer than the loop's `now`.
 static inline bool ui_stale(const Track* t, uint32_t now) {
   return (int32_t)(now - t->last_ms) > (int32_t)UI_ACTIVE_MS;
+}
+/// Whole seconds from a stamp to `now`, for every "12s ago" on every
+/// board. Signed: the decode task stamps last_ms with a millis() newer
+/// than the frame's `now`, and the unsigned difference would read
+/// "4294967s ago".
+static inline uint32_t ui_since_s(uint32_t now, uint32_t stamp_ms) {
+  int32_t d = (int32_t)(now - stamp_ms);
+  return d > 0 ? (uint32_t)d / 1000 : 0;
 }
 /// Loud state: emergency, TFR incursion, or a forged identity — and
 /// current. History never shouts.
@@ -200,8 +213,7 @@ static inline void ui_summarize(UiSummary* s, uint32_t now) {
     const Track* t = &g_tracks[i];
     if (!t->used) continue;
     s->tracked++;
-    int32_t ms = (int32_t)(now - t->last_ms);
-    uint32_t age = ms > 0 ? (uint32_t)ms / 1000 : 0;
+    uint32_t age = ui_since_s(now, t->last_ms);
     if (age < s->newest_age_s) s->newest_age_s = age;
     if (ui_stale(t, now)) continue;
     s->active++;
@@ -262,14 +274,15 @@ struct UiTrend { uint32_t first_ms, t_ms; float range_m, rate; bool ok; double h
 /// Returns false until there is a rate to show.
 static inline bool ui_range_rate(int slot, const Track* t, uint32_t now, float* rate) {
   static UiTrend trend[TRK_MAX];
-  if (slot < 0 || slot >= TRK_MAX || !g_home_set || !t->has_pos) return false;
+  double hl, ho;
+  if (slot < 0 || slot >= TRK_MAX || !t->has_pos || !rx_get_home(&hl, &ho)) return false;
   UiTrend* s = &trend[slot];
-  float r = (float)ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon);
+  float r = (float)ui_dist_m(hl, ho, t->lat, t->lon);
   // A new contact in the slot, or a new home (ranges from two different
   // points would read as motion): start again.
   if (s->first_ms != t->first_ms || s->t_ms == 0 ||
-      s->home_lat != g_home_lat || s->home_lon != g_home_lon) {
-    *s = { t->first_ms, t->last_ms, r, 0, false, g_home_lat, g_home_lon };
+      s->home_lat != hl || s->home_lon != ho) {
+    *s = { t->first_ms, t->last_ms, r, 0, false, hl, ho };
   } else if (t->last_ms != s->t_ms && t->last_ms - s->t_ms >= 1000) {
     float v = (r - s->range_m) * 1000.0f / (float)(t->last_ms - s->t_ms);
     s->rate = s->ok ? s->rate * 0.5f + v * 0.5f : v;

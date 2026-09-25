@@ -23,6 +23,7 @@ uint32_t g_seen_count = 0;
 bool     g_home_set = false;
 double   g_home_lat = 37.8039, g_home_lon = -122.4640;
 uint8_t  g_tfr_n = 0; bool g_tfr_loaded = false; uint32_t g_tfr_ms = 0;
+bool rx_get_home(double* lat, double* lon) { if (!g_home_set) return false; *lat = g_home_lat; *lon = g_home_lon; return true; }
 void rx_log_flush() {}
 void ring_begin() {} void ring_tick(uint32_t, uint8_t, float) {} void ring_off() {} void ring_set_dim(bool) {}
 bool cc1101_sweep_begin() { return true; }

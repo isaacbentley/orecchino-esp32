@@ -8,6 +8,29 @@
   "N12345: 1100 m W -> beyond 1000 m, nothing. SKW55: 700 m S but alt 500 -> vert +350 > 150, nothing.",
   "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): b2c3d4 at t=0 'LOW TRAFFIC W 1.1 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.1 KM W'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
  ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 800.0,
+   "vert_m": 90.0,
+   "bearing_deg": 36.87,
+   "cpa_s": null,
+   "why": "480 E, 640 N: sqrt(480^2 + 640^2) = 800; 240 - 150 = 90; atan2(480, 640) = 36.87 deg; heading 37 deg is away, no CPA"
+  },
+  {
+   "t_s": 0,
+   "hex": "b2c3d4",
+   "drone": "1581F20000D9A03",
+   "kind": "low",
+   "horiz_m": 1100.0,
+   "vert_m": 180.0,
+   "bearing_deg": 270.0,
+   "why": "1100 m W of D9A03; 200 - the observer's 20 m"
+  }
+ ],
  "observer": {
   "lat": 37.7749,
   "lon": -122.4194,
@@ -71,7 +94,7 @@
     "stale": false,
     "highest": "warning",
     "aircraft_count": 3,
-    "summary": "conflict watch on, 1 low aircraft, 1 ADS-B conflict, data 4 s old",
+    "summary": "conflict watch on, low traffic, 1 ADS-B conflict, data 4 s old",
     "alerts": [
      {
       "level": "warning",

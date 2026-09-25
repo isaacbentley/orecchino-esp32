@@ -95,10 +95,12 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
 
     @Test func url() {
         #expect(AdsbLol.url(lat: 37.62, lon: -122.38)?.absoluteString
-                == "https://api.adsb.lol/v2/point/37.6200/-122.3800/6")
+                == "https://api.adsb.lol/v2/point/37.62/-122.38/6")
+        #expect(AdsbLol.url(lat: 37.6249, lon: -122.3751)?.absoluteString     // rounded to ~1 km
+                == "https://api.adsb.lol/v2/point/37.62/-122.38/6")
         #expect(AdsbLol.url(lat: .nan, lon: 0) == nil)
         #expect(AdsbLol.url(template: "https://x/{lat},{lon}?r={radius}", lat: 1, lon: 2, radiusNM: 5)?
-                    .absoluteString == "https://x/1.0000,2.0000?r=5")
+                    .absoluteString == "https://x/1.00,2.00?r=5")
     }
 }
 
@@ -117,7 +119,7 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
         #expect(s.status == .ok && s.failures == 0)
         #expect(s.dataMs == t0)                               // stamped with the receive time
         #expect(s.nextFetchMs == t0 + 10_000)
-        #expect(f.urls.first?.absoluteString == "https://api.adsb.lol/v2/point/37.6200/-122.3800/6")
+        #expect(f.urls.first?.absoluteString == "https://api.adsb.lol/v2/point/37.62/-122.38/6")
         #expect(s.aircraft.count == 32)                       // 44 within 10 km, capped at 32
         let d = s.aircraft.map { TrafficRules.distanceM(sfo.latitude, sfo.longitude, $0.lat, $0.lon) }
         #expect(d == d.sorted())                              // nearest first
@@ -186,8 +188,8 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
         s.tick(nowMs: t0 + 5_000, observer: observer, drones: [])
         #expect(!s.result.stale && s.result.haveData)
         // Two aircraft climbing out of SFO within 3 km of the observer: LOW,
-        // counted in the watch's status (never as a count of aircraft).
-        #expect(s.result.summary == "conflict watch on, 2 low aircraft, data 5 s old")
+        // named in the watch's status (never as a count of aircraft).
+        #expect(s.result.summary == "conflict watch on, low traffic, data 5 s old")
         #expect(s.result.alerts.allSatisfy { $0.kind == .low && $0.action == "BE READY TO LAND DRONES" })
         #expect(!forbidden(s.result.summary))
 
@@ -497,6 +499,23 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
             #expect(pts.count >= 3 && pts.count <= 24)
         }
     }
+
+    @Test func tfrLinesStopAtTheSixteenNearest() throws {
+        // Twenty within 200 km, given farthest first: tfr_clear plus the
+        // sixteen nearest (the receiver holds no more), nearest first.
+        func zone(_ i: Int) -> TFRZone {
+            let lat = 37.81 + Double(i) * 0.05
+            let ring = circle(lat: lat, lon: -122.4, radiusM: 2_000, n: 40)
+            return TFRZone(id: "Z\(i)", notam: "Z\(i)", title: "Z\(i)", legal: "HAZARDS", state: "CA", outerRing: ring,
+                           centroid: .init(latitude: lat, longitude: -122.4))
+        }
+        let lines = AppModel.tfrLines(zones: (0..<20).map(zone).reversed(),
+                                      reference: .init(latitude: 37.8, longitude: -122.4))
+        #expect(lines.count == 17)
+        #expect(lines.first == #"{"cmd":"tfr_clear"}"#)
+        #expect(lines[1].contains(#""id":"Z0""#) && lines[16].contains(#""id":"Z15""#))
+        #expect(!lines.contains { $0.contains(#""id":"Z16""#) })
+    }
 }
 
 @Suite struct DeviceLogSyncTests {
@@ -556,15 +575,68 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
         #expect(log.entries[0].uasId == "U0")
     }
 
-    @MainActor @Test func clearingResetsTheCursor() throws {
+    @MainActor @Test func clearingResetsTheCursorAndKeepsTheCopyUntilTheNextRead() throws {
         let log = DeviceLog()
-        log.send = { _ in }
+        var sent: [String] = []
+        log.send = { sent.append($0) }
         log.isConnected = { true }
         log.fetch()
         log.handle(try decode(Self.rec(0)))
         log.handle(try decode(#"{"type":"log_done","n":1,"live":0,"total":1,"clock":true,"next":1,"oldest":0}"#))
         log.handle(try decode(#"{"type":"log_cleared"}"#))
-        #expect(log.cursor == 0 && log.entries.isEmpty)
+        #expect(log.cursor == 0 && log.entries.count == 1 && log.clearedSinceRead)
+        log.fetch()
+        #expect(sent.last == #"{"cmd":"log_get","since":0}"#)
+        log.handle(try decode(#"{"type":"log_done","n":0,"live":0,"total":0,"clock":true,"next":0,"oldest":0}"#))
+        #expect(log.entries.isEmpty && !log.clearedSinceRead && log.cursor == 0)
+    }
+
+    @MainActor @Test func aDroppedDumpKeepsTheCursorForARetry() throws {
+        let log = DeviceLog()
+        var sent: [String] = []
+        log.send = { sent.append($0) }
+        log.isConnected = { true }
+        log.fetch()
+        for s in 0..<2 { log.handle(try decode(Self.rec(s))) }
+        log.handle(try decode(#"{"type":"log_done","n":2,"live":0,"total":2,"clock":true,"next":2,"oldest":0}"#))
+        #expect(log.cursor == 2 && log.entries.count == 2)
+        // The receiver lost lines of the next dump (a BLE/USB drop): nothing
+        // of it is kept, the cursor stays, and the next read asks again.
+        log.fetch()
+        log.handle(try decode(Self.rec(2)))
+        log.handle(try decode(#"{"type":"log_done","n":1,"live":0,"total":4,"clock":true,"next":2,"oldest":0,"err":"dropped"}"#))
+        #expect(log.phase == .failed("the receiver dropped part of the log — read again"))
+        #expect(log.cursor == 2 && log.entries.map(\.index) == [1, 0])
+        log.fetch()
+        #expect(sent.last == #"{"cmd":"log_get","since":2}"#)
+    }
+
+    @MainActor @Test func aNewLogIdRestartsFromOldest() throws {
+        let log = DeviceLog()
+        var sent: [String] = []
+        log.send = { sent.append($0) }
+        log.isConnected = { true }
+        log.fetch()
+        for s in 0..<3 { log.handle(try decode(Self.rec(s))) }
+        log.handle(try decode(#"{"type":"log_done","n":3,"live":0,"total":3,"clock":true,"next":3,"oldest":0,"log_id":7}"#))
+        #expect(log.cursor == 3 && log.logId == 7)
+        // Cleared while this app was away and refilled past the old cursor:
+        // total alone would not show it; the log_id does.
+        log.fetch()
+        #expect(sent.last == #"{"cmd":"log_get","since":3}"#)
+        log.handle(try decode(Self.rec(3)))
+        log.handle(try decode(#"{"type":"log_done","n":1,"live":0,"total":4,"clock":true,"next":4,"oldest":0,"log_id":8}"#))
+        #expect(log.phase == .fetching && sent.last == #"{"cmd":"log_get","since":0}"#)
+        for s in 0..<4 { log.handle(try decode(Self.rec(s))) }
+        log.handle(try decode(#"{"type":"log_done","n":4,"live":0,"total":4,"clock":true,"next":4,"oldest":0,"log_id":8}"#))
+        #expect(log.phase == .done && log.entries.map(\.index) == [3, 2, 1, 0])
+        #expect(log.cursor == 4 && log.logId == 8)
+        // log_cleared carries the new id too, so the read after it is no restart.
+        log.handle(try decode(#"{"type":"log_cleared","log_id":9}"#))
+        #expect(log.logId == 9 && log.cursor == 0)
+        log.fetch()
+        log.handle(try decode(#"{"type":"log_done","n":0,"live":0,"total":0,"clock":true,"next":0,"oldest":0,"log_id":9}"#))
+        #expect(log.phase == .done && log.entries.isEmpty && sent.count == 4)
     }
 
     @Test func csvDefusesFormulas() throws {
@@ -667,6 +739,41 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
         #expect(TilePlanner.path(15, 5241, 12665) == "/tiles/15/5241/12665.jpg")
     }
 
+    /// A circle straddling ±180° keeps the tiles on both sides (the column
+    /// range wraps, as tile_plan.h's TileBox does), and its count is what
+    /// walking every column of the world would find.
+    @Test func aCircleAcrossTheAntimeridianKeepsBothSides() {
+        let lat = 52.0, r = 10_000.0
+        for z in 12...15 {
+            let lim = Int32(1 << z) - 1
+            let b = TilePlanner.circleBox(lat: lat, lon: 179.99, r: r, z: z)
+            #expect(b.x0 > b.x1, "z\(z) wraps")
+            let cols = TilePlanner.boxColumns(b, z: z)
+            #expect(cols.first == b.x0 && cols.last == b.x1 && cols.contains(lim) && cols.contains(0))
+            #expect(Int(TilePlanner.boxCols(b, z: z)) == cols.count && cols.count < 1 << (z - 8))
+            // Ground truth: every tile of the world in the box's rows.
+            var truth: UInt32 = 0
+            for x in 0...lim { for y in b.y0...b.y1 where TilePlanner.inCircle(lat: lat, lon: 179.99, r: r, z: z, x: x, y: y) { truth += 1 } }
+            let east = TilePlanner.circleCount(lat: lat, lon: 179.99, r: r, z: z)
+            #expect(east == truth && truth > 0, "z\(z)")
+            let tiles = TilePlanner.circleTiles(lat: lat, lon: 179.99, r: r, z: z)
+            #expect(tiles.count == Int(east) && tiles.contains { $0.x == lim } && tiles.contains { $0.x == 0 })
+            // Its mirror image just west of the line holds as many.
+            #expect(TilePlanner.circleCount(lat: lat, lon: -179.99, r: r, z: z) == east)
+        }
+        // The C harness's numbers: 3 km at 37.8N just east of the line is
+        // the same 69 tiles (z12-15) as the same circle just east of 0°,
+        // and at z15 it holds the last column and the first.
+        let acrossLine = (12...15).map { TilePlanner.circleCount(lat: 37.8, lon: 179.99, r: 3000, z: $0) }
+        let acrossZero = (12...15).map { TilePlanner.circleCount(lat: 37.8, lon: -0.01, r: 3000, z: $0) }
+        #expect(acrossLine == acrossZero && acrossLine.reduce(0, +) == 69)
+        let z15 = TilePlanner.circleTiles(lat: 37.8, lon: 179.99, r: 3000, z: 15)
+        #expect(z15.contains { $0.x == 0 } && z15.contains { $0.x == 32767 })
+        // Wider than the world: every column, once.
+        let all = TilePlanner.circleBox(lat: 0, lon: 0, r: 30_000_000, z: 12)
+        #expect(all.x0 == 0 && all.x1 == 4095 && TilePlanner.boxCols(all, z: 12) == 4096)
+    }
+
     @Test func esriSourceZYXAndJPEGOnly() throws {
         // tile_path.h's TILE_BASE_URL: Esri World Dark Gray, row before column.
         let u = try #require(TileSync.url(z: 15, x: 5241, y: 12665))
@@ -679,7 +786,6 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
         #expect(!TileSync.isTile(placeholder, contentType: "image/png"))
         #expect(!TileSync.isTile(Data("<html>".utf8), contentType: "text/html"))
         #expect(!TileSync.isTile(jpeg, contentType: "text/html"))
-        #expect(TileSync.attribution.contains("Esri") && TileSync.attribution.contains("OpenStreetMap"))
     }
 
     @Test func diskListMergesFormatsAndSkipsTheMark() {

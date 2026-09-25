@@ -365,33 +365,35 @@ static const Btn BTNS[] = { {432, 330, "+"}, {432, 374, "-"}, {432, 418, "o"} };
 
 // Authentication badge: a signed ID reads "ID" with a tick, a bad
 // signature "ID" with a cross in danger red. A bad signature is a
-// security event, so it gets the loudest colour on the screen.
+// security event, so it gets the loudest colour on the screen. The other
+// states are the words every board uses (track_auth_badge): "ID?" for a
+// key nobody trusts, "ID.." while pages are still coming, "TEST" for the
+// published test key -- never a tick, and never the "..": that key is not
+// an identity, but its signature is complete.
 static void draw_auth_badge(uint8_t st, int x, int y, bool stale) {
-  if (st == 0) return;                       // no auth: draw nothing
-  uint16_t col = stale ? C_MUTED
-               : (st == 3 ? RGB565(0x5E, 0xCB, 0x7A)
-               : (st == 4 ? C_DANGER
-               : (st == 2 ? RGB565(0xE0, 0xA8, 0x3A) : C_MUTED)));
+  const char* badge = track_auth_badge(st);
+  if (!badge[0]) return;                     // no auth: draw nothing
+  uint16_t col = stale ? C_MUTED : ui_auth_color(st);
   s_cv->fillRoundRect(x, y, 34, 15, 4, C_BAR);
   s_cv->drawRoundRect(x, y, 34, 15, 4, col);
   s_cv->setTextSize(1);
   s_cv->setTextColor(col, C_BAR);
   s_cv->setCursor(x + 4, y + 4);
-  s_cv->print("ID");
   int gx = x + 20, gy = y + 7;
   if (st == 3) {                             // tick
+    s_cv->print("ID");
     s_cv->drawLine(gx, gy, gx + 3, gy + 4, col);
     s_cv->drawLine(gx + 3, gy + 4, gx + 9, gy - 5, col);
     s_cv->drawLine(gx, gy + 1, gx + 3, gy + 5, col);
     s_cv->drawLine(gx + 3, gy + 5, gx + 9, gy - 4, col);
   } else if (st == 4) {                      // cross
+    s_cv->print("ID");
     s_cv->drawLine(gx, gy - 4, gx + 8, gy + 4, col);
     s_cv->drawLine(gx + 8, gy - 4, gx, gy + 4, col);
     s_cv->drawLine(gx + 1, gy - 4, gx + 9, gy + 4, col);
     s_cv->drawLine(gx + 9, gy - 4, gx + 1, gy + 4, col);
-  } else {                                   // partial / untrusted key
-    s_cv->setCursor(gx, y + 4);
-    s_cv->print(st == 2 ? "?" : "..");
+  } else {                                   // ID?, ID.., TEST: in words
+    s_cv->print(badge);
   }
 }
 
@@ -455,7 +457,7 @@ static void draw_detail_card(const Track* t) {
   s_cv->setCursor(20, y0 + 76);
   snprintf(b, sizeof(b), "mac %02X:%02X:%02X:%02X:%02X:%02X   seen %lus ago",
            t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5],
-           (unsigned long)((s_now_ms - t->last_ms) / 1000));
+           (unsigned long)ui_since_s(s_now_ms, t->last_ms));
   s_cv->print(b);
   s_cv->setCursor(20, y0 + 90);
   if (t->auth_state) {
@@ -467,9 +469,10 @@ static void draw_detail_card(const Track* t) {
     s_cv->print("no auth");
   }
   s_cv->setCursor(20, y0 + 104);
-  if (g_home_set && t->has_pos) {
+  double hl, ho;   // the board's position, under the receiver lock
+  if (t->has_pos && rx_get_home(&hl, &ho)) {
     char r[12];
-    fmt_range(r, sizeof(r), dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+    fmt_range(r, sizeof(r), dist_m(hl, ho, t->lat, t->lon));
     snprintf(b, sizeof(b), "range %s%s%s", r,
              t->in_tfr ? "   IN TFR " : "", t->in_tfr ? t->tfr_id : "");
   } else {
@@ -498,9 +501,9 @@ static void pick_auto_view() {
     cnt++;
   }
   if (!cnt) {
-    s_lat = g_home_set ? g_home_lat : HOME_LAT;
-    s_lon = g_home_set ? g_home_lon : HOME_LON;
-    s_z = g_home_set ? 13 : 12;
+    s_lat = HOME_LAT; s_lon = HOME_LON;
+    bool home = rx_get_home(&s_lat, &s_lon);   // the board's position, under the receiver lock
+    s_z = home ? 13 : 12;
     return;
   }
   s_lat = (miLat + maLat) / 2;
@@ -649,13 +652,14 @@ static void render_list() {
     if (!isnan(t->height)) snprintf(hb, sizeof(hb), "%dm", (int)t->height);
     if (!isnan(t->speed)) snprintf(sb, sizeof(sb), "%.1fm/s", t->speed);
     char rb[16] = "";
-    if (g_home_set && t->has_pos) {
+    double hl, ho;   // the board's position, under the receiver lock
+    if (t->has_pos && rx_get_home(&hl, &ho)) {
       char r[12];
-      fmt_range(r, sizeof(r), dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+      fmt_range(r, sizeof(r), dist_m(hl, ho, t->lat, t->lon));
       snprintf(rb, sizeof(rb), "  %s", r);
     }
     snprintf(b, sizeof(b), "h %s  v %s  %lus%s  %s%s%s", hb, sb,
-             (unsigned long)((s_now_ms - t->last_ms) / 1000), rb,
+             (unsigned long)ui_since_s(s_now_ms, t->last_ms), rb,
              (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
              (t->src_mask & 4) ? "B" : "");
     s_cv->setTextColor(C_MUTED, C_BAR);
@@ -1002,8 +1006,8 @@ void display_tick(uint32_t now) {
     if (t_now > 1700000000) {
       struct tm tm_utc;
       gmtime_r(&t_now, &tm_utc);
-      double lat = g_home_set ? g_home_lat : HOME_LAT;
-      double lon = g_home_set ? g_home_lon : HOME_LON;
+      double lat = HOME_LAT, lon = HOME_LON;
+      rx_get_home(&lat, &lon);   // the board's position, under the receiver lock
       double elev = solar_elevation_deg(lat, lon, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1, tm_utc.tm_mday,
                                         tm_utc.tm_hour, tm_utc.tm_min, tm_utc.tm_sec);
       bool night = (elev <= SOLAR_SUNDOWN_ELEVATION_DEG);

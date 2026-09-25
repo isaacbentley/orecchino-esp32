@@ -9,6 +9,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:orecchino_mobile/core/traffic/adsb_source.dart';
 import 'package:orecchino_mobile/core/traffic/traffic_rules.dart';
 
 /// Banned words: 'clear' only as the instruction 'KEEP CLEAR OF'; 'conflict'
@@ -30,6 +31,45 @@ TrafficObserver observerOf(Object? v) {
   if (v is! Map<String, dynamic>) return TrafficObserver.unknown;
   return TrafficObserver(lat: dbl(v['lat']), lon: dbl(v['lon']), elevM: dbl(v['elev_m']));
 }
+
+/// The vector's 'hand_checks': numbers derived by hand from the scenario
+/// (right triangles, the CPA formula), never from an implementation, so a
+/// geometry slip shared by all three ports still fails. horiz/vert within
+/// tol_m (0.5 m unless given), bearing within 0.05 deg, cpa within 0.05 s; a
+/// null field must be unknown; an absent one is not checked.
+int runHandChecks(String ctx, Map<String, dynamic> v, double ts, TrafficResult r) {
+  var n = 0;
+  for (final c in ((v['hand_checks'] ?? const <dynamic>[]) as List<dynamic>).cast<Map<String, dynamic>>()) {
+    if (dbl(c['t_s']) != ts) continue;
+    final m = r.alerts
+        .where((a) =>
+            a.hex == c['hex'] &&
+            (!c.containsKey('drone') || a.droneId == c['drone']) &&
+            (!c.containsKey('kind') || a.kind.name == c['kind']))
+        .toList();
+    expect(m, hasLength(1), reason: '$ctx: hand check ${c['hex']} finds one alert');
+    if (m.length != 1) continue;
+    final a = m.single;
+    final tol = dbl(c['tol_m']) ?? 0.5;
+    if (c.containsKey('horiz_m')) {
+      expect(close(a.horizM, c['horiz_m'], tol), isTrue, reason: '$ctx: hand ${a.hex} horiz ${a.horizM} want ${c['horiz_m']}');
+    }
+    if (c.containsKey('vert_m')) {
+      expect(close(a.vertM, c['vert_m'], tol), isTrue, reason: '$ctx: hand ${a.hex} vert ${a.vertM} want ${c['vert_m']}');
+    }
+    if (c.containsKey('bearing_deg')) {
+      expect(close(a.bearingDeg, c['bearing_deg'], 0.05), isTrue,
+          reason: '$ctx: hand ${a.hex} bearing ${a.bearingDeg} want ${c['bearing_deg']}');
+    }
+    if (c.containsKey('cpa_s')) {
+      expect(close(a.cpaS, c['cpa_s'], 0.05), isTrue, reason: '$ctx: hand ${a.hex} cpa ${a.cpaS} want ${c['cpa_s']}');
+    }
+    n++;
+  }
+  return n;
+}
+
+int handChecked = 0;
 
 int runRules(String file, Map<String, dynamic> v, List<dynamic> steps) {
   final state = TrafficState();
@@ -98,6 +138,7 @@ int runRules(String file, Map<String, dynamic> v, List<dynamic> steps) {
       if (a.droneIndex != null) expect(drones[a.droneIndex!].id, a.droneId);
       checked++;
     }
+    handChecked += runHandChecks(ctx, v, ts, r);
   }
   return checked;
 }
@@ -165,8 +206,9 @@ void main() {
     final dir = Directory('../tests/vectors/traffic');
     final files = dir.listSync().whereType<File>().where((f) => f.path.endsWith('.json')).toList()
       ..sort((a, b) => a.path.compareTo(b.path));
-    expect(files.length, greaterThanOrEqualTo(12));
+    expect(files.length, greaterThanOrEqualTo(16));
     var ruleFiles = 0, steps = 0, alerts = 0, cases = 0;
+    handChecked = 0;
     for (final f in files) {
       final name = f.uri.pathSegments.last;
       final v = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
@@ -181,8 +223,33 @@ void main() {
         fail('$name: unknown vector shape');
       }
     }
-    expect(ruleFiles >= 11 && steps >= 37 && alerts >= 90 && cases >= 8, isTrue,
-        reason: 'coverage: $ruleFiles rule files, $steps steps, $alerts alerts, $cases host cases');
+    expect(ruleFiles >= 15 && steps >= 60 && alerts >= 180 && cases >= 9 && handChecked >= 40, isTrue,
+        reason: 'coverage: $ruleFiles rule files, $steps steps, $alerts alerts, $cases host cases, $handChecked hand checks');
+  });
+
+  test('the phone keeps aircraft an answer omits while under 60 s, like the Mac', () {
+    // adsb.lol drops an aircraft from one answer now and then; the Mac's
+    // install() keeps it (its alert then holds up to 60 + 20 s, not 20 s).
+    final m = TrafficMonitor();
+    const area = AdsbArea(37.8, -122.46, 10000);
+    const t0 = 1000000;
+    m.update(const [
+      TrafficAircraft(hex: 'a1', lat: 37.81, lon: -122.46, seenMs: t0 - 1000),
+      TrafficAircraft(hex: 'b2', lat: 37.82, lon: -122.46, seenMs: t0 - 1000),
+    ], t0, area);
+    // The next answer omits a1: kept (11 s old); b2's newer position wins.
+    m.update(const [TrafficAircraft(hex: 'b2', lat: 37.82, lon: -122.46, seenMs: t0 + 9000)], t0 + 10000, area);
+    expect(m.aircraft.map((a) => a.hex).toList(), ['a1', 'b2']);
+    expect(m.byHex('b2')!.seenMs, t0 + 9000);
+    // An older copy never replaces a newer one.
+    m.update(const [TrafficAircraft(hex: 'b2', lat: 37.82, lon: -122.46, seenMs: t0 + 5000)], t0 + 20000, area);
+    expect(m.byHex('b2')!.seenMs, t0 + 9000);
+    // Past 60 s an omitted aircraft is gone (a1 at 62 s; b2 at 52 s stays).
+    m.update(const [], t0 + 61000, area);
+    expect(m.aircraft.map((a) => a.hex).toList(), ['b2']);
+    m.update(const [], t0 + 70000, area);
+    expect(m.aircraft, isEmpty);
+    expect(m.dataMs, t0 + 70000);
   });
 
   test('antimeridian distance wraps', () {

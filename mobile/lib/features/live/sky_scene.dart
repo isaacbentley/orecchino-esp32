@@ -15,44 +15,48 @@ import 'live_items.dart';
 import 'sky_painter.dart';
 import 'sky_projection.dart';
 
-class SkyScene extends StatelessWidget {
-  /// Where each bridge's numbers float, and the space they take: the first
-  /// point along the bridge (middle first) clear of the badges already
-  /// placed and of the marks. If a crowded sky has no room, the most urgent
-  /// pair (the rules list alerts most urgent first) keeps its numbers; the
-  /// others are still on their cards and read by the screen reader.
-  List<(SkyBridge, Rect)> _badgeSpots(Map<String, Offset> tops, TextScaler scaler) {
-    final spots = <(SkyBridge, Rect)>[];
-    for (final b in bridges) {
-      final p1 = tops[b.droneId], p2 = tops[b.aircraftId];
-      if (p1 == null || p2 == null) continue;
-      final size = SeparationBridgeBadge.measure(b.alert, scaler);
-      Rect? best;
-      // Along the bridge first, then just above or below its middle, then
-      // clear above both marks.
-      final mid = Offset.lerp(p1, p2, 0.5)!;
-      final lift = size.height + 14;
-      final centres = [
-        for (final t in const [0.5, 0.3, 0.7, 0.15, 0.85]) Offset.lerp(p1, p2, t)!,
-        mid - Offset(0, lift),
-        mid + Offset(0, lift),
-        Offset(mid.dx, (p1.dy < p2.dy ? p1.dy : p2.dy) - lift - 8),
-      ];
-      for (final centre in centres) {
-        final r = Rect.fromCenter(center: centre, width: size.width, height: size.height);
-        final clearOfBadges = spots.every((s) => !s.$2.inflate(4).overlaps(r));
-        final clearOfMarks = tops.values.every((m) => !r.overlaps(Rect.fromCircle(center: m, radius: 16)));
-        if (clearOfBadges && clearOfMarks) {
-          best = r;
-          break;
-        }
+/// Where each bridge's numbers float, and the space they take: the first
+/// point along the bridge (middle first) clear of the badges already placed,
+/// of the marks ([tops], by id; the phone is [SkyBridge.you]) and, with
+/// [bounds], of the panel and the screen's edges. If a crowded sky has no
+/// room, the most urgent pair (the rules list alerts most urgent first)
+/// keeps its numbers; the others are still on their cards and read by the
+/// screen reader. Shared by the sky and the map.
+List<(SkyBridge, Rect)> badgeSpots(List<SkyBridge> bridges, Map<String, Offset> tops, TextScaler scaler,
+    {Rect? bounds}) {
+  final spots = <(SkyBridge, Rect)>[];
+  for (final b in bridges) {
+    final p1 = tops[b.droneId], p2 = tops[b.aircraftId];
+    if (p1 == null || p2 == null) continue;
+    final size = SeparationBridgeBadge.measure(b.alert, scaler);
+    Rect? best;
+    // Along the bridge first, then just above or below its middle, then
+    // clear above both marks.
+    final mid = Offset.lerp(p1, p2, 0.5)!;
+    final lift = size.height + 14;
+    final centres = [
+      for (final t in const [0.5, 0.3, 0.7, 0.15, 0.85]) Offset.lerp(p1, p2, t)!,
+      mid - Offset(0, lift),
+      mid + Offset(0, lift),
+      Offset(mid.dx, (p1.dy < p2.dy ? p1.dy : p2.dy) - lift - 8),
+    ];
+    for (final centre in centres) {
+      final r = Rect.fromCenter(center: centre, width: size.width, height: size.height);
+      final clearOfBadges = spots.every((s) => !s.$2.inflate(4).overlaps(r));
+      final clearOfMarks = tops.values.every((m) => !r.overlaps(Rect.fromCircle(center: m, radius: 16)));
+      final onScreen = bounds == null || (bounds.contains(r.topLeft) && bounds.contains(r.bottomRight));
+      if (clearOfBadges && clearOfMarks && onScreen) {
+        best = r;
+        break;
       }
-      if (best == null && spots.isNotEmpty) continue;
-      spots.add((b, best ?? Rect.fromCenter(center: centres.last, width: size.width, height: size.height)));
     }
-    return spots;
+    if (best == null && spots.isNotEmpty) continue;
+    spots.add((b, best ?? Rect.fromCenter(center: centres.last, width: size.width, height: size.height)));
   }
+  return spots;
+}
 
+class SkyScene extends StatelessWidget {
   final SkyCamera camera;
   final List<SkyContact> marks;
   final List<SkyBridge> bridges;
@@ -63,6 +67,11 @@ class SkyScene extends StatelessWidget {
   final ValueListenable<double>? clock;
   final String semanticLabel;
   final ValueChanged<String> onSelect;
+
+  /// Where the words (labels, the bridges' numbers) keep clear of: the
+  /// notch, the tab rail, the side panel and the sheet; without it, the
+  /// notch and the rail (MediaQuery's padding) alone.
+  final EdgeInsets? labelInsets;
 
   const SkyScene({
     super.key,
@@ -76,6 +85,7 @@ class SkyScene extends StatelessWidget {
     required this.clock,
     required this.semanticLabel,
     required this.onSelect,
+    this.labelInsets,
   });
 
   @override
@@ -91,7 +101,12 @@ class SkyScene extends StatelessWidget {
     }
     final you = camera.groundAt(0, 0);
     if (you != null) tops[SkyBridge.you] = you.offset;
-    final badges = _badgeSpots(tops, scaler);
+    // Left and right: the notch and, on a phone on its side, the tab rail
+    // (main.dart puts it in the padding); the Live screen adds its panel and
+    // its sheet.
+    final insets = labelInsets ??
+        EdgeInsets.only(left: MediaQuery.paddingOf(context).left, right: MediaQuery.paddingOf(context).right);
+    final badges = badgeSpots(bridges, tops, scaler, bounds: insets.deflateRect(Offset.zero & camera.size));
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -113,10 +128,7 @@ class SkyScene extends StatelessWidget {
                     showFacing: showFacing,
                     textScaler: scaler,
                     reserved: [for (final (_, r) in badges) r],
-                    // Left and right: the notch and, on a phone on its side,
-                    // the tab rail (main.dart puts it in the padding).
-                    labelInsets: EdgeInsets.only(
-                        left: MediaQuery.paddingOf(context).left, right: MediaQuery.paddingOf(context).right),
+                    labelInsets: insets,
                   ),
                 ),
               ),

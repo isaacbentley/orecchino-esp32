@@ -33,8 +33,9 @@
 // ble_link.h queues a BLE write rather than run it on NimBLE's task),
 // expires contacts, saves the match log and copies the track table for the
 // screen, so a slow e-paper refresh no longer delays or drops a detection.
-// Every JSON line goes out in a single Serial write (each write is atomic
-// across tasks).
+// Every JSON line is one item in its sink's ring (host_link.h), written by
+// that sink's own task: a USB host that stops reading never holds the decode
+// task or the loop, it loses feed lines instead (the heartbeat's usb_drop).
 // The host tests build without ESP_PLATFORM and run the same code
 // synchronously from rx_tick().
 #pragma once
@@ -133,8 +134,8 @@ static volatile uint8_t  s_cur_chan        = 6;
 static bool s_ble_ok  = false;
 static bool s_wifi_ok = false;
 static bool s_ble_ext = false;
-float       g_home_acc = 0.0f;
 char        g_home_src[16] = {0};
+static volatile uint32_t s_cnt_verify = 0;   // Ed25519 checks run (the costly path)
 
 volatile bool g_hop_hold = false;
 void rx_hop_hold(bool hold) { g_hop_hold = hold; }
@@ -378,8 +379,11 @@ static int rx_gap_event(struct ble_gap_event* ev, void*) {
       f->used = false;
     }
   } else if (ev->type == BLE_GAP_EVENT_DISC_COMPLETE) {
-    // Forever means forever -- unless a board hook has the radios.
+    // Forever means forever -- unless a board hook has the radios. The
+    // fragment table is cleared here, on the task that fills it, never from
+    // the loop while an assembly may be under way.
     s_ble_scanning = false;
+    for (int i = 0; i < BLE_FRAG_N; i++) s_frag[i].used = false;
     if (!rx_hook_paused()) rx_ble_scan(true);
   }
   return 0;
@@ -400,9 +404,8 @@ static void rx_ble_scan(bool on) {
                               0, 0, &p, &p, rx_gap_event, nullptr);
     s_ble_scanning = rc == 0 || rc == BLE_HS_EALREADY;
   } else if (!on && s_ble_scanning) {
-    ble_gap_disc_cancel();
+    ble_gap_disc_cancel();   // no DISC_COMPLETE follows: a stale fragment ages out in a second
     s_ble_scanning = false;
-    for (int i = 0; i < BLE_FRAG_N; i++) s_frag[i].used = false;
   }
 }
 
@@ -638,15 +641,17 @@ static TaskHandle_t s_rx_task = nullptr;
 #endif
 
 static void emit_heartbeat() {
-  // Optional fields: BLE drops when there were any, and on the device the
-  // decode task's least free stack (bytes), to size RX_TASK_STACK from.
+  // Optional fields: BLE and USB drops when there were any, and on the
+  // device the decode task's least free stack (bytes), to size
+  // RX_TASK_STACK from.
   static uint8_t n = 0;
-  char extra[192];
+  char extra[256];
   int o = 0;
-  uint32_t drops = ble_link_drops(), rx_drops = ble_link_rx_drops();
+  uint32_t drops = ble_link_drops(), rx_drops = ble_link_rx_drops(), usb_drops = host_usb_drops();
   extra[0] = 0;
   if (drops) o += snprintf(extra + o, sizeof(extra) - o, ",\"ble_drop\":%lu", (unsigned long)drops);
   if (rx_drops) o += snprintf(extra + o, sizeof(extra) - o, ",\"ble_rx_drop\":%lu", (unsigned long)rx_drops);
+  if (usb_drops) o += snprintf(extra + o, sizeof(extra) - o, ",\"usb_drop\":%lu", (unsigned long)usb_drops);
   if (n++ % 5 == 0) o += snprintf(extra + o, sizeof(extra) - o, ",\"caps\":" RX_CAPS);
 #if RX_ASYNC
   if (s_rx_task)
@@ -774,12 +779,25 @@ static void rx_note_track(Track* t, bool created, bool entered) {
 }
 #endif
 
+#define AUTH_VERIFY_MIN_MS 500   // Ed25519 checks per contact: at most two a second
+
 static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
-  const char* uas = (u->has_basic[0] && u->uas_id[0][0]) ? u->uas_id[0] : nullptr;
+  // The Basic ID that names the contact: the serial when the frame carries
+  // one (a pack may list the CAA registration first), else the first.
+  int k = -1;
+  for (int i = 0; i < 2; i++)
+    if (u->has_basic[i] && u->uas_id[i][0] && (k < 0 || (u->id_type[i] == 1 && u->id_type[k] != 1))) k = i;
+  const char* uas = k >= 0 ? u->uas_id[k] : nullptr;
+  bool serial = k >= 0 && u->id_type[k] == 1;
   bool created = false;
-  Track* t = tracker_upsert(e->mac, uas, now, &created);
+  Track* t = tracker_upsert(e->mac, uas, now, &created, k >= 0 ? u->id_type[k] : 0);
   if (created) g_seen_count++;
-  if (u->has_basic[0] && u->ua_type[0]) t->ua_type = u->ua_type[0];
+  if (k >= 0 && u->ua_type[k]) t->ua_type = u->ua_type[k];
+  for (int i = 0; i < 2; i++)   // a registration beside the serial in the same pack
+    if (i != k && u->has_basic[i] && u->id_type[i] == 2 && u->uas_id[i][0] && t->uas_type != 2) {
+      strncpy(t->uas2, u->uas_id[i], sizeof(t->uas2) - 1);
+      t->uas2[sizeof(t->uas2) - 1] = 0;
+    }
   if (u->has_sys && !u->gb46750) {   // for the match log; GB 46750 has no EU class
     bool eu = u->class_type == 1;
     t->class_type = u->class_type;
@@ -798,12 +816,11 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
     strncpy(t->ssid, e->ssid, sizeof(t->ssid) - 1);
     t->ssid[sizeof(t->ssid) - 1] = 0;
     size_t sl = strlen(e->ssid);
-    if (!strncmp(e->ssid, "RID-", 4) && sl >= 8 && sl <= 24 &&   // RID- plus a 4..20 character serial
-        u->has_basic[0] && u->id_type[0] == 1) {
+    if (!strncmp(e->ssid, "RID-", 4) && sl >= 8 && sl <= 24 && serial) {   // RID- plus a 4..20 character serial
       bool alnum = true;
       for (const char* q = e->ssid + 4; *q; q++)
         if (!((*q >= '0' && *q <= '9') || (*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z'))) alnum = false;
-      if (alnum) t->ssid_check = strcmp(e->ssid + 4, u->uas_id[0]) == 0 ? 1 : 2;
+      if (alnum) t->ssid_check = strcmp(e->ssid + 4, uas) == 0 ? 1 : 2;
     }
   }
 
@@ -812,10 +829,19 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
   // collected per contact. The signature covers the Basic ID bytes, and
   // page 0's timestamp and type name one signature set: a different ID
   // drops everything collected, a new set drops the pages of the old one.
+  // `changed` is true only when a byte of the set (or the ID it binds)
+  // differs from what was held: a transmitter repeating one signed pack at
+  // 50 Hz is verified once, not per frame (Ed25519 costs milliseconds on
+  // the decode task, and s_q holds 36 frames).
   OdidAuthAssembly* a = &t->auth_asm;
   bool changed = false;
-  if (u->has_basic_raw) {
-    if (a->has_basic_raw && memcmp(a->basic_raw, u->basic_raw, 25) != 0) {
+  if (u->has_basic_raw && (u->basic_raw[1] >> 4) != 2) {   // a CAA registration binds nothing
+    // A serial's raw message is what a signature covers: once held it is
+    // never replaced by a UUID or session ID heard in another frame, only
+    // by a different serial (another aircraft on this address).
+    bool held_serial = a->has_basic_raw && (a->basic_raw[1] >> 4) == 1;
+    bool new_serial = (u->basic_raw[1] >> 4) == 1;
+    if (a->has_basic_raw && (new_serial || !held_serial) && memcmp(a->basic_raw, u->basic_raw, 25) != 0) {
       memset(a, 0, sizeof(*a));
       t->auth_state = ODID_AUTH_NONE;
     }
@@ -827,32 +853,50 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
   }
   if (u->has_auth) {
     if (u->auth_pages_seen & 1) {
-      if ((a->auth_pages_seen & 1) &&
-          (a->auth_ts != u->auth_ts || a->auth_type != u->auth_type)) {
-        a->auth_pages_seen = 0;
-        a->verified = false;
+      bool held0 = a->auth_pages_seen & 1;
+      int n0 = u->auth_len < 17 ? u->auth_len : 17;
+      if (!held0 || a->auth_ts != u->auth_ts || a->auth_type != u->auth_type ||
+          a->auth_last_page != u->auth_last_page || a->auth_len != u->auth_len ||
+          memcmp(a->auth_data, u->auth_data, n0) != 0) {
+        if (held0 && (a->auth_ts != u->auth_ts || a->auth_type != u->auth_type)) {
+          a->auth_pages_seen = 0;
+          a->verified = false;
+        }
+        a->auth_type      = u->auth_type;
+        a->auth_last_page = u->auth_last_page;
+        a->auth_len       = u->auth_len;
+        a->auth_ts        = u->auth_ts;
+        memcpy(a->auth_data, u->auth_data, n0);
+        changed = true;
       }
-      a->auth_type      = u->auth_type;
-      a->auth_last_page = u->auth_last_page;
-      a->auth_len       = u->auth_len;
-      a->auth_ts        = u->auth_ts;
-      memcpy(a->auth_data, u->auth_data, u->auth_len < 17 ? u->auth_len : 17);
     } else if (a->verified) {
       // Pages after a complete, verified set can only belong to the next
       // one, even though its page 0 has not arrived yet: start over, so
-      // the page 0 that follows does not discard them.
-      a->auth_pages_seen = 0;
-      a->verified = false;
+      // the page 0 that follows does not discard them. Unless they are the
+      // held set's own pages coming round again (BLE4 rotation): nothing new.
+      bool same = true;
+      for (int p = 1; p <= 15 && same; p++) {
+        if (!(u->auth_pages_seen & (1u << p))) continue;
+        int off = 17 + (p - 1) * 23;
+        int n = off + 23 > ODID_AUTH_MAX_BYTES ? ODID_AUTH_MAX_BYTES - off : 23;
+        if (!(a->auth_pages_seen & (1u << p)) || (n > 0 && memcmp(a->auth_data + off, u->auth_data + off, n) != 0)) same = false;
+      }
+      if (!same) {
+        a->auth_pages_seen = 0;
+        a->verified = false;
+      }
     }
     for (int p = 1; p <= 15; p++) {
       if (!(u->auth_pages_seen & (1u << p))) continue;
       int off = 17 + (p - 1) * 23;
       int n = off + 23 > ODID_AUTH_MAX_BYTES ? ODID_AUTH_MAX_BYTES - off : 23;
-      if (n > 0) memcpy(a->auth_data + off, u->auth_data + off, n);
+      if (n <= 0) continue;
+      if ((a->auth_pages_seen & (1u << p)) && memcmp(a->auth_data + off, u->auth_data + off, n) == 0) continue;
+      memcpy(a->auth_data + off, u->auth_data + off, n);
+      changed = true;
     }
     a->has_auth = true;
     a->auth_pages_seen |= u->auth_pages_seen;
-    changed = true;
   }
   if (a->has_auth) {
     // Hand the assembled picture back so the JSON line reports it, and
@@ -869,7 +913,15 @@ static Track* tracker_ingest(const RidEvt* e, OdidUas* u, uint32_t now) {
       u->has_basic_raw = true;
       memcpy(u->basic_raw, a->basic_raw, 25);
     }
-    if (changed) {
+    if (changed) a->verify_due = true;
+    // The costly check (a complete Ed25519 set) runs at most every
+    // AUTH_VERIFY_MIN_MS per contact; a change inside that window is
+    // checked at the contact's next frame past it, and the previous verdict
+    // stands meanwhile. The cheap states (partial, wrong length) cost nothing.
+    bool costly = odid_auth_complete(u) && u->auth_len == 64 && u->has_basic_raw;
+    if (a->verify_due && (!costly || !a->verify_ms || (int32_t)(now - a->verify_ms) >= AUTH_VERIFY_MIN_MS)) {
+      a->verify_due = false;
+      if (costly) { a->verify_ms = now ? now : 1; s_cnt_verify += 1; }
       uint8_t v = (uint8_t)odid_verify_auth(u);
       if (v >= ODID_AUTH_UNKNOWN_KEY) a->verified = true;   // a complete set, whatever it proved
       // While the next set is still arriving, keep the verdict of the last
@@ -962,6 +1014,13 @@ static size_t format_log_rec(const LogRec* r, int32_t i, bool active) {
 ///            have rotated out of the ring; a client whose cursor is lower
 ///            has missed some. A cursor above total means the log was
 ///            cleared: start again from oldest.
+///   log_id = which log the numbers belong to: random at first, changed by
+///            every clear, kept across resets. A client stores it with its
+///            cursor and starts again from oldest when it differs (a clear
+///            it did not hear, or another receiver).
+///   err    = "dropped" when the link dropped part of this reply (a peer that
+///            stopped reading, host_link.h): the records that came are good,
+///            next is then the `since` asked for, so the client asks again.
 /// `since` keeps records with seq >= since; `after_utc` keeps records (and
 /// live contacts) last heard at or after that UTC second. Live contacts
 /// ignore `since`.
@@ -971,8 +1030,8 @@ static void emit_log(uint32_t now, HostSrc dst, uint32_t since = 0, uint32_t aft
   int n = 0, live = 0;
   RX_LOCK();
   int held = s_log_n;
-  uint32_t total = s_log_total;
-  bool clock = s_utc_at_boot != 0;
+  uint32_t total = s_log_total, log_id = s_log_id;
+  bool clock = log_clock_set();
   uint32_t oldest = held > 0 ? log_at(0)->seq : total;
   for (int i = 0; i < held; i++) {
     const LogRec* r = log_at(i);
@@ -993,22 +1052,30 @@ static void emit_log(uint32_t now, HostSrc dst, uint32_t since = 0, uint32_t aft
     }
   }
   RX_UNLOCK();
-  for (int i = 0; i < n; i++) {
+  // A record the link dropped ends the reply: the rest would go the same
+  // way, and log_done must say the reply was cut before the client moves
+  // its cursor.
+  uint32_t drops0 = host_reply_drops(dst);
+  bool cut = false;
+  for (int i = 0; i < n && !cut; i++) {
     RX_LOCK();
     size_t len = format_log_rec(&recs[i], live_of[i] ? -1 : (int32_t)recs[i].seq, live_of[i]);
     RX_UNLOCK();
     host_write_to(dst, (const uint8_t*)s_jb, len);
+    cut = host_reply_drops(dst) != drops0;
   }
   RX_LOCK();
   jbegin(s_jb, JLINE_MAX);
   jraw("{\"type\":\"log_done\",\"n\":"); juint(held);
   jkey("live"); jint(live); jkey("total"); juint(total);
   jkey("clock"); jraw(clock ? "true" : "false");
-  jkey("next"); juint(total);
+  jkey("next"); juint(cut ? since : total);
   jkey("oldest"); juint(oldest);
+  jkey("log_id"); juint(log_id);
+  if (cut) { jkey("err"); jstrv("dropped"); }
   size_t len = jfinish();
   RX_UNLOCK();
-  host_write_to(dst, (const uint8_t*)s_jb, len);
+  host_write_to(dst, (const uint8_t*)s_jb, len, true);   // the reply's last line: waits for room
   (void)now;
 }
 
@@ -1025,12 +1092,13 @@ void rx_log_flush() {
 
 /// Clear the match log (the host's log_clear, the T5 SYSTEM screen, the
 /// T-Embed menu): the records go at once and NVS is rewritten now, not at
-/// the next timed save, and every transport hears {"type":"log_cleared"} so
-/// a connected app resets its sync cursor. Loop task only.
+/// the next timed save, and every transport hears {"type":"log_cleared",
+/// "log_id":<the new identity>} so a connected app resets its sync cursor.
+/// Loop task only.
 void rx_log_clear_all() {
-  RX_LOCK(); log_clear(); RX_UNLOCK();
+  RX_LOCK(); log_clear(); uint32_t id = s_log_id; RX_UNLOCK();
   rx_log_flush();
-  host_print("{\"type\":\"log_cleared\"}\n");
+  host_printf("{\"type\":\"log_cleared\",\"log_id\":%lu}\n", (unsigned long)id);
 }
 /// For a screen: records held, and seconds since the oldest was last heard
 /// (UINT32_MAX when the clock is not set or there are none).
@@ -1093,6 +1161,18 @@ void rx_set_home(double lat, double lon, const char* src) {
   home_save_maybe(lat, lon, millis());
 }
 
+/// The observer's position read under the same lock, so a reader on the
+/// other core never sees one double half-written (a double store is two
+/// 32-bit writes on the Xtensa). False, leaving the outputs alone, until a
+/// position is known. Any task.
+bool rx_get_home(double* lat, double* lon) {
+  RX_LOCK();
+  bool set = g_home_set;
+  if (set) { *lat = g_home_lat; *lon = g_home_lon; }
+  RX_UNLOCK();
+  return set;
+}
+
 /// At boot: the saved home, marked "saved" until a fresh one arrives.
 static void home_load() {
   Preferences p;
@@ -1147,15 +1227,14 @@ void handle_host_line(char* line, uint32_t now, HostSrc src = SRC_SERIAL) {
     rx_log_clear_all();   // every connected app hears log_cleared, not only the one asking
     return;
   }
-  if (!strcmp(cmd, "set_home")) {
-    double lat = NAN, lon = NAN, acc = NAN;
+  if (!strcmp(cmd, "set_home")) {   // "acc" is accepted and ignored: nothing here uses it
+    double lat = NAN, lon = NAN;
     json_field_dbl(line, "lat", &lat);
     json_field_dbl(line, "lon", &lon);
     if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {   // false for NaN
       char hsrc[16] = {0};
       bool has_src = json_field_str(line, "src", hsrc, sizeof(hsrc));
       rx_set_home(lat, lon, has_src ? hsrc : nullptr);
-      if (json_field_dbl(line, "acc", &acc) && acc >= 0 && acc < 1e6) g_home_acc = (float)acc;
     }
     return;
   }
@@ -1265,18 +1344,22 @@ static inline int host_serial_getc() {
 static void poll_host_serial(uint32_t now) {
   static char* buf = (char*)ext_calloc(RX_HOST_LINE_MAX);
   static int len = 0;
+  static bool overlong = false;
   for (int ch; (ch = host_serial_getc()) >= 0;) {
     char c = (char)ch;
     if (c == '\n' || c == '\r') {
-      if (len > 0) {
+      if (!overlong && len > 0) {
         buf[len] = 0;
         handle_host_line(buf, now, SRC_SERIAL);
-        len = 0;
       }
+      len = 0;
+      overlong = false;
+    } else if (overlong) {
+      // the rest of an over-long line: not a command of its own
     } else if (len < RX_HOST_LINE_MAX - 1) {
       buf[len++] = c;
     } else {
-      len = 0;  // oversized line: drop
+      overlong = true;   // drop the whole line, not a truncated command (as ble_link.h)
     }
   }
 }
@@ -1361,6 +1444,7 @@ static void rx_task(void*) {
 /// Bring up the radios and print the boot line. `extra_json` is appended
 /// inside the boot object (e.g. ",\"display\":true"), may be null.
 static void rx_begin(const char* extra_json) {
+  host_link_begin();   // the USB writer task: before anything can write a line
   log_load();
   home_load();
   s_q = ext_queue(36, sizeof(RidEvt));   // ~10 KB: PSRAM when fitted
@@ -1439,6 +1523,7 @@ static void rx_tick(uint32_t now) {
   static LogImage* s_img = ext_new<LogImage>();
   bool save = false;
   RX_LOCK();
+  log_uptime_tick(now);   // the log's 64-bit clock follows the loop
   if (log_due(now)) { log_snapshot(s_img); save = true; }
   RX_UNLOCK();
   if (save) log_write(s_img);

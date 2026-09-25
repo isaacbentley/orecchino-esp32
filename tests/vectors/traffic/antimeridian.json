@@ -6,6 +6,18 @@
   "dx = 0.01 * pi/180 * cos(52 deg) * 6371000 = 684.58 m, dy = 0 -> horiz 684.58 m, bearing 90.0 -> TRAFFIC NEAR DRONE D9A03 (vert +100): 'GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 100 M ABOVE, 680 M E'.",
   "FAR2 at 179W is 1.0 deg (68.7 km) away -> nothing. Without the wrap: 359.99 deg of longitude = 24,640 km."
  ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 684.58,
+   "vert_m": 100.0,
+   "bearing_deg": 90.0,
+   "why": "0.01 deg * pi/180 * cos(52 deg) * 6371000 = 684.58 m due E"
+  }
+ ],
  "observer": {
   "lat": 52.0,
   "lon": 179.99,

@@ -5,7 +5,30 @@
   "D9A03 has no alt_geo (null): UAL123 500 m away (300 E, 400 N) -> vert unknown, not passed -> TRAFFIC NEAR DRONE D9A03, HEIGHT UNKNOWN.",
   "N911HC reports only altb_ft 1000 (304.8 m pressure altitude); DJI-1's alt_geo 120 is never compared with it -> vert unknown -> TRAFFIC NEAR DRONE DJI-1, HEIGHT UNKNOWN (id <= 8 chars is used whole).",
   "Drone D9B77 sends the ODID 'unknown' marker -1000 -> unknown -> TRAFFIC NEAR DRONE D9B77, HEIGHT UNKNOWN; the callsign-less aircraft is keyed by hex e5f6a7.",
+  "MRK4 sends altg_m -1000 (the same marker, on the aircraft side): 600 m S of DJI-1 -> TRAFFIC NEAR DRONE DJI-1, HEIGHT UNKNOWN.",
   "Resolution with the height unknown: descend and land, e.g. 'GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT HEIGHT UNKNOWN, 500 M NE'."
+ ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 500.0,
+   "vert_m": null,
+   "bearing_deg": 36.87,
+   "why": "300 E, 400 N: a 3-4-5 triangle"
+  },
+  {
+   "t_s": 0,
+   "hex": "f6a7b8",
+   "drone": "DJI-1",
+   "kind": "near",
+   "horiz_m": 600.0,
+   "vert_m": null,
+   "bearing_deg": 180.0,
+   "why": "600 m S; altg_m -1000 is the unknown marker"
+  }
  ],
  "observer": {
   "lat": 37.7749,
@@ -78,14 +101,25 @@
      "gs_kt": 80,
      "trk": 180,
      "age_s": 2
+    },
+    {
+     "hex": "f6a7b8",
+     "cs": "MRK4",
+     "ty": "C172",
+     "lat": 37.80098,
+     "lon": -122.39664,
+     "altg_m": -1000,
+     "gs_kt": 80,
+     "trk": 0,
+     "age_s": 2
     }
    ],
    "expect": {
     "have_data": true,
     "stale": false,
     "highest": "warning",
-    "aircraft_count": 3,
-    "summary": "conflict watch on, 3 ADS-B conflicts, data 2 s old",
+    "aircraft_count": 4,
+    "summary": "conflict watch on, 4 ADS-B conflicts, data 2 s old",
     "alerts": [
      {
       "level": "warning",
@@ -125,6 +159,26 @@
       "vert_m": null,
       "bearing_deg": 0.0,
       "cpa_s": null,
+      "age_s": 2.0
+     },
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "DJI-1",
+      "hex": "f6a7b8",
+      "text": "TRAFFIC NEAR DRONE DJI-1, HEIGHT UNKNOWN",
+      "held": false,
+      "height_unknown": true,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "unknown",
+      "action": "GIVE WAY: DESCEND AND LAND DJI-1",
+      "resolution": "GIVE WAY: DESCEND AND LAND DJI-1; AIRCRAFT HEIGHT UNKNOWN, 600 M S, CLOSEST IN 15 S",
+      "horiz_m": 600.0078241737625,
+      "vert_m": null,
+      "bearing_deg": 180.0,
+      "cpa_s": 14.579023805517986,
       "age_s": 2.0
      },
      {

@@ -43,6 +43,7 @@ uint32_t g_seen_count = 0;
 bool     g_home_set = false;
 double   g_home_lat = 37.8039, g_home_lon = -122.4640;
 char     g_home_src[16] = "app";
+bool rx_get_home(double* lat, double* lon) { if (!g_home_set) return false; *lat = g_home_lat; *lon = g_home_lon; return true; }
 uint8_t  g_tfr_n = 0; bool g_tfr_loaded = false; uint32_t g_tfr_ms = 0;
 static bool p_gps_det = true, p_gps_fix = true; static int p_sats = 9;
 bool periph_gps_detected() { return p_gps_det; }
@@ -118,10 +119,12 @@ static void fixture() {
   g_millis = 600000;
   const char* P = "1581F204C68D9A";
   char id[48];
+  // Signatures: #1 invalid, #2 valid, #4 pages still coming, #5 the
+  // published test key (TEST, never OK), the rest none.
   for (int i = 0; i < 8; i++) {
     snprintf(id, sizeof(id), "%s%02d", P, i + 1);
     add_track(i, id, 17, 116 + 117 * i, 125 + 8 * i, 12 + i, (float)(i * 3), i == 0 ? 3 : 2,
-              i == 0 ? 4 : i == 1 ? 3 : i == 3 ? 1 : 0, i == 2, i >= 6 ? 90000 : 2000 + 300 * i, 7);
+              i == 0 ? 4 : i == 1 ? 3 : i == 3 ? 1 : i == 4 ? 5 : 0, i == 2, i >= 6 ? 90000 : 2000 + 300 * i, 7);
   }
   add_track(8, "DRONE-B-9A01", 250, 640, 40, 6, 250, 2, 0, false, 4000, 4);           // shares a suffix with #1
   add_track(9, "0123456789abcdef0123456789abcdef01234567", 120, 1500, NAN, NAN, NAN, 1, 2, false, 12000, 1);  // UTM UUID, no telemetry
@@ -146,20 +149,42 @@ static void save_pgm(const char* name) {
   fclose(f);
 }
 static int g_fails = 0;
+/// Text the board had to cut ("..", fit_text): a sentence the reader loses
+/// the end of. Allowed only where the thing cut is an identifier the screen
+/// shows whole elsewhere (the inspector's UAS ID and SSID lines, under a
+/// title that carries the ID).
+static bool cut_allowed(const std::string& s) {
+  static const char* ok[] = { "UAS ID: ", "SSID: ", "DRONE " };
+  for (const char* p : ok) if (!s.compare(0, strlen(p), p)) return true;
+  // The board's own ellipses ("Other network...", the AUTH column's "...")
+  // are three dots; a cut is two.
+  return s.size() >= 3 && !s.compare(s.size() - 3, 3, "...");
+}
 static void scene_check(const char* name) {
-  int bad = 0;
-  for (size_t i = 0; i < g_runs.size(); i++)
+  int bad = 0, cut = 0;
+  for (size_t i = 0; i < g_runs.size(); i++) {
+    const TextRun& a = g_runs[i];
+    if (a.s.size() > 2 && !a.s.compare(a.s.size() - 2, 2, "..") && !cut_allowed(a.s)) {
+      if (cut < 6) printf("   cut: \"%s\" [%d,%d-%d,%d]\n", a.s.c_str(), a.x0, a.y0, a.x1, a.y1);
+      cut++;
+    }
     for (size_t j = i + 1; j < g_runs.size(); j++) {
-      const TextRun &a = g_runs[i], &b = g_runs[j];
+      const TextRun& b = g_runs[j];
       if (a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1) {
         if (bad < 6) printf("   overlap: \"%s\" [%d,%d-%d,%d] x \"%s\" [%d,%d-%d,%d]\n", a.s.c_str(), a.x0, a.y0, a.x1, a.y1, b.s.c_str(), b.x0, b.y0, b.x1, b.y1);
         bad++;
       }
     }
-  printf("%s %s: %zu text runs, %d colliding pair(s)\n", bad ? "FAIL" : "ok  ", name, g_runs.size(), bad);
-  if (bad) g_fails++;
+  }
+  printf("%s %s: %zu text runs, %d colliding pair(s), %d cut\n", bad || cut ? "FAIL" : "ok  ", name, g_runs.size(), bad, cut);
+  if (bad || cut) g_fails++;
   save_pgm(name);
   g_runs.clear();
+}
+/// The run that says `s`, or null.
+static const TextRun* run_of(const char* s) {
+  for (const TextRun& r : g_runs) if (strstr(r.s.c_str(), s)) return &r;
+  return nullptr;
 }
 
 // ---- ADS-B traffic: ten aircraft around the fixture, one of them 1.1 km NE
@@ -297,8 +322,20 @@ static void words_check(const char* name) {
       if (!t.compare(e, 6, " s old")) continue;   // "ADS-B 6 s old": an age, not a count
       if ((k >= 5 && !t.compare(k - 5, 5, "ads-b")) || (k >= 7 && !t.compare(k - 7, 7, "traffic"))) flag("an aircraft count");
     }
-    for (size_t k = 1; k < t.size(); k++)
-      if (t[k] == ' ' && isdigit((unsigned char)t[k - 1]) && !t.compare(k + 1, 8, "aircraft")) flag("an aircraft count");
+    // "12 aircraft", "1 low aircraft", "2 more aircraft": a number within
+    // the three words before "aircraft" is a count of them.
+    for (size_t p = t.find("aircraft"); p != std::string::npos; p = t.find("aircraft", p + 8)) {
+      size_t i = p; int words = 0; bool counted = false;
+      while (i > 0 && words < 3 && !counted) {
+        size_t e = i; while (e > 0 && t[e - 1] == ' ') e--;
+        size_t b = e; while (b > 0 && isalnum((unsigned char)t[b - 1])) b--;
+        if (b == e) break;   // punctuation: not the same clause
+        std::string w = t.substr(b, e - b);
+        if (!w.empty() && isdigit((unsigned char)w[0])) counted = true;
+        i = b; words++;
+      }
+      if (counted) flag("an aircraft count");
+    }
     size_t i = 0;
     while (i < t.size()) {
       while (i < t.size() && !isalnum((unsigned char)t[i])) i++;
@@ -306,7 +343,9 @@ static void words_check(const char* name) {
       while (j < t.size() && isalnum((unsigned char)t[j])) j++;
       std::string w = t.substr(i, j - i);
       for (const char* b : bad) if (w == b) flag("forbidden word");
-      if (w == "clear" && !(i >= 5 && !t.compare(i - 5, 5, "keep ") && !t.compare(j, 3, " of"))) flag("\"clear\" outside KEEP CLEAR OF");
+      // ...and the CLEAR HISTORY control and its confirmation, which clear records, not airspace.
+      bool history = !t.compare(j, 8, " history") || !t.compare(i, 10, "clear the ");
+      if (w == "clear" && !history && !(i >= 5 && !t.compare(i - 5, 5, "keep ") && !t.compare(j, 3, " of"))) flag("\"clear\" outside KEEP CLEAR OF");
       i = j;
     }
   }
@@ -323,6 +362,22 @@ static void drawn_check(const char* name) {
 /// The scene: collisions, forbidden traffic words, then the picture.
 static void traffic_scene(const char* name) { words_check(name); drawn_check(name); scene_check(name); }
 static void tick(uint32_t step = 10) { g_millis += step; ui_tick(g_millis, true, 76, -1); }
+/// A tap of the BOOT button: down, held under the 2 s power-off hold, released.
+static void boot_tap() { g_pin_low = PIN_BOOT_BTN; tick(); tick(100); g_pin_low = -1; tick(); }
+/// The side view's ceiling label: whole, and no mark under it (a drone at
+/// 120 m used to leave it reading "20 M / 400 FT CEILING").
+static void ceiling_check(const char* name) {
+  const TextRun* r = run_of("120 M / 400 FT CEILING");
+  int under = 0;
+  if (r) {
+    for (int k = 0; k < s_n; k++)
+      if (s_sv_on[k] && s_sv_px[k] + 8 > r->x0 && s_sv_px[k] - 8 < r->x1 && s_sv_py[k] + 8 > r->y0 && s_sv_py[k] - 8 < r->y1) under++;
+    for (int j = 0; j < s_pac_n; j++)
+      if (s_pac_x[j] + AC_R > r->x0 && s_pac_x[j] - AC_R < r->x1 && s_pac_y[j] + AC_R > r->y0 && s_pac_y[j] - AC_R < r->y1) under++;
+  }
+  char what[96]; snprintf(what, sizeof(what), "%s: the ceiling label is whole and clear of the marks", name);
+  check(r && !under, what);
+}
 /// The whole board as draw_board paints it, checked on its own runs.
 static void board_scene(const char* name) { g_runs.clear(); draw_board(true); scene_check(name); }
 static void traffic_board_scene(const char* name) { g_runs.clear(); draw_board(true); traffic_scene(name); }
@@ -333,7 +388,20 @@ int main() {
   ui_begin(UI_MODE_RX);                         // splash, then the board
   g_runs.clear();
   s_now = g_millis; build_order(); select_row(0);
-  draw_board(true);           scene_check("t5_table");
+  draw_board(true);
+  // The test-key drone: its AUTH cell says TEST (never OK), its details say TEST KEY.
+  { bool cell = false; for (auto& r : g_runs) if (r.s == "TEST" && r.x0 >= s_cols[4].x - 2) cell = true;
+    check(cell, "the table's AUTH column says TEST for the test-key drone"); }
+  scene_check("t5_table");
+  {
+    int k = -1; for (int q = 0; q < s_n; q++) if (!strcmp(g_tracks[s_order[q]].uas, "1581F204C68D9A05")) k = q;
+    check(k >= 0, "the test-key drone is on the table");
+    if (k >= 0) select_row(k);
+    s_inspector = true; draw_board(false); g_runs.clear(); draw_inspector_modal();
+    check(run_of("ID sig: TEST KEY") != nullptr, "its details say ID sig: TEST KEY");
+    scene_check("t5_inspector_test"); s_inspector = false;
+    select_row(0);
+  }
   // A modal covers the board: check the modal's own runs, keep the full picture.
   s_inspector = true; draw_board(false); g_runs.clear(); draw_inspector_modal(); scene_check("t5_inspector"); s_inspector = false;
   s_confirm_switch = true; s_target_mode = UI_TARGET_POWER_OFF; draw_board(false); g_runs.clear(); draw_switch_modal(); scene_check("t5_confirm"); s_confirm_switch = false;
@@ -389,6 +457,16 @@ int main() {
   check(s_wv == WV_ACTION && !strcmp(s_wifi_ssid, "Hangar-Secure"), "a saved network offers CONNECT / FORGET");
   draw_board(false); g_runs.clear(); draw_wifi_action(); scene_check("t5_wifi_saved");
   touch(W / 2, 200); tick(); touch(W / 2 + 280, 400); tick();       // a stray tap inside, then CANCEL...
+  check(s_wv == WV_LIST, "CANCEL returns to the list");
+  // BOOT is "back" on the Wi-Fi screens too: out of CONNECT / FORGET, then out of the list.
+  touch(300, WF_ROW_Y0 + 30); tick();
+  check(s_wv == WV_ACTION, "the saved network's actions again");
+  boot_tap();
+  check(s_wifi_modal && s_wv == WV_LIST, "BOOT backs out of CONNECT / FORGET to the list");
+  boot_tap();
+  check(!s_wifi_modal && s_diag, "BOOT on the list closes it, back to SYSTEM");
+  touch(DG_WF_X0 + 20, DG_WIFI_BTN_Y + 18); tick(); net_debug_set_scanning(false); tick();   // NETWORKS again
+  check(s_wifi_modal && s_wv == WV_LIST && s_wifi_page == 0, "NETWORKS reopens the list");
   s_wv = WV_LIST; draw_board(false);
   touch(300, WF_ROW_Y0 + WF_ROW_H + 30); tick();                  // Airfield-Guest: secured, new
   check(s_kb_modal && !s_kb_ssid_stage && !strcmp(s_kb_ssid, "Airfield-Guest"), "a new secured network opens the keyboard");
@@ -480,7 +558,15 @@ int main() {
     check(traffic_card_pick(&ac, &al) && ac && !strcmp(ac->hex, "a1b2c3"), "the warning takes the plot panel"); }
   // Tap another row while the card shows: the partial path leaves no stale ink.
   touch(TABLE_X + 100, 104 + 3 * ROW_H + 20); tick();
+  check(g_epd_log.area.y == RECT_BODY.y, "a row tap with the header unchanged refreshes the body only");
   snap(); draw_board(true); same_as_snap("a row tap under a traffic card matches a full redraw");
+  // The header changed since the last full draw (a contact expired, the
+  // count moved): the row tap refreshes the whole screen, band included.
+  g_tracks[11].used = false;
+  touch(TABLE_X + 100, 104 + 2 * ROW_H + 20); tick();
+  check(g_epd_log.area.y == 0 && g_epd_log.area.height == H, "a row tap with a changed header refreshes the whole screen");
+  snap(); draw_board(true); same_as_snap("...and the glass matches a full redraw");
+  g_tracks[11].used = true; build_order(); select_row(3); draw_board(true);
   // The card's tap opens its drone's details.
   touch(760, 300); tick();
   check(s_inspector && s_sel >= 0 && !strcmp(g_tracks[s_order[s_sel]].uas, "1581F204C68D9A03"),
@@ -491,7 +577,9 @@ int main() {
   epd_hl_set_all_white(&s_hl); draw_plot(); panel_check("plot with aircraft", RECT_PLOT);
   drawn_check("plot");
   epd_hl_set_all_white(&s_hl); draw_table(); panel_check("table", RECT_TABLE);
-  s_map = true; s_cam_manual = false; map_camera(); traffic_board_scene("t5_map_traffic");
+  s_map = true; s_cam_manual = false; map_camera(); g_runs.clear(); draw_board(true);
+  check(run_of("HOME") != nullptr, "the map labels HOME beside the board's mark, clear of the drones");
+  traffic_scene("t5_map_traffic");
   // A diamond on the map is an alerting aircraft: tapping it shows its alert in the HUD.
   {
     int j = -1; for (int q = 0; q < s_pac_n; q++) if (!strcmp(s_pac_hex[q], "a1b2c3")) j = q;
@@ -501,7 +589,10 @@ int main() {
   }
   traffic_board_scene("t5_map_ac_hud"); s_ac_hex[0] = 0;
   s_map = false;
-  s_side = true; traffic_board_scene("t5_side_traffic");
+  s_side = true; g_runs.clear(); draw_board(true);
+  check(run_of("D9A01 125m") != nullptr, "the side view labels the emergency drone at the axis");
+  ceiling_check("t5_side_traffic");
+  traffic_scene("t5_side_traffic");
   epd_hl_set_all_white(&s_hl); draw_side();
   { int bad = 0; for (int y = 72; y < 496; y++) for (int x = SV_PANEL_X - 23; x < SV_PANEL_X - 1; x++) if (x != SV_PANEL_X - 20 && px_at(x, y) != 15) bad++;
     check(!bad, "side view: nothing crosses into the right panel"); g_runs.clear(); }
@@ -552,6 +643,37 @@ int main() {
   { bool off = false; for (auto& r : g_runs) if (strstr(r.s.c_str(), "CONFLICT WATCH OFF")) off = true;
     check(off, "no ADS-B source: CONFLICT WATCH OFF in the footer"); }
   traffic_scene("t5_table_watch_off");
+
+  // A warning arriving under SYSTEM, the networks list or the keyboard:
+  // the light pulses, the panel is not flashed (a black flash mid-password
+  // shows nothing), the screen's header band says what to do, and the
+  // flash comes with the board when the screen closes.
+  {
+    s_now = g_millis; ui_traffic_update(g_millis);
+    s_diag = true; s_sig_prev = 0; draw_board(true);
+    traffic_fixture(); s_traffic_ms = 0; p_pulses = 0;
+    int gc = g_epd_log.gc16, n0 = g_epd_log.n;
+    tick();
+    check(p_pulses == 3 && g_epd_log.n > n0 && g_epd_log.gc16 == gc, "a warning under SYSTEM pulses the light and redraws without a flash");
+    s_expect_action = true;
+    g_runs.clear(); draw_diagnostics();
+    { const TextRun* r = run_of("GIVE WAY"); check(r && r->y1 < 68, "SYSTEM's header band says GIVE WAY"); }
+    check(run_of(ADSB_CREDIT) != nullptr, "SYSTEM credits adsb.lol beside the ADS-B radius");
+    traffic_scene("t5_diag_warning");
+    s_wifi_modal = true; s_wv = WV_LIST; s_wifi_page = 0;
+    g_runs.clear(); draw_wifi_screen();
+    { const TextRun* r = run_of("GIVE WAY"); check(r && r->y1 < WF_HEAD_H, "the networks list's header band says GIVE WAY"); }
+    traffic_scene("t5_wifi_list_warning");
+    s_kb_modal = true; s_kb_ssid_stage = false; snprintf(s_kb_ssid, sizeof(s_kb_ssid), "Airfield-Guest"); s_kb_buf[0] = 0;
+    g_runs.clear(); draw_keyboard();
+    { const TextRun* r = run_of("GIVE WAY"); check(r && r->y1 < 64, "the keyboard's header band says GIVE WAY"); }
+    traffic_scene("t5_kb_warning");
+    s_kb_modal = false; s_wifi_modal = false; s_expect_action = false;
+    gc = g_epd_log.gc16;
+    touch(W - 70, 34); tick();                                           // CLOSE
+    check(!s_diag && g_epd_log.gc16 == gc + 1, "CLOSE brings the board back with its GC16 flash");
+    traffic_clear();
+  }
 
   // An underrun leaves the glass incomplete: the next pass repaints it all.
   {
@@ -624,7 +746,7 @@ int main() {
     check(s_glance && g_epd_log.n - n1 == 1, "glance: a new emergency reaches the panel at once");
     s_glance = false;
   }
-  s_side = true; board_scene("t5_side");
+  s_side = true; g_runs.clear(); draw_board(true); ceiling_check("t5_side"); scene_check("t5_side");
   g_home_set = false; board_scene("t5_side_nopos"); g_home_set = true;
   s_side = false;
   memset(g_tracks, 0, sizeof(g_tracks)); build_order(); board_scene("t5_empty");

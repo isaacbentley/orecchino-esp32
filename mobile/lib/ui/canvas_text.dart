@@ -10,17 +10,28 @@ import 'dart:collection';
 import 'package:flutter/painting.dart';
 
 import 'theme/colors.dart';
+import 'theme/look.dart';
 
 abstract final class CanvasText {
   static const int _capacity = 192;
   static final LinkedHashMap<String, TextPainter> _cache = LinkedHashMap<String, TextPainter>();
 
-  /// A dark stroke around every glyph: the text's own local background.
-  static final Paint _halo = Paint()
-    ..style = PaintingStyle.stroke
-    ..strokeWidth = 3.2
-    ..strokeJoin = StrokeJoin.round
-    ..color = OrecchinoColors.void0.withValues(alpha: OrecchinoColors.haloAlpha);
+  /// A dark stroke around every glyph: the text's own local background, in
+  /// the look's deep-space colour. One paint per look (its identity is part
+  /// of the cache key below), remade when the look changes.
+  static Paint? _haloPaint;
+  static AppLook? _haloLook;
+  static Paint get _halo {
+    if (_haloPaint == null || _haloLook != Look.current) {
+      _haloLook = Look.current;
+      _haloPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.2
+        ..strokeJoin = StrokeJoin.round
+        ..color = OrecchinoColors.void0.withValues(alpha: OrecchinoColors.haloAlpha);
+    }
+    return _haloPaint!;
+  }
 
   /// A laid-out painter for [text] in [style], reused while it is in the
   /// cache (least recently used goes first).

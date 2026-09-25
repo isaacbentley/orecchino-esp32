@@ -61,7 +61,6 @@ final class TileSync {
         "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/%d/%d/%d"
     /// The local cache is per source, so tiles from another one are never sent.
     nonisolated static let sourceID = "esri-dg1"
-    nonisolated static let attribution = "Esri, HERE, Garmin, © OpenStreetMap contributors"
 
     nonisolated static func url(z: Int, x: Int32, y: Int32) -> URL? {
         URL(string: String(format: tileURL, z, Int(y), Int(x)))

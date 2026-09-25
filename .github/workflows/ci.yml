@@ -23,6 +23,46 @@ env:
   FLUTTER_VERSION: "3.47.5"
 
 jobs:
+  # Scripts and this workflow. On Ubuntu rather than in the macOS host-tests
+  # job because shellcheck is an apt package there; actionlint is fetched
+  # with its own download script (pinned).
+  lint:
+    name: Scripts (shellcheck, actionlint, execute bits)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install shellcheck and actionlint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) \
+            "$ACTIONLINT_VERSION" "$RUNNER_TEMP/actionlint"
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+
+      - name: shellcheck tools/*.sh tests/*.sh
+        run: shellcheck tools/*.sh tests/*.sh
+
+      - name: actionlint
+        run: actionlint .github/workflows/ci.yml
+
+      # A script rewritten through a temp file loses its execute bit, and the
+      # host tests then stop at "Permission denied". tools/flash_common.sh is
+      # sourced, not run, so it is the one *.sh that stays 644.
+      - name: Every tracked script under tools/ and tests/ is executable
+        run: |
+          bad="$(git ls-files -s tools tests \
+                 | awk '$1 == "100644" && $4 ~ /\.(sh|py)$/ && $4 !~ /flash_common\.sh$/ {
+                          print "::error::not executable (mode 100644): " $4 }')"
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            exit 1
+          fi
+
   host-tests:
     name: Host tests (tests/run_tests.sh)
     runs-on: macos-26
@@ -30,9 +70,23 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: arduino/setup-arduino-cli@v2
+      # arduino/setup-arduino-cli has no node24 release (v2 is node20), so the
+      # CLI comes from Arduino's install script instead, pinned to the same
+      # version and kept between runs.
+      - name: Cache arduino-cli
+        uses: actions/cache@v5
         with:
-          version: ${{ env.ARDUINO_CLI_VERSION }}
+          path: ~/.local/bin/arduino-cli
+          key: arduino-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.ARDUINO_CLI_VERSION }}
+      - name: Install arduino-cli ${{ env.ARDUINO_CLI_VERSION }}
+        run: |
+          if [ ! -x "$HOME/.local/bin/arduino-cli" ]; then
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+              | BINDIR="$HOME/.local/bin" sh -s "$ARDUINO_CLI_VERSION"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/arduino-cli" version
 
       # The T5 and T-Embed render tests draw with the real Adafruit GFX font
       # bitmaps, read from the sketchbook (~/Documents/Arduino on macOS).
@@ -114,14 +168,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: arduino/setup-arduino-cli@v2
+      # Same install as the host-tests job (see the note there).
+      - name: Cache arduino-cli
+        uses: actions/cache@v5
         with:
-          version: ${{ env.ARDUINO_CLI_VERSION }}
+          path: ~/.local/bin/arduino-cli
+          key: arduino-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.ARDUINO_CLI_VERSION }}
+      - name: Install arduino-cli ${{ env.ARDUINO_CLI_VERSION }}
+        run: |
+          if [ ! -x "$HOME/.local/bin/arduino-cli" ]; then
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+              | BINDIR="$HOME/.local/bin" sh -s "$ARDUINO_CLI_VERSION"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/arduino-cli" version
 
       # The esp32 core and its toolchains are ~2 GB; keep them between runs.
       # (~/.arduino15 is arduino-cli's data directory on Linux.)
       - name: Cache the esp32 core
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.arduino15

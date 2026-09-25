@@ -111,8 +111,13 @@ void main() {
       // The phone's records are all still there.
       expect((await db.getDetectionsList()).where((r) => r.uasId == 'UAS90'), hasLength(1));
       expect(await db.getDetectionsList(detectorId: 't5'), hasLength(2));
-      // The next sync (started at once) asked from the start of the new log.
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      // The next sync (started at once) asked from the start of the new log
+      // (its database reset and start run on real time: wait for it, up to
+      // a deadline a loaded machine still meets).
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (sim.commands.where((c) => c == 'log_get').length < 2 && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
       expect(sim.commands.where((c) => c == 'log_get').length, greaterThanOrEqualTo(2));
     });
     await stop(t);

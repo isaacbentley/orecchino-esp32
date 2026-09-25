@@ -168,13 +168,14 @@ static void draw_card(int slot, const Track* t) {
   if (!isnan(t->speed))  snprintf(sb, sizeof(sb), "%.1fm/s", t->speed);
   snprintf(b, sizeof(b), "%d dBm   h %s   v %s", t->rssi, hb, sb);
   txt(&FreeSansBold9pt7b, 22, y + 56, C_MUTED, b);
-  if (g_home_set && t->has_pos) {
-    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
-    snprintf(b, sizeof(b), "%s  brg %03d", r, (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
+  double hl, ho;   // the board's position, under the receiver lock
+  if (t->has_pos && rx_get_home(&hl, &ho)) {
+    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(hl, ho, t->lat, t->lon));
+    snprintf(b, sizeof(b), "%s  brg %03d", r, (int)ui_bearing(hl, ho, t->lat, t->lon));
   } else snprintf(b, sizeof(b), "%s", ui_status_name(t->status));
   txt(&FreeSansBold9pt7b, 22, y + 74, t->in_tfr && !stale ? C_DANGER : C_TEXT, b);
   snprintf(b, sizeof(b), "%s%s%s  %us", (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
-           (t->src_mask & 4) ? "B" : "", (unsigned)((s_now - t->last_ms) / 1000));
+           (t->src_mask & 4) ? "B" : "", (unsigned)ui_since_s(s_now, t->last_ms));
   txt(&FreeSansBold9pt7b, W - 24 - txt_w(&FreeSansBold9pt7b, b), y + 74, C_MUTED, b);
   if (t->in_tfr) txt(&FreeSansBold9pt7b, W - 100, y + 56, C_DANGER, "TFR!");
   s_gfx->endWrite();
@@ -259,10 +260,11 @@ static void draw_detail() {
   bool danger = ui_danger(t, s_now);
   char b[64];
   int y = 120;
-  if (g_home_set && t->has_pos) {
-    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(g_home_lat, g_home_lon, t->lat, t->lon));
+  double hl, ho;   // the board's position, under the receiver lock
+  if (t->has_pos && rx_get_home(&hl, &ho)) {
+    char r[10]; ui_fmt_range(r, sizeof(r), ui_dist_m(hl, ho, t->lat, t->lon));
     txt(&FreeSansBold18pt7b, 16, y, C_TEXT, r);
-    snprintf(b, sizeof(b), "%03d", (int)ui_bearing(g_home_lat, g_home_lon, t->lat, t->lon));
+    snprintf(b, sizeof(b), "%03d", (int)ui_bearing(hl, ho, t->lat, t->lon));
     txt(&FreeSansBold18pt7b, 200, y, C_ACCENT, b);
     txt(&FreeSansBold9pt7b, 16, y + 20, C_MUTED, "range");
     txt(&FreeSansBold9pt7b, 200, y + 20, C_MUTED, "bearing");
@@ -297,7 +299,7 @@ static void draw_detail() {
   snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", t->mac[0], t->mac[1], t->mac[2], t->mac[3], t->mac[4], t->mac[5]);
   txt(&FreeSansBold9pt7b, 16, y, C_MUTED, b); y += 22;
   snprintf(b, sizeof(b), "src %s%s%s   msgs %u   %us ago", (t->src_mask & 1) ? "W" : "", (t->src_mask & 2) ? "N" : "",
-           (t->src_mask & 4) ? "B" : "", t->msgs, (unsigned)((s_now - t->last_ms) / 1000));
+           (t->src_mask & 4) ? "B" : "", t->msgs, (unsigned)ui_since_s(s_now, t->last_ms));
   txt(&FreeSansBold9pt7b, 16, y, C_MUTED, b);
   s_gfx->endWrite();
   draw_bottom(sm, "tap: back");

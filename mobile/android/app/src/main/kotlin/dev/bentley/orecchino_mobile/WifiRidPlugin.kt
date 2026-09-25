@@ -84,6 +84,7 @@ class WifiRidPlugin :
 
     // Beacons
     private var beaconWanted = false
+    private var beaconThrottled = false   // the last scan request was refused, and Dart was told
     private var beaconIntervalMs = DEFAULT_BEACON_INTERVAL_MS
     private var scanReceiver: BroadcastReceiver? = null
     private val lastSeenUs = HashMap<String, Long>()   // BSSID -> newest scan result delivered
@@ -342,12 +343,25 @@ class WifiRidPlugin :
         return "started"
     }
 
+    /** The path delivers again after a "throttled": say so, once. */
+    private fun beaconDelivering() {
+        if (!beaconThrottled) return
+        beaconThrottled = false
+        status("beacon", "started")
+    }
+
     @Suppress("DEPRECATION")
     private fun requestScan() {
         try {
             // False when throttled (4 per 2 min in the foreground); results
-            // from other scans still arrive through the broadcast.
-            if (wifi?.startScan() != true) status("beacon", "throttled")
+            // from other scans still arrive through the broadcast. Each
+            // change of state is reported once, not every interval.
+            if (wifi?.startScan() == true) {
+                beaconDelivering()
+            } else if (!beaconThrottled) {
+                beaconThrottled = true
+                status("beacon", "throttled")
+            }
         } catch (e: SecurityException) {
             status("beacon", "permission", e.message)
         }
@@ -362,6 +376,7 @@ class WifiRidPlugin :
             status("beacon", "permission", e.message)
             return
         }
+        beaconDelivering()   // someone's scan came through: not stuck on "throttled"
         // ScanResult.timestamp is microseconds since boot.
         val bootWallMs = System.currentTimeMillis() - SystemClock.elapsedRealtime()
         if (lastSeenUs.size > 512) lastSeenUs.clear()
@@ -394,6 +409,7 @@ class WifiRidPlugin :
 
     private fun stopBeacons() {
         beaconWanted = false
+        beaconThrottled = false
         main.removeCallbacks(scanTick)
         scanReceiver?.let { try { context.unregisterReceiver(it) } catch (e: Exception) {} }
         scanReceiver = null

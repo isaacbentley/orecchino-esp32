@@ -34,6 +34,7 @@ import '../../ui/theme/theme.dart';
 import '../../ui/traffic_widgets.dart';
 import 'live_items.dart';
 import 'sky_painter.dart';
+import 'sky_scene.dart' show badgeSpots;
 
 /// Where the map's tiles come from.
 class MapTileSource {
@@ -398,6 +399,7 @@ class LiveMapState extends State<LiveMap> {
                 you: _you,
                 headingDeg: widget.headingDeg,
                 selectedId: widget.selectedId,
+                bounds: v,
                 onSelect: widget.onSelect,
               ),
             ],
@@ -445,7 +447,8 @@ class LiveMapState extends State<LiveMap> {
             ),
           ]),
         ),
-        // The attribution: always visible, opens its full text.
+        // The attribution: always visible, opens its full text. No wider
+        // than the free area (it wraps beside a panel), never under it.
         Positioned(
           left: v.left + 8,
           bottom: _size.height - v.bottom + 8,
@@ -456,7 +459,8 @@ class LiveMapState extends State<LiveMap> {
             child: GestureDetector(
               onTap: _showAttribution,
               child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: OrecchinoTheme.minTarget),
+                constraints: BoxConstraints(
+                    minHeight: OrecchinoTheme.minTarget, maxWidth: math.max(120, v.width - 16)),
                 child: Align(
                   alignment: Alignment.bottomLeft,
                   widthFactor: 1,
@@ -512,6 +516,10 @@ class _Marks extends StatelessWidget {
   final LatLng? you;
   final double? headingDeg;
   final String? selectedId;
+
+  /// The free part of the screen (not the rail, the header, the panel or
+  /// the sheet): the words stay inside it.
+  final Rect bounds;
   final ValueChanged<String> onSelect;
 
   const _Marks({
@@ -521,6 +529,7 @@ class _Marks extends StatelessWidget {
     required this.you,
     required this.headingDeg,
     required this.selectedId,
+    required this.bounds,
     required this.onSelect,
   });
 
@@ -569,18 +578,29 @@ class _Marks extends StatelessWidget {
         if (anchor(b) case final a?)
           if (pos[b.aircraftId] case final z?) (b, a, z),
     ];
+    // The bridges' numbers keep clear of the marks, of each other and of the
+    // edges, as on the sky; the labels then keep clear of them.
+    final badges = badgeSpots(bridges, {...pos, if (youAt != null) SkyBridge.you: youAt}, scaler, bounds: bounds);
     return Stack(clipBehavior: Clip.none, children: [
       Positioned.fill(
         child: IgnorePointer(
           child: CustomPaint(
-            painter: MapMarksPainter(marks: marks, pairs: pairs, you: youAt, selectedId: selectedId, scaler: scaler),
+            painter: MapMarksPainter(
+              marks: marks,
+              pairs: pairs,
+              you: youAt,
+              selectedId: selectedId,
+              scaler: scaler,
+              reserved: [for (final (_, r) in badges) r],
+              bounds: bounds,
+            ),
           ),
         ),
       ),
-      for (final (b, a, z) in pairs)
+      for (final (b, r) in badges)
         Positioned(
-          left: (a.dx + z.dx) / 2,
-          top: (a.dy + z.dy) / 2,
+          left: r.center.dx,
+          top: r.center.dy,
           child: FractionalTranslation(
             translation: const Offset(-0.5, -0.5),
             child: ExcludeSemantics(
@@ -635,12 +655,20 @@ class MapMarksPainter extends CustomPainter {
   final String? selectedId;
   final TextScaler scaler;
 
+  /// Screen areas the labels keep clear of (the bridges' numbers).
+  final List<Rect> reserved;
+
+  /// Where the labels must fit; null for anywhere.
+  final Rect? bounds;
+
   MapMarksPainter({
     required this.marks,
     required this.pairs,
     required this.you,
     required this.selectedId,
     required this.scaler,
+    this.reserved = const [],
+    this.bounds,
   });
 
   final List<Rect> _placed = [];
@@ -706,9 +734,9 @@ class MapMarksPainter extends CustomPainter {
     // Labels: the selected first, then drones and aircraft, then operators.
     _placed
       ..clear()
+      ..addAll(reserved)
       ..addAll([for (final m in marks) Rect.fromCircle(center: m.at, radius: 11)])
-      ..addAll([if (you != null) Rect.fromCircle(center: you!, radius: 10)])
-      ..addAll([for (final (_, a, z) in pairs) Rect.fromCenter(center: (a + z) / 2, width: 120, height: 26)]);
+      ..addAll([if (you != null) Rect.fromCircle(center: you!, radius: 10)]);
     final order = [...marks]..sort((a, b) {
         int rank(MapMark m) => m.item.id == selectedId ? 0 : (m.item.isOperator ? 2 : 1);
         return rank(a).compareTo(rank(b));
@@ -814,7 +842,8 @@ class MapMarksPainter extends CustomPainter {
       fontFamily: OrecchinoType.display,
       fontSize: c.isOperator ? 11 : 12.5,
       fontWeight: FontWeight.w600,
-      color: c.isOperator ? m.color : (c.stale ? OrecchinoColors.inkSubtle : OrecchinoColors.ink),
+      // Stale: the subtle ink (a colour at 45 % would fall under 4.5:1).
+      color: c.stale ? OrecchinoColors.inkSubtle : (c.isOperator ? m.color : OrecchinoColors.ink),
     );
     final sub = TextStyle(
       fontFamily: OrecchinoType.text,
@@ -830,7 +859,10 @@ class MapMarksPainter extends CustomPainter {
     final ms = CanvasText.measure(text, main, scaler);
     final ss = second == null ? Size.zero : CanvasText.measure(second, sub, scaler);
     final w = math.max(ms.width, ss.width), h = ms.height + ss.height;
-    bool free(Rect r) => !_placed.any((o) => o.overlaps(r));
+    final b = bounds;
+    bool free(Rect r) =>
+        !_placed.any((o) => o.overlaps(r)) &&
+        (b == null || (r.left >= b.left + 2 && r.right <= b.right - 2 && r.top >= b.top && r.bottom <= b.bottom));
     Offset? spot;
     for (var dy = 0.0; dy <= 2 * h && spot == null; dy += h * 0.5) {
       for (final base in [m.at + Offset(16, -10 + dy), m.at + Offset(-16 - w, -10 + dy)]) {

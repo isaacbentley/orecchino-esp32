@@ -19,9 +19,11 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/power/power_policy.dart';
+import 'ambient_clock.dart';
 import 'theme/theme.dart';
 
 /// How [Glass] frosts, for the widgets below: see the file comment.
@@ -372,7 +374,9 @@ class _BarsPainter extends CustomPainter {
 }
 
 /// The connection light: a core with a halo that breathes while [active]
-/// (faster while [busy]). Still when motion is reduced.
+/// (faster while [busy]), on the shared ambient clock (24–30 frames a
+/// second; a vsync ticker would ask for a frame on every refresh). Still
+/// when motion is reduced, in Saver and in Flat.
 class BreathingDot extends StatefulWidget {
   final Color color;
   final bool active;
@@ -385,12 +389,24 @@ class BreathingDot extends StatefulWidget {
   State<BreathingDot> createState() => _BreathingDotState();
 }
 
-class _BreathingDotState extends State<BreathingDot> with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(vsync: this, duration: Motion.breath);
+class _BreathingDotState extends State<BreathingDot> {
+  /// The ambient clock, or null: a still light.
+  ValueListenable<double>? _clock;
+
+  /// The clock time the breathing started; null while resting.
+  double? _from;
+  bool? _wasActive, _wasBusy;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final clock = AmbientClock.of(context);
+    if (clock != _clock) {
+      _clock?.removeListener(_onClock);
+      _clock = clock;
+      _from = null;
+      _wasActive = null; // a new clock: start over
+    }
     _sync();
   }
 
@@ -400,36 +416,42 @@ class _BreathingDotState extends State<BreathingDot> with SingleTickerProviderSt
     _sync();
   }
 
-  bool? _wasActive, _wasBusy;
-
   /// Busy (connecting): breathes quickly until it is not. Active: breathes
   /// three times when it becomes active, then rests as a steady glow, so an
-  /// idle screen is not animating for nothing. Reduce motion: still.
+  /// idle screen is not animating for nothing. No clock (Reduce Motion,
+  /// Saver, the background) or Flat: still.
   void _sync() {
-    // Flat: a still dot, as the mockups' "● receiving".
-    final reduced = Motion.reduced(context) || Look.flat;
+    final clock = _clock;
     final changed = widget.active != _wasActive || widget.busy != _wasBusy;
     _wasActive = widget.active;
     _wasBusy = widget.busy;
-    if (reduced || !widget.active) {
-      if (_c.isAnimating) _c.stop();
-      _c.value = 0.35;
+    if (clock == null || Look.flat || !widget.active) {
+      _rest();
       return;
     }
     if (!changed) return;
-    _c.duration = widget.busy ? const Duration(milliseconds: 900) : Motion.breath;
-    if (widget.busy) {
-      _c.repeat();
-    } else {
-      _c.repeat(count: 3).whenCompleteOrCancel(() {
-        if (mounted && !_c.isAnimating) _c.value = 0.35;
-      });
-    }
+    _from = clock.value;
+    clock.removeListener(_onClock); // busy toggling while active: never two
+    clock.addListener(_onClock);
+  }
+
+  /// Resting: the light no longer listens, so it does not keep the clock
+  /// running on a screen where nothing else moves.
+  void _rest() {
+    _clock?.removeListener(_onClock);
+    _from = null;
+  }
+
+  /// Three breaths after becoming active, the light rests.
+  void _onClock() {
+    final from = _from, clock = _clock;
+    if (from == null || clock == null || widget.busy || !mounted) return;
+    if (clock.value - from >= 3 * Motion.breath.inMilliseconds / 1000) setState(_rest);
   }
 
   @override
   void dispose() {
-    _c.dispose();
+    _clock?.removeListener(_onClock);
     super.dispose();
   }
 
@@ -439,20 +461,34 @@ class _BreathingDotState extends State<BreathingDot> with SingleTickerProviderSt
       dimension: widget.size * 2.2,
       // Its own layer: while it breathes, only the light repaints (not the
       // list it sits in), and without a rebuild.
-      child: RepaintBoundary(child: CustomPaint(painter: _BreathPainter(widget.color, _c, widget.active))),
+      child: RepaintBoundary(
+        child: CustomPaint(
+          painter: _BreathPainter(widget.color, _from == null ? null : _clock, _from ?? 0, widget.active, widget.busy),
+        ),
+      ),
     );
   }
 }
 
 class _BreathPainter extends CustomPainter {
   final Color color;
-  final Animation<double> anim;
+  final ValueListenable<double>? clock; // null: a still light
+  final double from; // the clock time the breathing started
   final bool active;
-  _BreathPainter(this.color, this.anim, this.active) : super(repaint: anim);
+  final bool busy;
+  _BreathPainter(this.color, this.clock, this.from, this.active, this.busy) : super(repaint: clock);
+
+  /// The breath's phase, 0..1: one breath per [Motion.breath] (0.9 s busy).
+  double get _phase {
+    final c = clock;
+    if (c == null) return 0.35;
+    final period = busy ? 0.9 : Motion.breath.inMilliseconds / 1000;
+    return ((c.value - from) / period) % 1.0;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final t = anim.value;
+    final t = _phase;
     final c = size.center(Offset.zero);
     if (Look.flat) {
       final r = size.shortestSide / 2.2 / 2;
@@ -505,5 +541,6 @@ class _BreathPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_BreathPainter old) => old.anim != anim || old.color != color || old.active != active;
+  bool shouldRepaint(_BreathPainter old) =>
+      old.clock != clock || old.from != from || old.color != color || old.active != active || old.busy != busy;
 }

@@ -30,7 +30,9 @@ import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.location.LocationManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 
 class OrecchinoWatchService : Service() {
     companion object {
@@ -41,23 +43,50 @@ class OrecchinoWatchService : Service() {
         const val ACTION_STOP = "dev.bentley.orecchino.watch.STOP"
         private const val EXTRA_TEXT = "text"
         private const val EXTRA_LOCATION = "location"
+        private const val START_TIMEOUT_MS = 5_000L
+        private val main = Handler(Looper.getMainLooper())
 
         @Volatile
         var running = false
             private set
 
-        /** Start it (from the app on screen). False when Android refused. */
-        fun start(context: Context, text: String, location: Boolean): Boolean {
+        /** The caller of [start] waiting to hear whether the service went foreground. */
+        private var startPending: ((Boolean) -> Unit)? = null
+
+        /**
+         * Start it (from the app on screen). [onResult] gets whether the
+         * service is in the foreground: false when Android refused the
+         * start, or when startForeground failed (a foreground type not
+         * allowed yet, say BLUETOOTH_CONNECT not granted on Android 14) and
+         * the service stopped itself. Main thread; answered on it.
+         */
+        fun start(context: Context, text: String, location: Boolean, onResult: (Boolean) -> Unit) {
             val i = Intent(context, OrecchinoWatchService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_TEXT, text)
                 .putExtra(EXTRA_LOCATION, location)
-            return try {
+            try {
                 if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
-                true
             } catch (e: Exception) {
-                false
+                onResult(false)
+                return
             }
+            startPending?.invoke(false) // an older start still waiting: superseded
+            startPending = onResult
+            // Never heard back (the process was busy, the service killed
+            // before it ran): not running, as far as the app knows.
+            main.postDelayed({
+                if (startPending === onResult) {
+                    startPending = null
+                    onResult(running)
+                }
+            }, START_TIMEOUT_MS)
+        }
+
+        private fun reportStart(ok: Boolean) {
+            val cb = startPending ?: return
+            startPending = null
+            cb(ok)
         }
 
         /** New words for the notification. */
@@ -130,7 +159,9 @@ class OrecchinoWatchService : Service() {
             else -> {
                 val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Orecchino watching"
                 val location = intent?.getBooleanExtra(EXTRA_LOCATION, false) ?: false
-                if (!goForeground(text, location)) stopSelf()
+                val ok = goForeground(text, location)
+                reportStart(ok)
+                if (!ok) stopSelf()
             }
         }
         // Not restarted by itself after the process is gone: it starts again

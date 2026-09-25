@@ -93,12 +93,16 @@ class AdsbSource {
     return Uri.parse('$base/${r(area.lat)}/${r(area.lon)}/${area.radiusNm}');
   }
 
-  /// Fetch the aircraft in [area]. Throws on a network or HTTP error.
-  Future<List<TrafficAircraft>> fetch(AdsbArea area, int nowMs) async {
+  /// Fetch the aircraft in [area]. Throws on a network or HTTP error. The
+  /// answer is stamped with [clock] read once it is in (the wall clock by
+  /// default): each aircraft's "seen" age counts from when adsb.lol
+  /// answered, so a slow fetch never makes the data look older than it is.
+  Future<AdsbAnswer> fetch(AdsbArea area, {int Function()? clock}) async {
     final res = await client
         .get(urlFor(base, area), headers: const {'Accept': 'application/json'}).timeout(const Duration(seconds: 8));
     if (res.statusCode != 200) throw http.ClientException('adsb.lol answered ${res.statusCode}');
-    return parse(res.body, nowMs);
+    final at = clock != null ? clock() : DateTime.now().millisecondsSinceEpoch;
+    return AdsbAnswer(parse(res.body, at), at);
   }
 
   /// The adsb.lol answer as aircraft, unusable ones dropped.
@@ -122,7 +126,7 @@ class AdsbSource {
     num? n(Object? x) => x is num && x.isFinite ? x : null;
     final altGeomFt = n(a['alt_geom']);
     final altBaro = a['alt_baro']; // feet, or "ground"
-    final rate = n(a['baro_rate']) ?? n(a['geom_rate']);
+    final rate = n(a['geom_rate']) ?? n(a['baro_rate']); // geometric first, as the Mac and T5
     final flight = a['flight'];
     final type = a['t'];
     return {
@@ -146,6 +150,14 @@ class AdsbSource {
   void close() => client.close();
 }
 
+/// One answer from adsb.lol: the aircraft, and when it arrived (what their
+/// ages, and the set's [TrafficMonitor.dataMs], count from).
+class AdsbAnswer {
+  final List<TrafficAircraft> aircraft;
+  final int atMs;
+  const AdsbAnswer(this.aircraft, this.atMs);
+}
+
 /// The phone's aircraft set and its evaluation (the Mac's TrafficService).
 class TrafficMonitor {
   List<TrafficAircraft> aircraft = const [];
@@ -154,16 +166,29 @@ class TrafficMonitor {
   TrafficResult result = TrafficResult.empty;
   TrafficState _state = TrafficState();
 
-  /// Install a fetched set: at most 32, none outside [area], nearest its
-  /// centre first (as a receiver keeps them).
+  /// Install a fetched set (the Mac's `install`): the fresh answer, plus
+  /// earlier aircraft it no longer lists while their positions are under
+  /// 60 s old (adsb.lol drops an aircraft from one answer now and then; its
+  /// alert must not clear 20 s sooner here than on the Mac); one entry per
+  /// hex, the newer position winning; then at most 32, none outside [area],
+  /// nearest its centre first (ties by hex), as a receiver keeps them.
   void update(List<TrafficAircraft> list, int fetchedMs, AdsbArea area) {
-    final cand = <(double, TrafficAircraft)>[];
+    final byHex = <String, TrafficAircraft>{};
+    for (final a in aircraft) {
+      if (a.ageS(fetchedMs) <= TrafficRules.presentS) byHex[a.hex] = a;
+    }
     for (final a in list) {
+      final old = byHex[a.hex];
+      if (old != null && old.seenMs > a.seenMs) continue; // keep the newer position
+      byHex[a.hex] = a;
+    }
+    final cand = <(double, TrafficAircraft)>[];
+    for (final a in byHex.values) {
       final d = TrafficRules.distanceM(area.lat, area.lon, a.lat, a.lon);
       if (d > area.radiusM) continue;
       cand.add((d, a));
     }
-    cand.sort((x, y) => x.$1.compareTo(y.$1));
+    cand.sort((x, y) => x.$1 != y.$1 ? x.$1.compareTo(y.$1) : x.$2.hex.compareTo(y.$2.hex));
     aircraft = cand.take(TrafficRules.maxAircraft).map((c) => c.$2).toList();
     dataMs = fetchedMs;
     this.area = area;

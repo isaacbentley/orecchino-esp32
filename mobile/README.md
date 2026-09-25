@@ -31,9 +31,16 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   `firmware/common/rx_core.h` `emit_log`): ended records are stored by seq,
   contacts still live (`"active":true,"seq":null`) replace the detector's
   previous live set, the cursor becomes `log_done.next` only when every record
-  was stored, `oldest` above the cursor is reported as a gap, and a cursor
-  above `total` (the detector's log was cleared) starts a new log epoch so
-  new seqs never overwrite older history.
+  was stored, `oldest` above the cursor is reported as a gap, and a cleared
+  log (the board's `log_id`, its persisted log identity bumped by every
+  clear, differs from the one stored with the cursor; or the cursor is above
+  `total`; or, for firmware without `log_id`, `oldest` went below the one
+  stored, which an appending ring never does) starts a new log epoch so new
+  seqs never overwrite older history. A reply the link cut short
+  (`log_done` with `"err":"dropped"`, `next` = the `since` asked for) or no
+  `log_done` at all keeps the cursor and asks the same question again, up
+  to three times. A failed pairing is reported with the passkey to enter
+  (the board refuses a pairing that did not use it).
 - **Live sky**, heading-up from the compass (north-up and said so when there
   is none): a full-screen 3D dome (`features/live/sky_projection.dart`, a
   perspective camera over a ground plane of range rings and compass ticks)
@@ -97,6 +104,19 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   `core/traffic/traffic_words.dart` puts the action first everywhere. These
   are reported positions, not predictions, and not every aircraft broadcasts
   ADS-B; the status line never counts aircraft or claims the sky is empty.
+  Like the Mac, the phone keeps an aircraft one answer omits while its
+  position is under 60 s old, so an alert does not clear sooner here.
+  **Observer elevation caveat:** LOW measures an aircraft's height above
+  *your* elevation when you are its anchor, and the app passes geolocator's
+  `altitude` for that. On iOS that is CoreLocation's altitude above mean
+  sea level, and on Android 14+ (or with NMEA on) the MSL altitude too,
+  while the ADS-B heights (`alt_geom`), the Mac's `ellipsoidalAltitude` and
+  the T5's GPS-plus-geoid elevation are heights above the WGS-84 ellipsoid.
+  The difference is the geoid separation, about -32 m around San Francisco
+  and up to about +/-100 m elsewhere: on an iPhone a LOW alert's
+  "`AIRCRAFT <v> M ABOVE GROUND`" reads that much off, and the 460 m line
+  moves with it. Drone-anchored LOW and every pair alert are unaffected
+  (both sides geodetic). A geoid model on the phone is follow-up work.
   The query is small: **10 km around the phone** by default (5-30 km,
   Detectors > Settings); a live drone more than 3 km from the phone moves the
   centre to the middle of the phone and the drones and widens the radius
@@ -104,7 +124,7 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   port of the firmware's `net_adsb_area`). Aircraft outside the area are
   dropped.
 - **Alerts** (plan §8.4): a local notification per alert (a drone-aircraft
-  pair, or a low aircraft) at most every 5 minutes, titled with the action
+  pair, or low traffic) at most every 5 minutes, titled with the action
   and carrying the geometry, the rule, the aircraft and the data age
   (time-sensitive on iOS for warnings; Android channel "Traffic near drones",
   high importance) with **Show** (opens Live on the drone) and **Mute 10
@@ -114,8 +134,11 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   Traffic, 2 o'clock, 1.1 kilometres, 2,600 feet, descending.", off by
   default). Aircraft no alert names never notify. The Live alert capsule adds the clock
   position relative to where the phone points. On Android an ongoing notification carries the
-  active warning (updated at most every 5 s) and a foreground service says
-  "Orecchino connected to 1 detector" while a detector is connected.
+  active warning (updated at most every 5 s); the detector connection has no
+  notification of its own (the "Watch in the background" notification says
+  "T5 connected"). Drone alerts (EMERGENCY REPORTED, ID SIGNATURE INVALID)
+  need a live source: a detector connected, or this phone's own receiver
+  running and the drone heard by it within the last minute.
 - **This phone as a detector** (`core/native_rx/`, `core/odid/`; Detectors >
   Settings > "Use this phone as a detector", on by default): the phone hears
   Remote ID itself (Bluetooth 4 legacy and Bluetooth 5 extended advertising;
@@ -253,8 +276,13 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
     phone's receiver at its background duty, the rules and the alerts carry
     on. Its notification reads "Orecchino watching · 2 drones · conflict
     watch on · T5 connected", with Open, Pause 1 h (alerts muted and this
-    phone's receiver resting for an hour) and Stop (until the app is opened
-    again). It starts only while the app is on screen. After pairing, the
+    phone's receiver resting for an hour, or until the app is opened) and
+    Stop (until the app is opened again). It starts only while the app is on
+    screen, reports running only once Android has put it in the foreground,
+    and a refused start (a foreground type not yet allowed) is tried again
+    every 30 s while the app stays on screen. A headless start (Android
+    waking the app for an associated detector, iOS relaunching it for
+    Bluetooth) runs the background policy until a screen opens. After pairing, the
     app asks Android to associate the detector as a companion device
     (`WatchPlugin.kt`): the app may then run and start its service in the
     background for it, Android 12+ wakes it when the detector comes into
@@ -349,7 +377,10 @@ they are cached on the phone (up to 50 MB).
   background watch), `REQUEST_COMPANION_RUN_IN_BACKGROUND`,
   `REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND` and
   `REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE` (an associated detector; the
-  `companion_device_setup` feature is optional); `allowBackup="false"` and
+  `companion_device_setup` feature is optional), `NEARBY_WIFI_DEVICES`
+  (`neverForLocation`), `ACCESS_WIFI_STATE` and `CHANGE_WIFI_STATE` (the
+  phone's own Wi-Fi Remote ID receiver, `WifiRidPlugin.kt`; the `wifi` and
+  `wifi.aware` hardware features are optional); `allowBackup="false"` and
   data-extraction rules that exclude everything. Core library desugaring is
   on (flutter_local_notifications needs it).
 
@@ -414,10 +445,11 @@ text contrast over a star, and every screen on a phone on its side (1x and
 table, ADS-B gating and backoff, the app following the lifecycle and the
 visible tab (scan duty, Wi-Fi paths, location, compass), the compass
 throttle, the ambient clock, "Watch in the background" over a fake method
-channel (start only on screen, Pause 1 h, Stop, companion association),
-pending reconnects, and the frame budget of an idle Live screen (at most 30
-frames a second in Balanced, 31 in Full, none but the once-a-second update
-in Saver or with Reduce Motion; never the display's 120).
+channel (start only on screen, a refused start tried again, Pause 1 h and
+its mute ending when the app opens, Stop, companion association), pending
+reconnects, and the frame budget of an idle Live screen (about 30 frames a
+second in Balanced and Full, none but the once-a-second update in Saver or
+with Reduce Motion; never the display's 120).
 
 After changing `lib/data/db.dart`, regenerate `db.g.dart` with
 `flutter pub run build_runner build`.

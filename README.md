@@ -89,8 +89,9 @@ T5's SYSTEM screen (beside it, how many records are saved and how old the
 oldest is) or **Clear history** in the T-Embed's menu. Both ask first
 ("Clear the 48 saved drone records? This can't be undone."; CANCEL is the
 default on the T-Embed's knob). CLEAR empties the log, writes the empty log
-to flash at once, and sends `{"type":"log_cleared"}` to every connected app
-so it resets its sync cursor; the host command `log_clear` does the same.
+to flash at once, and sends `{"type":"log_cleared","log_id":…}` to every
+connected app so it resets its sync cursor; the host command `log_clear`
+does the same.
 
 ### Bluetooth LE link
 
@@ -105,12 +106,14 @@ so a phone can tell an Orecchino from any other NUS device. `caps` is what
 that board handles: `log`, `log_since` and `tfr` on every receiver, plus
 `tiles` on the SenseCAP and `tiles`, `wifi` and `traffic` on the T5.
 
-One phone at a time. Everything needs an encrypted link: pairing uses a
-passkey, and the passkey is the **fixed, published 123456** on every
-Orecchino. That is deliberate — it keeps passers-by out, not a determined
-attacker; the T5 shows the code while pairing and says so on screen. A
-peer that has not paired within 10 seconds is dropped, so it cannot sit on
-the only connection. The live feed (`rid` and `hb` lines) goes to the phone
+One phone at a time. Everything needs an authenticated (passkey) link:
+the passkey is the **fixed, published 123456** on every Orecchino, and a
+Just Works pairing — one that never showed the code, which a peer could
+otherwise get by claiming no keyboard and no display — is refused and its
+bond deleted. That is deliberate — it keeps passers-by out, not a
+determined attacker; the T5 shows the code while pairing and says so on
+screen. A peer that has not paired within 10 seconds is dropped, so it
+cannot sit on the only connection. The live feed (`rid` and `hb` lines) goes to the phone
 only after it sends `{"cmd":"feed","on":true}`; replies go only to the
 transport a command came in on. On the SenseCAP and T5, `fs_*` tile
 commands work over BLE as over USB; the T5's Wi-Fi setup commands need the
@@ -139,7 +142,7 @@ drone for its details. The side button switches between map and list views.
 If a drone enters an active flight restriction, the console beeps and
 flags it.
 
-There is also a hidden extra: hold the side button for ten seconds to open
+There is also a hidden extra: hold the side button for six seconds to open
 a live spectrum analyzer. It shows 2.4 GHz activity by Wi-Fi channel and
 uses the LoRa radio to sweep 850–930 MHz. Tap the lower chart to zoom in;
 the display re-scales itself as the signal picture changes.
@@ -154,7 +157,7 @@ arduino-cli lib install "GFX Library for Arduino" PCA95x5 PNGdec
 tools/flash_indicator.sh /dev/cu.usbserial-XXXX
 ```
 
-> **Note**: If compiling by hand or in the Arduino IDE instead of using the helper script, select **Partition Scheme: Custom** (`PartitionScheme=custom`) and include `--libraries firmware/libraries` so the sketch's custom partition table (2 MB app, 5.8 MB LittleFS map tiles) is used.
+> **Note**: If compiling by hand or in the Arduino IDE instead of using the helper script, select **Partition Scheme: Custom** (`PartitionScheme=custom`) and include `--libraries firmware/libraries` so the sketch's custom partition table (2 MB app, 5.9 MB LittleFS map tiles) is used.
 
 Two things to know when flashing:
 
@@ -332,8 +335,10 @@ details. The round home button steps table, map, side.
 
 E-paper is slow and ghosts, so the board only redraws when its content
 actually changes: fast partial updates for routine table and map changes,
-a clean full refresh every ten updates, on any alert change, when you
-switch views, and at least every five minutes. The BOOT button steps
+a clean full refresh every ten partial updates, on any alert change, when
+you switch views, and whenever three minutes have passed since the last
+one; a board whose content has not changed is redrawn, in full, every
+five minutes. The BOOT button steps
 through contacts on the table, then over to the map, the side view, and
 back; hold it
 for two seconds to power the board off (the key labelled IO48 does the
@@ -377,7 +382,8 @@ before flashing, forcing it only if it has not gone within 5 seconds.
 The T5 can join a Wi-Fi network to fetch, on its own: the time (SNTP), the
 FAA flight restrictions within 200 km, ADS-B aircraft from adsb.lol, and
 Esri World Dark Gray map tiles (JPEG) — all around its own position, so it needs a GPS fix, an
-app's position or a saved one first.
+app's position or a saved one first. The position sent to adsb.lol and the
+FAA is rounded to 0.01° (about 1 km) first, as the phone app rounds its own.
 
 ADS-B is there for drone–aircraft conflicts only (an aircraft near a drone,
 or converging on one within 60 s), so the query is small: 10 km around the
@@ -385,7 +391,9 @@ board by default (5-30 km; adsb.lol takes whole nautical miles, so 10 km
 asks for 6 NM, a few KB). A live drone more than 3 km away moves the centre
 to the middle of the board and its drones and widens the radius until each
 drone has 9 km around it, never past 30 km; aircraft outside the radius are
-dropped.
+dropped. The data is adsb.lol's (ODbL), and the board says so: SYSTEM
+carries the credit beside the ADS-B radius, and the side view's panel when
+there is room.
 
 Map tiles cover a circle, 3 km around the board by default (zooms 12-15,
 about 66 tiles or 0.8 MB at 38° N), settable from 1 km up to what the flash
@@ -395,7 +403,7 @@ size (12 KB until it has 20), against free space less a 1 MB reserve plus
 tiles outside the circle, which may be evicted (never one inside it). If
 it does not fit, the zoom-15 radius shrinks first, then zoom 14, and SYSTEM
 says so (`Map: 10 km z12-14, 8 km z15; 4.7 MB of 4.7 MB`). The T5's 13.6 MB
-LittleFS holds a full circle of about 14.7 km; the SenseCAP's 6.0 MB about
+LittleFS holds a full circle of about 14.7 km; the SenseCAP's 5.9 MB about
 9 km (at 11 KB a tile, 38° N). Everything is HTTPS, checked against the root certificate
 bundle built into the ESP32 core.
 
@@ -408,7 +416,9 @@ modes, and says in words what it is doing (`CONNECTED to Home (ch 6)`,
   settable from the phone app) and on **SYNC NOW**. Channel hopping holds
   for the few seconds of the window; Remote ID keeps being decoded on the
   current channel.
-- **STAY**: associated all the time, ADS-B every 10 seconds, TFRs and the
+- **STAY**: associated all the time, ADS-B every 15 seconds (adsb.lol
+  rate-limits 10 s; a `429` holds the job for its `Retry-After`, a minute
+  at least, shown as `rate limited, N s`), TFRs and the
   clock every 15 minutes. Remote ID over Wi-Fi is then heard on the access
   point's channel only (BLE is unaffected), and the footer says so:
   `WI-FI CH 6 ONLY`.
@@ -436,7 +446,10 @@ joined; up to five are kept, **in plain text in the board's NVS**, where
 anyone holding the board and a USB cable can read them out. **UPDATE MAP**
 fetches every missing tile of the planned circle (at most 4 a second,
 stopping before LittleFS falls under the 1 MB reserve); the automatic
-windows add at most 8 new tiles each, and refresh the area weekly. Failed joins and jobs
+windows add at most 8 new tiles each, and once a week the plan is run
+again for anything still missing. A tile is fetched once: what is already
+on flash is never re-downloaded, so only UPDATE MAP or a bigger area
+fetches new tiles. Failed joins and jobs
 back off (1, 2, 5, 15 minutes).
 
 The phone app can do the same over BLE (scan, join, forget, mode). Over
@@ -447,9 +460,11 @@ For development, copy `firmware/common/wifi_secrets.example.h` to
 `firmware/common/wifi_secrets.h` (git-ignored; never commit it) to give the
 board a network to use while none is saved on it.
 
-TLS needs about 33 KB of the chip's internal RAM, which the Wi-Fi and
-Bluetooth drivers and the panel also need, so every request first checks
-it: under 40 KB free, or no 18 KB block, the job fails with `low memory`
+TLS needs about 52 KB of the chip's internal RAM per session (measured on
+the board), which the Wi-Fi and Bluetooth drivers and the panel also need,
+so every request first checks it: under 65 KB free (`NET_TLS_MIN_FREE`:
+the session plus room for the radios' buffers) or no 18 KB block
+(`NET_TLS_MIN_BLOCK`), the job fails with `low memory`
 in words rather than risking the radios. The numbers are reported in the
 board's `net` status line.
 
@@ -465,24 +480,34 @@ line for line, as the Mac and phone apps, tested on the same vectors:
   as `HEIGHT UNKNOWN`, never dropped).
 - `TRAFFIC CONVERGING WITH <id>, <n> S`: their reported tracks come within
   500 m in the next minute.
-- `LOW TRAFFIC <bearing> <km>`: an aircraft within 3 km of you and below
-  1,500 ft above you.
-- `HIJACK` / `RADIO FAILURE` / `EMERGENCY` squawks within 30 km.
+- `LOW TRAFFIC <bearing> <dist>`: an airborne aircraft within 3 km of you
+  or of a live drone, below 460 m (1,500 ft) above the ground under that
+  anchor (your GPS elevation, or the drone's altitude less its height), or
+  with that height unknown.
 
-An alert clears only after the pair has been beyond 1.3 km or 200 m for 20
-seconds, so it cannot flap. Aircraft reported on the ground (taxiing,
-parked) never raise LOW or CONVERGING and are not counted as traffic; one
-within 1 km of a drone is still shown, as a caution
+Every alert carries what to do with the drone (14 CFR 107.37(a): the
+drone gives way): `GIVE WAY: DESCEND AND LAND <id>`, `GIVE WAY: MOVE <away>,
+THEN LAND <id>` when the aircraft is below, `KEEP CLEAR OF AIRCRAFT ON
+GROUND`, `BE READY TO LAND DRONES` for low traffic. There is no
+emergency-squawk alert: ADS-B is used only for conflicts with drones.
+
+An alert clears only after the pair has been beyond 1.3 km or 200 m (or
+the drone silent) for 20 seconds, so it cannot flap. Aircraft reported on
+the ground (taxiing, parked) never raise LOW or CONVERGING and are not
+counted as traffic; one within 1 km of a drone is still shown, as a caution
 (`..., AIRCRAFT ON GROUND`), not a warning. When the newest data is over 30
 seconds old no new alert is raised and the board says `TRAFFIC DATA
 STALE`. These are reported positions, not predictions, and not every
-aircraft broadcasts ADS-B: no screen ever says "clear" or "safe".
+aircraft broadcasts ADS-B: no screen ever says "clear" or "safe", and none
+counts aircraft (the status says `low traffic`, never a number).
 
 A new warning is the one thing that interrupts the board: a full refresh
 (the black flash is the only motion e-paper has) and three pulses of the
 front light, day or night. The header's headline gives the traffic words,
-the header shows `ADS-B 12` (aircraft held) or `ADS-B STALE`, and the
-footer `TRAFFIC 2` (airborne aircraft within 3 km). While a warning lasts
+the header shows `ADS-B ON` or `ADS-B STALE`, and the footer `CONFLICT
+WATCH ON` (or `OFF`), `TRAFFIC DATA STALE`, `LOW TRAFFIC` or `ADS-B
+CONFLICTS n` — the number of conflicts, never a count of aircraft. While
+a warning lasts
 the plot panel becomes a traffic card: callsign and type, where the
 aircraft is relative to the drone, its altitude, speed, climb or descent,
 and the data age. On the plot and the map aircraft are outlined diamonds,
@@ -608,17 +633,25 @@ What it does:
   different serial than its Basic ID
 - Flags a drone whose claimed operator position is more than 15 km away,
   and restarts a trail rather than drawing a jump no aircraft could make
-- Finds the receiver's USB port by itself and reconnects after unplugs,
-  and sets the receiver's clock whenever it connects and with each
-  airspace-data refresh. `ORECCHINO_DEBUG=1` traces the port search to
-  `~/Library/Logs/Orecchino/serial.log`
+- Finds the receiver's USB port by itself (skipping one another program
+  holds), reconnects after unplugs, and reopens a port that has gone
+  silent for 15 s; sets the receiver's clock whenever it connects and
+  with each airspace-data refresh. `ORECCHINO_DEBUG=1` traces the port
+  search to `~/Library/Logs/Orecchino/serial.log`; the variable has to be
+  in the environment of the process, so run the binary from Terminal
+  (`ORECCHINO_DEBUG=1 build/Orecchino.app/Contents/MacOS/Orecchino`), as an
+  app opened from Finder never sees it
 - Device > Match Log reads the receiver's match log: every drone it has
   lost track of, even while no Mac was connected, newest first, with the
-  ones it still holds on top. After the first read it asks only for
-  records it has not seen (`since`), and says how many rotated out of the
-  receiver's ring before it could read them. It can be exported as CSV or
-  cleared. Times need the receiver's clock, which the app sets on connect;
-  records made before that say so instead of showing a wrong date
+  ones it still holds on top, with which TFR it was in (and whether it
+  still was at the end) and its EU class where the receiver recorded
+  them. After the first read it asks only for records it has not seen
+  (`since`), and says how many rotated out of the receiver's ring before
+  it could read them. It can be exported as CSV or cleared; clearing asks
+  first (and offers to export before it), and what the Mac has read stays
+  shown until the next read. Times need the receiver's clock, which the
+  app sets on connect; records made before that say so instead of showing
+  a wrong date
 - A signature under the public test key (the test beacon's) reads
   `TEST KEY`, neutrally, never as a verified identity
 - A demo mode with two simulated drones, so the UI can be tried with no
@@ -732,7 +765,7 @@ Once at boot, and a heartbeat every 2 seconds:
  "ble":true,"ble_ext":true,"caps":["log","log_since","tfr","tiles","wifi","traffic"],
  "display":true,"vcom":1560,"mode":"rx"}
 {"type":"hb","up":123456,"wifi_frames":8812,"ble_advs":20431,"rid":312,"dropped":0,
- "ch":6,"ble":true,"ble_ext":true,"caps":[...],"ble_drop":3,"ble_rx_drop":1,"rx_stack":2140}
+ "ch":6,"ble":true,"ble_ext":true,"caps":[...],"ble_drop":3,"ble_rx_drop":1,"usb_drop":12,"rx_stack":2140}
 ```
 
 `wifi`, `ble` and `ble_ext` say whether the Wi-Fi sniffer, BLE scanning and
@@ -740,8 +773,14 @@ BT5 extended scanning started. `caps` is the board's capability list (as
 in the BLE Device Info, above); the heartbeat carries it every fifth beat,
 for an app that attaches after boot. Boards add their own boot fields
 (`display`, `vcom`, `mode`). Optional heartbeat fields: `ble_drop` and
-`ble_rx_drop`, lines dropped going to and coming from the phone, when there
-were any, and `rx_stack`, the decode task's least free stack in bytes.
+`ble_rx_drop`, lines dropped going to and coming from the phone, and
+`usb_drop`, lines dropped on the way to USB, when there were any, and
+`rx_stack`, the decode task's least free stack in bytes. A line is dropped
+only when its host stops reading: every board writes USB and BLE from a
+task of its own, so a Mac that closes the port with the cable in (the USB
+CDC driver then blocks each write for up to 2 s) costs detections nothing.
+The live feed (`rid`, `hb`) goes first; a reply waits up to 250 ms for
+room, and a reply that was cut says so (`log_done` below).
 
 ### Commands
 
@@ -752,7 +791,7 @@ only to the host that asked.
 | Command | What it does |
 | --- | --- |
 | `{"cmd":"set_time","utc":1790000000}` | Sets the clock the match log (and screens) use. A time before 2024 or past 2106 is refused. The T5 also sets its RTC and answers `{"type":"time","utc":…,"set":true,"rtc":"2026-09-23T12:00:00Z"}` with what the RTC chip reads back (`"rtc":null` when it cannot vouch for it), or, for a `utc` it refuses, `{"type":"time","set":false,"rtc":null,"err":"bad utc"}` |
-| `{"cmd":"set_home","lat":…,"lon":…,"acc":12,"src":"phone"}` | The observer's position; `acc` (metres) and `src` optional. Out-of-range or missing coordinates are ignored |
+| `{"cmd":"set_home","lat":…,"lon":…,"acc":12,"src":"phone"}` | The observer's position; `src` optional, `acc` (metres) accepted and ignored. Out-of-range or missing coordinates are ignored |
 | `{"cmd":"feed","on":true}` | The live feed on or off for this link (over BLE it starts off; USB always has it); answers `feed_status` |
 | `tfr_clear`, `{"cmd":"tfr_add","id":"…","pts":[[lat,lon],…]}` | The flight restrictions around the host: at most 16 polygons of 3 to 24 points (points past 24 are dropped) |
 | `{"cmd":"log_get"}`, `log_clear` | The match log (below); `log_clear` empties it, saves it at once and sends `log_cleared` to every connected host (as the boards' own CLEAR HISTORY does) |
@@ -761,9 +800,13 @@ only to the host that asked.
 | `wifi_status`, `wifi_scan`, `wifi_join`, `wifi_forget`, `wifi_mode`, `wifi_config` | The T5's Wi-Fi (below) |
 
 Tile sync writes only `/tiles/<z>/<x>/<y>.jpg` or `.png` (decimal
-numbers, checked by `firmware/common/tile_path.h`), 256 KB at most per file and never more than
-the filesystem can hold, and `fs_rm` removes only plain paths inside
-`/tiles`; anything else is refused with `fs_err`. `{"cmd":"fs_stat"}`
+numbers, checked by `firmware/common/tile_path.h`), 64 KB at most for a
+`.jpg` (the boards cannot decode a bigger one; the T5's own fetch keeps the
+same cap), 256 KB for a `.png`, and never more than the filesystem can
+hold, and `fs_rm` removes only plain paths inside `/tiles` (never the
+basemap mark `/tiles/.src`); anything else is refused with `fs_err`. A
+short write (the filesystem full after all) answers `fs_err` `"write"` and
+removes the file. `{"cmd":"fs_stat"}`
 (optionally with `"lat"`, `"lon"`; else the board's position) answers
 `{"type":"fs_stat","total":…,"used":…,"free":…,"reserve":1048576,"tiles":…,"tile_bytes":…,"avg_tile":…,"capacity":…,"max_radius_km":…}`
 (bytes; `avg_tile` is used bytes per tile once 20 exist, else 12288;
@@ -783,7 +826,7 @@ per contact still being tracked, then a `log_done` line:
  "auth_state":"none","tfr":true,"in_tfr":false,"tfr_id":"6/3221","emerg":false,
  "class_type":1,"cat_eu":1,"class_eu":2,"msgs":644}
 {"type":"log","seq":null,"i":null,"active":true,"uas":"1581F20000D9A03",...}
-{"type":"log_done","n":1,"live":1,"total":8,"clock":true,"next":8,"oldest":7}
+{"type":"log_done","n":1,"live":1,"total":8,"clock":true,"next":8,"oldest":7,"log_id":2895061287}
 ```
 
 `srcs` is a bit mask (1 Wi-Fi beacon, 2 NAN, 4 BLE), `fmts` another (1 ASTM
@@ -806,9 +849,23 @@ always come again (still live, or ended with their number), so nothing is
 skipped. `oldest` is the lowest `seq` still held: a cursor below it has
 missed records that rotated out of the 48-record ring. A cursor above
 `total` means the log was cleared (or this is another receiver): start
-again from `oldest`. A clear, from any app or from the board's own CLEAR
-HISTORY, is also announced to every connected host as `{"type":"log_cleared"}`. `"after_utc":<s>` additionally keeps only records and
+again from `oldest`. `log_id` names the log the numbers belong to: random
+at first, changed by every clear, kept across resets. Store it beside the
+cursor and, when it differs, start again from `oldest` — that is how a
+client away while the log was cleared and refilled past its cursor finds
+out. A clear, from any app or from the board's own CLEAR HISTORY, is also
+announced to every connected host as `{"type":"log_cleared","log_id":<the new id>}`.
+`"after_utc":<s>` additionally keeps only records and
 live contacts last heard at or after that UTC second.
+
+A reply can be cut: a client that stops reading (a phone in the
+background, a Mac that closed the port) makes the board drop the lines it
+cannot queue. When that happens inside a `log_get`, the records that
+arrived are good, the reply stops there, and its `log_done` carries
+`"err":"dropped"` with `next` set to the `since` that was asked for, so the
+client asks again from the same cursor rather than skip the records it
+never got. A `log_get` with no `log_done` within a few seconds (the
+`log_done` itself was dropped) means the same: ask again.
 
 ### Traffic lines
 
@@ -879,6 +936,11 @@ names the path that isn't getting through:
 | `ORECCHINO-TX-BLE5` | BLE 5 extended advertising, 1M PHY | 90 m |
 | `ORECCHINO-TX-BLELR` | BLE 5 extended, coded PHY (long range) | 105 m |
 | `ORECCHINO-TX-BLE4` | BLE 4 legacy, one message per advertisement | 120 m |
+| `ORECCHINO-TX-V0` | WiFi beacon, F3411-19 pack (protocol version 0) | 135 m |
+| `ORECCHINO-TX-SINGLE` | WiFi beacon, one 25-byte message per frame instead of a pack | 150 m |
+| `ORECCHINO-TX-DUAL` | WiFi beacon, two Basic IDs (serial plus CAA registration) | 165 m |
+| `ORECCHINO-TX-AUTH` | WiFi beacon, pack with paginated Authentication messages (signed) | 180 m |
+| `ORECCHINO-TX-AUTHBAD` | WiFi beacon, the same with a deliberately corrupted signature | 195 m |
 
 **Rates.** By default (**SPEC**) every path meets the ASTM F3411-22a
 broadcast rates -- Location at least once a second, each static message
@@ -904,8 +966,9 @@ The radios run on a task of their own, so a busy screen (an e-paper refresh
 holds the T5's loop for up to 1.5 s) never delays a transmission.
 Authentication signatures are made once a second per path and reused.
 
-The five orbit centres sit on a 200 m (~⅛ mile) ring around the home point
-at 72° intervals, each at its own altitude, so the markers are clearly
+The ten orbit centres sit on a 200 m (~⅛ mile) ring around the home point
+at 40° steps (AUTH and DUAL share the 280° bearing), each at its own
+altitude, so the markers are clearly
 separated on a map. Self ID and operator ID carry the path name too, and
 each aircraft transmits from its own MAC / BLE address.
 
@@ -973,6 +1036,13 @@ pseudo-terminal (`tests/flash_clock_test.sh`): every answer the firmware
 can give, a slow boot, a lost command, and `Ctrl-C`, `Ctrl-\`, TERM and
 HUP mid-step, none of which may leave a reader on the port.
 
+The T5's GPS parser (`firmware/orecchino_t5epd/t5_nmea.h`) is checked on
+the host (`tests/t5_gps_test.cpp`): a module still searching sends
+sentences with no fix and a placeholder date (1980, read as 2080), and
+none of that may reach the position or the clock; a sentence with a fix
+gives both; and the clock refuses any year before 2024 or more than
+twenty years past the firmware's build year.
+
 The fuel-gauge code runs against simulated chips (`tests/gauge_test.cpp`).
 The simulated BQ27220 reproduces what the T5's real one does: a reset that
 lands seconds after the command, and data that reads back as junk for
@@ -1019,10 +1089,14 @@ decodes real tiles too).
 
 The T5 board's drawing code is rendered on the host too, with the
 real font bitmaps, against a stress fixture of twelve contacts sharing a
-serial prefix: every scene must come out with no two text runs colliding,
-and the selection must survive a re-sort, an alert and an expiry. The
-scenes include the Wi-Fi screens and keyboard, pairing, and traffic on the
-table, map, side view and glance screen (they are written to
+serial prefix (one signed with the published test key, which must read
+TEST, never OK): every scene must come out with no two text runs
+colliding and no sentence cut short with ".." (only an identifier the
+screen shows whole elsewhere may be), the selection must survive a
+re-sort, an alert and an expiry, and a partial refresh may never leave a
+stale header on the glass. The scenes include the Wi-Fi screens and
+keyboard, pairing, a traffic warning arriving under SYSTEM, and traffic
+on the table, map, side view and glance screen (they are written to
 `/tmp/t5_*.pgm` for eyes; `T5_OUT` moves them). That check needs the
 Adafruit GFX library's `Fonts/` in the Arduino sketchbook's `libraries/`
 (`~/Documents/Arduino`, or `$ARDUINO_DIRECTORIES_USER`) and is skipped

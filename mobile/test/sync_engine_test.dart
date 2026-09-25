@@ -30,8 +30,20 @@ HostMessage rec(int? seq, {String uas = '', String mac = 'AA:AA:AA:AA:AA:01', bo
       'msgs': 10,
     }))!;
 
-HostMessage done({required int total, required int oldest, int live = 0}) => HostMessage.parse(jsonEncode(
-    {'type': 'log_done', 'n': total - oldest, 'live': live, 'total': total, 'clock': true, 'next': total, 'oldest': oldest}))!;
+HostMessage done({required int total, required int oldest, int live = 0, int? logId, int? next, String? err}) =>
+    HostMessage.parse(jsonEncode({
+      'type': 'log_done',
+      'n': total - oldest,
+      'live': live,
+      'total': total,
+      'clock': true,
+      'next': next ?? total,
+      'oldest': oldest,
+      if (logId != null) 'log_id': logId,
+      if (err != null) 'err': err,
+    }))!;
+
+List<int?> sinces(List<String> sent) => [for (final c in sent) (jsonDecode(c) as Map<String, dynamic>)['since'] as int?];
 
 void main() {
   late AppDatabase db;
@@ -123,6 +135,129 @@ void main() {
     final d = (await db.getDetector('det'))!;
     expect(d.lastSyncSeq, 1);
     expect(d.logEpoch, 1);
+  });
+
+  test('log_id: stored with the cursor; another id restarts from oldest even when the new log refilled past the cursor',
+      () async {
+    await sync.startSync('det');
+    await feedAll([rec(0, uas: 'OLD0'), rec(1, uas: 'OLD1'), done(total: 2, oldest: 0, logId: 7)]);
+    expect((await db.getDetector('det'))!.logId, 7);
+    // The same log next time: nothing special.
+    sent.clear();
+    await sync.startSync('det');
+    await feedAll([rec(2, uas: 'OLD2'), done(total: 3, oldest: 0, logId: 7)]);
+    expect(sinces(sent), [2]);
+    expect(sync.lastProgress.logCleared, isFalse);
+    expect((await db.getDetector('det'))!.logEpoch, 0);
+
+    // Cleared while the phone was away, then five new contacts: total 5 is
+    // past the cursor 3 and oldest is 0 as before, so only the id says so.
+    sent.clear();
+    await sync.startSync('det');
+    await feedAll([rec(3, uas: 'NEW3'), rec(4, uas: 'NEW4'), done(total: 5, oldest: 0, logId: 8)]);
+    expect(sinces(sent), [3, 0]);
+    expect(sync.isSyncing, isTrue);
+    await feedAll([for (var s = 0; s < 5; s++) rec(s, uas: 'NEW$s'), done(total: 5, oldest: 0, logId: 8)]);
+    expect(sync.isSyncing, isFalse);
+    expect(sync.lastProgress.logCleared, isTrue);
+    final d = (await db.getDetector('det'))!;
+    expect(d.logEpoch, 1);
+    expect(d.logId, 8);
+    expect(d.lastSyncSeq, 5);
+    final rows = await db.getDetectionsList(detectorId: 'det');
+    expect(rows.where((r) => !r.active).map((r) => r.uasId).toSet(),
+        {'OLD0', 'OLD1', 'OLD2', 'NEW0', 'NEW1', 'NEW2', 'NEW3', 'NEW4'});
+    // The old log's rows are of epoch 0, the new log's of epoch 1.
+    expect(rows.where((r) => r.uasId == 'NEW3').single.rowKey, '1:s3');
+  });
+
+  test('a first log_id from a board that never sent one is stored, not taken for a clear', () async {
+    await db.updateSyncCursor('det', 4, 0);
+    await sync.startSync('det');
+    await feedAll([rec(4), done(total: 5, oldest: 0, logId: 3)]);
+    expect(sinces(sent), [4]);
+    expect(sync.lastProgress.logCleared, isFalse);
+    expect((await db.getDetector('det'))!.logId, 3);
+    // And firmware without one leaves the stored id be.
+    sent.clear();
+    await sync.startSync('det');
+    await feedAll([done(total: 5, oldest: 0)]);
+    expect((await db.getDetector('det'))!.logId, 3);
+  });
+
+  test('without a log_id, an oldest below the one stored means another log (a ring never goes backwards)', () async {
+    // The last sync saw a rotated log: cursor 40, records 20..39 held.
+    await db.updateSyncCursor('det', 40, 20);
+    await sync.startSync('det');
+    // Cleared while away and refilled to 45: total is past the cursor, but
+    // oldest 0 is below the 20 of before.
+    await feedAll([for (var s = 40; s < 45; s++) rec(s, uas: 'NEW$s'), done(total: 45, oldest: 0)]);
+    expect(sinces(sent), [40, 0]);
+    expect(sync.isSyncing, isTrue);
+    await feedAll([rec(0, uas: 'NEW0'), done(total: 45, oldest: 0)]);
+    expect(sync.lastProgress.logCleared, isTrue);
+    final d = (await db.getDetector('det'))!;
+    expect(d.logEpoch, 1);
+    expect(d.lastSyncSeq, 45);
+    expect(d.oldestSeq, 0);
+    // The same oldest, or a higher one, is the same log rotating.
+    sent.clear();
+    await sync.startSync('det');
+    await feedAll([rec(45), done(total: 46, oldest: 0)]);
+    expect(sinces(sent), [45]);
+    await sync.startSync('det');
+    await feedAll([rec(46), done(total: 47, oldest: 3)]);
+    expect(sync.lastProgress.logCleared, isFalse);
+    expect((await db.getDetector('det'))!.logEpoch, 1);
+  });
+
+  test('a cut reply (err dropped): what came is stored, the cursor stays, the same question is asked again', () async {
+    await db.updateSyncCursor('det', 4, 0);
+    await sync.startSync('det');
+    // The link dropped after two records: next is the since asked for.
+    await feedAll([rec(4, uas: 'R4'), rec(5, uas: 'R5'), done(total: 8, oldest: 0, next: 4, err: 'dropped', logId: 1)]);
+    expect(sinces(sent), [4, 4]);
+    expect(sync.isSyncing, isTrue);
+    expect((await db.getDetector('det'))!.lastSyncSeq, 4);
+    expect((await db.getDetectionsList(detectorId: 'det')).map((r) => r.uasId).toSet(), {'R4', 'R5'});
+    // The whole reply: the cursor moves, the repeated records are the same rows.
+    await feedAll([for (var s = 4; s < 8; s++) rec(s, uas: 'R$s'), rec(null, uas: 'L'), done(total: 8, oldest: 0, logId: 1)]);
+    expect(sync.isSyncing, isFalse);
+    expect(sync.lastProgress.error, isNull);
+    expect((await db.getDetector('det'))!.lastSyncSeq, 8);
+    final rows = await db.getDetectionsList(detectorId: 'det');
+    expect(rows.where((r) => !r.active).map((r) => r.uasId).toSet(), {'R4', 'R5', 'R6', 'R7'});
+    expect(rows.where((r) => r.active).single.uasId, 'L');
+  });
+
+  test('cut again and again: gives up after the retries with an error, the cursor kept', () async {
+    await db.updateSyncCursor('det', 4, 0);
+    await sync.startSync('det');
+    for (var i = 0; i <= SyncEngine.maxRetries; i++) {
+      expect(sync.isSyncing, isTrue, reason: 'reply $i');
+      await feedAll([done(total: 8, oldest: 0, next: 4, err: 'dropped')]);
+    }
+    expect(sync.isSyncing, isFalse);
+    expect(sync.lastProgress.error, contains('cut short'));
+    expect(sinces(sent), List.filled(SyncEngine.maxRetries + 1, 4));
+    expect((await db.getDetector('det'))!.lastSyncSeq, 4);
+  });
+
+  test('no log_done within the time: asked again, then given up, the cursor kept', () async {
+    final s = SyncEngine(db: db, sendCommand: (c) async => sent.add(c), timeout: const Duration(milliseconds: 10));
+    await db.updateSyncCursor('det', 4, 0);
+    await s.startSync('det');
+    await s.handleMessage(rec(4, uas: 'R4'));
+    // Long enough for every retry and the final timeout, however loaded
+    // the machine (a timer never fires early, and the end state is stable).
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(s.isSyncing, isFalse);
+    expect(s.lastProgress.error, 'the detector stopped answering');
+    expect(sinces(sent), List.filled(SyncEngine.maxRetries + 1, 4));
+    expect((await db.getDetector('det'))!.lastSyncSeq, 4);
+    // What came before the silence was kept.
+    expect((await db.getDetectionsList(detectorId: 'det')).single.uasId, 'R4');
+    s.dispose();
   });
 
   test('a record that cannot be stored keeps the cursor where it was', () async {

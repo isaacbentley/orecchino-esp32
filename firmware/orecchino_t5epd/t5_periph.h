@@ -10,8 +10,9 @@
 //   * BQ27220 fuel gauge: state of charge, cell voltage and current. At
 //     boot it is checked against the 1500 mAh cell's profile and rewritten
 //     when it holds anything else (firmware/common/bq27220.h).
-//   * GPS on UART1 (RX 44 / TX 43): NMEA GGA parsed into the operator
-//     position, so the board self-locates in the field without the app.
+//   * GPS on UART1 (RX 44 / TX 43): NMEA GGA and RMC (t5_nmea.h) parsed
+//     into the operator position and the clock, so the board self-locates
+//     in the field without the app; a sentence without a fix sets neither.
 #pragma once
 #include <Arduino.h>
 #include <time.h>

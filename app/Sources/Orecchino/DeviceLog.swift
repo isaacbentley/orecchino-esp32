@@ -21,9 +21,27 @@ struct DeviceLogEntry: Identifiable, Equatable {
     let maxHeight: Int?
     let peakRssi: Int
     let authState: String
+    /// Inside a pushed TFR at some point; `inTFRNow` at its last position
+    /// (a live contact: now); `tfrId` the one it was last inside.
     let inTFR: Bool
+    let inTFRNow: Bool
+    let tfrId: String?
     let emergency: Bool
+    /// The last System message's UA classification, raw (class type 1 = EU).
+    let classType: Int?
+    let catEu: Int?
+    let classEu: Int?
     let messages: Int
+
+    var classification: String? {
+        RidNames.classification(type: classType, category: catEu, cls: classEu)
+    }
+    /// "IN TFR 6/3221" while inside, "TFR 6/3221" once out; nil when never.
+    var tfrText: String? {
+        guard inTFR else { return nil }
+        let head = inTFRNow ? "IN TFR" : "TFR"
+        return tfrId.map { "\(head) \($0)" } ?? head
+    }
 
     var sourceText: String {
         var s: [String] = []
@@ -54,7 +72,12 @@ struct DeviceLogEntry: Identifiable, Equatable {
         peakRssi = m.peak_rssi ?? -127
         authState = m.auth_state ?? "none"
         inTFR = m.tfr ?? false
+        inTFRNow = m.in_tfr ?? false
+        tfrId = m.tfr_id.flatMap { $0.isEmpty ? nil : String($0.prefix(16)) }
         emergency = m.emerg ?? false
+        classType = m.class_type
+        catEu = m.class_type == 1 ? m.cat_eu : nil
+        classEu = m.class_type == 1 ? m.class_eu : nil
         messages = m.msgs ?? 0
     }
 }
@@ -87,9 +110,18 @@ final class DeviceLog {
     /// read them (oldest minus the cursor, when positive).
     var missed = 0
     var isPresented = false
+    /// The "Clear on Receiver" confirmation is up.
+    var confirmClear = false
+    /// The receiver cleared its log (this app's clear, another host's, or
+    /// the board's CLEAR HISTORY) since the last read: what is shown is
+    /// this Mac's copy, kept until the next read replaces it.
+    var clearedSinceRead = false
 
     /// The `since` for the next read; nil reads everything.
     @ObservationIgnored private(set) var cursor: Int?
+    /// The receiver's `log_id` the cursor belongs to (bumped by a clear);
+    /// nil until a log_done or log_cleared carried one.
+    @ObservationIgnored private(set) var logId: Int?
     @ObservationIgnored private var sentSince: Int?
     @ObservationIgnored private var ended: [Int: DeviceLogEntry] = [:]
     @ObservationIgnored private var restarted = false
@@ -133,6 +165,7 @@ final class DeviceLog {
     /// What is shown stays until the next read replaces it.
     func forgetCursor() {
         cursor = nil
+        logId = nil
     }
 
     func clear() {
@@ -150,9 +183,22 @@ final class DeviceLog {
         case "log_done":
             guard phase == .fetching else { return }
             timeout?.cancel()
+            if m.err == "dropped" {
+                // The receiver lost lines of this dump (a BLE/USB drop) and
+                // `next` is the `since` asked for: nothing is stored and
+                // the cursor stays, so the next read asks for it all again.
+                pending = []
+                phase = .failed("the receiver dropped part of the log — read again")
+                return
+            }
             let total = m.total ?? m.next
-            if let since = sentSince, let t = total, since > t, !restarted {
-                // Cleared (or a different receiver): start again from oldest.
+            // Another log: the receiver says so (log_id), or the cursor is
+            // past its total (cleared, or a different receiver).
+            let otherLog = m.log_id.map { id in logId.map { $0 != id } ?? false } ?? false
+            let pastEnd = sentSince.map { since in total.map { since > $0 } ?? false } ?? false
+            if let id = m.log_id { logId = id }
+            if sentSince != nil, otherLog || pastEnd, !restarted {
+                // Start again from oldest; what was held is of the old log.
                 restarted = true
                 ended = [:]
                 cursor = nil
@@ -173,13 +219,17 @@ final class DeviceLog {
                 + ended.values.sorted { ($0.index ?? 0) > ($1.index ?? 0) }
             clockSet = m.clock ?? true
             totalEver = total ?? entries.count
+            clearedSinceRead = false
             phase = .done
         case "log_cleared":
-            entries.removeAll { !$0.active }
+            // The receiver's copy is gone; this Mac's stays on show (and
+            // exportable) until the next read, which starts from 0.
             ended = [:]
             cursor = 0
+            if let id = m.log_id { logId = id }
             missed = 0
             totalEver = 0
+            clearedSinceRead = !entries.isEmpty
         default:
             break
         }
@@ -203,7 +253,8 @@ final class DeviceLog {
             if let c = t.first, "=+-@\t\r".contains(c) { t = "'" + t }
             return "\"" + t.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
-        var out = "status,uas_id,mac,sources,first_utc,last_utc,duration_s,lat,lon,max_height_m,peak_rssi,auth,tfr,emergency,messages\n"
+        var out = "status,uas_id,mac,sources,first_utc,last_utc,duration_s,lat,lon,max_height_m,peak_rssi,auth,"
+            + "tfr,in_tfr,tfr_id,class,emergency,messages\n"
         for e in rows {
             let cols: [String] = [
                 e.active ? "live" : "ended", q(e.uasId), q(e.mac), q(e.sourceText),
@@ -211,19 +262,30 @@ final class DeviceLog {
                 String(Int(e.duration)),
                 e.lat.map { String(format: "%.5f", $0) } ?? "", e.lon.map { String(format: "%.5f", $0) } ?? "",
                 e.maxHeight.map(String.init) ?? "", String(e.peakRssi), q(e.authState),
-                e.inTFR ? "yes" : "no", e.emergency ? "yes" : "no", String(e.messages),
+                e.inTFR ? "yes" : "no", e.inTFRNow ? "yes" : "no", e.tfrId.map(q) ?? "",
+                e.classification.map(q) ?? "",
+                e.emergency ? "yes" : "no", String(e.messages),
             ]
             out += cols.joined(separator: ",") + "\n"
         }
         return out
     }
 
-    func exportCSV() {
+    /// Saves what is shown; false when the panel was cancelled or the
+    /// write failed, so a clear that was to follow an export does not.
+    @discardableResult
+    func exportCSV() -> Bool {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "orecchino-match-log.csv"
         panel.allowedContentTypes = [.commaSeparatedText]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? Self.csv(entries).write(to: url, atomically: true, encoding: .utf8)
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        do {
+            try Self.csv(entries).write(to: url, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            phase = .failed("could not write the CSV: \(error.localizedDescription)")
+            return false
+        }
     }
 }
 
@@ -250,8 +312,26 @@ struct DeviceLogView: View {
                 .disabled(log.phase == .fetching || !model.serialStatus.isConnected)
                 Button("Export CSV…") { log.exportCSV() }
                     .disabled(log.entries.isEmpty)
-                Button("Clear on Receiver", role: .destructive) { log.clear() }
+                Button("Clear on Receiver", role: .destructive) { log.confirmClear = true }
                     .disabled(!model.serialStatus.isConnected || log.entries.allSatisfy(\.active))
+                    .confirmationDialog("Clear the match log on the receiver?",
+                                        isPresented: Binding(get: { log.confirmClear },
+                                                             set: { log.confirmClear = $0 }),
+                                        titleVisibility: .visible) {
+                        Button("Export CSV, then Clear") {
+                            if log.exportCSV() { log.clear() }
+                        }
+                        Button("Clear", role: .destructive) { log.clear() }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Every ended record on the receiver is erased and cannot be recovered. "
+                             + "What this Mac has read stays shown until the next read.")
+                    }
+            }
+            if log.clearedSinceRead {
+                Label("The receiver's log was cleared. These records are this Mac's copy, shown until the next read.",
+                      systemImage: "info.circle")
+                    .font(.callout).foregroundStyle(Theme.muted)
             }
             if !log.clockSet {
                 Label("The receiver's clock was not set when these were recorded, so times are missing. Connect the app before flying to set it.",
@@ -297,13 +377,17 @@ struct DeviceLogView: View {
                     TableColumn("Flags") { e in
                         HStack(spacing: 4) {
                             if e.emergency { Tag(text: "EMERGENCY", tint: Theme.danger) }
-                            if e.inTFR { Tag(text: "TFR", tint: Theme.warn) }
+                            if let t = e.tfrText { Tag(text: t, tint: Theme.warn) }
                             if let a = RidNames.authLabel(e.authState) {
                                 Tag(text: a, tint: e.authState == "invalid" ? Theme.danger
                                                   : e.authState == "id_valid" ? Theme.ok : Theme.muted)
                             }
                         }
                     }.width(min: 120, ideal: 200)
+                    TableColumn("Class") { e in
+                        Text(e.classification ?? "—")
+                            .foregroundStyle(e.classification == nil ? Theme.unknown : .primary)
+                    }.width(min: 90, ideal: 130)
                 }
             }
             HStack {
@@ -312,7 +396,7 @@ struct DeviceLogView: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 860, minHeight: 440)
+        .frame(minWidth: 960, minHeight: 440)
         .onAppear { if log.phase == .idle && model.serialStatus.isConnected { log.fetch() } }
     }
 

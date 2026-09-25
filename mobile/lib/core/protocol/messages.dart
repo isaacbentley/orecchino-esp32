@@ -53,7 +53,7 @@ sealed class HostMessage {
         case 'log_done':
           return LogDoneMessage.fromJson(json);
         case 'log_cleared':
-          return const LogClearedMessage();
+          return LogClearedMessage(logId: _int(json['log_id']));
         case 'feed_status':
           return FeedStatusMessage(_bool(json['on']) ?? false);
         case 'info':
@@ -88,6 +88,10 @@ class HeartbeatMessage extends HostMessage {
   final bool? bleExtActive;
   final int? bleDrops;
 
+  /// Feed lines the board's USB host link dropped ("usb_drop"; only sent
+  /// when non-zero). Not the BLE link's: nothing for this app to act on.
+  final int? usbDrops;
+
   const HeartbeatMessage({
     required this.uptimeMs,
     this.wifiFrames,
@@ -98,6 +102,7 @@ class HeartbeatMessage extends HostMessage {
     this.bleActive,
     this.bleExtActive,
     this.bleDrops,
+    this.usbDrops,
   }) : super('hb');
 
   factory HeartbeatMessage.fromJson(Map<String, dynamic> json) {
@@ -111,6 +116,7 @@ class HeartbeatMessage extends HostMessage {
       bleActive: _bool(json['ble']),
       bleExtActive: _bool(json['ble_ext']),
       bleDrops: _int(json['ble_drop']),
+      usbDrops: _int(json['usb_drop']),
     );
   }
 }
@@ -516,9 +522,14 @@ class LogRecordMessage extends HostMessage {
   }
 }
 
-/// End of a log_get answer. [next] is the cursor to send as `since` next
-/// time (= [total]; live contacts are not counted); [oldest] the lowest seq
-/// still held. A cursor above [total] means the log was cleared.
+/// End of a log_get answer. [nextSeq] is the cursor to send as `since` next
+/// time (= [total]; live contacts are not counted); [oldestSeq] the lowest
+/// seq still held. A cursor above [total] means the log was cleared; so
+/// does a [logId] other than the one the cursor was stored with (the
+/// board's persisted log identity, bumped by every clear; absent from
+/// older firmware). [error] "dropped" ([cut]): the link dropped part of
+/// the reply; the records that came are good, [nextSeq] is the `since`
+/// asked for, and the client asks again.
 class LogDoneMessage extends HostMessage {
   final int count; // records held
   final int? live;
@@ -526,6 +537,8 @@ class LogDoneMessage extends HostMessage {
   final bool? clock;
   final int? nextSeq;
   final int? oldestSeq;
+  final int? logId;
+  final String? error;
 
   const LogDoneMessage({
     required this.count,
@@ -534,7 +547,12 @@ class LogDoneMessage extends HostMessage {
     this.clock,
     this.nextSeq,
     this.oldestSeq,
+    this.logId,
+    this.error,
   }) : super('log_done');
+
+  /// The reply was cut short: nothing after it is to be trusted as complete.
+  bool get cut => error == 'dropped';
 
   factory LogDoneMessage.fromJson(Map<String, dynamic> json) {
     return LogDoneMessage(
@@ -544,12 +562,17 @@ class LogDoneMessage extends HostMessage {
       clock: _bool(json['clock']),
       nextSeq: _int(json['next']),
       oldestSeq: _int(json['oldest']),
+      logId: _int(json['log_id']),
+      error: _str(json['err']),
     );
   }
 }
 
+/// The board cleared its log; [logId] is the new log's identity when the
+/// firmware sends one.
 class LogClearedMessage extends HostMessage {
-  const LogClearedMessage() : super('log_cleared');
+  final int? logId;
+  const LogClearedMessage({this.logId}) : super('log_cleared');
 }
 
 class FeedStatusMessage extends HostMessage {

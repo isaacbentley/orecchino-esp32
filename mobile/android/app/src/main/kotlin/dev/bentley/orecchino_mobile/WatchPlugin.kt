@@ -3,10 +3,11 @@
 // the CompanionDeviceManager association of a pinned detector.
 //
 // MethodChannel "orecchino/watch":
-//   start {text, location} -> bool, update {text}, stop, running -> bool,
-//   companionSupported -> bool, associations -> [MAC], associate {mac, name}
-//   -> bool (the system's "Allow Orecchino to access T5?" dialog; needs the
-//   Activity).
+//   start {text, location} -> bool (answered once the service is in the
+//   foreground, or has failed to get there), update {text}, stop, running
+//   -> bool, companionSupported -> bool, associations -> [MAC], associate
+//   {mac, name} -> bool (the system's "Allow Orecchino to access T5?"
+//   dialog; needs the Activity).
 //   Native -> Dart: action {action: pause | stop | appeared, mac?}.
 //
 // An associated detector lets the app run and start its service from the
@@ -89,13 +90,11 @@ class WatchPlugin :
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "start" -> result.success(
-                OrecchinoWatchService.start(
-                    context,
-                    call.argument<String>("text") ?: "Orecchino watching",
-                    call.argument<Boolean>("location") ?: false,
-                ),
-            )
+            "start" -> OrecchinoWatchService.start(
+                context,
+                call.argument<String>("text") ?: "Orecchino watching",
+                call.argument<Boolean>("location") ?: false,
+            ) { ok -> result.success(ok) }
             "update" -> {
                 OrecchinoWatchService.update(context, call.argument<String>("text") ?: "Orecchino watching")
                 result.success(null)

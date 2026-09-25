@@ -10,6 +10,8 @@ import 'dart:math' as math;
 
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orecchino_mobile/app/app_controller.dart';
 import 'package:orecchino_mobile/core/alerts/alert_policy.dart';
@@ -19,6 +21,7 @@ import 'package:orecchino_mobile/core/protocol/messages.dart';
 import 'package:orecchino_mobile/core/traffic/adsb_source.dart';
 import 'package:orecchino_mobile/core/traffic/traffic_rules.dart';
 import 'package:orecchino_mobile/data/db.dart';
+import 'package:orecchino_mobile/features/live/contact_sheet.dart';
 import 'package:orecchino_mobile/features/live/live_view.dart';
 import 'package:orecchino_mobile/features/live/sky_painter.dart';
 import 'package:orecchino_mobile/ui/ambient_clock.dart';
@@ -45,6 +48,18 @@ class FakeLocation extends LocationService {
   PhoneLocation? get currentLocation => const PhoneLocation(lat: 37.8039, lon: -122.464, timeMs: 0);
   @override
   double? get headingDeg => 0;
+}
+
+/// The Sky look's bundled faces, for a test about where words break: the
+/// test font's glyphs are all one em wide, twice a real letter.
+Future<void> loadSkyFonts() async {
+  for (final (family, file) in const [
+    ('SpaceGrotesk', 'assets/fonts/space_grotesk/SpaceGrotesk-Variable.ttf'),
+    ('Inter', 'assets/fonts/inter/Inter-Variable.ttf'),
+    ('JetBrainsMono', 'assets/fonts/jetbrains_mono/JetBrainsMono-Variable.ttf'),
+  ]) {
+    await (FontLoader(family)..addFont(rootBundle.load(file))).load();
+  }
 }
 
 void main() {
@@ -189,14 +204,14 @@ void main() {
 
     tearDown(() => app.dispose());
 
-    Future<void> pumpLive(WidgetTester tester, double scale) async {
-      tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+    Future<void> pumpLive(WidgetTester tester, double scale, {Size size = const Size(390, 844)}) async {
+      tester.view.physicalSize = size * 3;
       tester.view.devicePixelRatio = 3;
       addTearDown(tester.view.reset);
       await tester.pumpWidget(MaterialApp(
         theme: OrecchinoTheme.dark,
         home: MediaQuery(
-          data: MediaQueryData(size: const Size(390, 844), textScaler: TextScaler.linear(scale)),
+          data: MediaQueryData(size: size, textScaler: TextScaler.linear(scale)),
           child: LiveView(app: app),
         ),
       ));
@@ -319,10 +334,53 @@ void main() {
     testWidgets('a drone emergency is not hidden by a traffic alert: the capsule shows both', (tester) async {
       final handle = tester.ensureSemantics();
       await pumpLive(tester, 1.0);
-      // Drone D9A03 reports an emergency and is also in a traffic pair.
-      expect(find.bySemanticsLabel(RegExp(r'^EMERGENCY REPORTED, drone D9A03')), findsOneWidget);
-      expect(find.bySemanticsLabel(RegExp(r'^GIVE WAY: DESCEND AND LAND D9A03, ')), findsOneWidget);
+      // Drone D9A03 reports an emergency and is also in a traffic pair. Each
+      // is a live region (the words that lead, said once) over its button
+      // (the same words with the range, the geometry and the age).
+      expect(find.bySemanticsLabel('EMERGENCY REPORTED, drone D9A03'), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(r'^EMERGENCY REPORTED, drone D9A03, [0-9]+ m$')), findsOneWidget);
+      expect(find.bySemanticsLabel('GIVE WAY: DESCEND AND LAND D9A03, TRAFFIC NEAR DRONE D9A03'), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(r'^GIVE WAY: DESCEND AND LAND D9A03, AIRCRAFT 80 M ABOVE, ')), findsOneWidget);
       handle.dispose();
+    });
+
+    testWidgets('2x text in a side panel: no word is broken in the middle', (tester) async {
+      // A phone on its side (the review's 874 x 402): the drones are in a
+      // 320 pt panel, where a fixed range column would leave the words no
+      // room ("GIVE WAY: DE / SCEND AND LAND"). With the real faces: the
+      // test font's one-em glyphs would break any long word on their own.
+      await tester.runAsync(loadSkyFonts);
+      await pumpLive(tester, 2.0, size: const Size(874, 402));
+      await settle(tester);
+      expect(tester.takeException(), isNull);
+      // The panel's list is lazy and, at 2x, a card is taller than the
+      // panel: check the cards on screen at each drone in turn.
+      final panel = find.descendant(of: find.byType(ContactSheet), matching: find.byType(Scrollable)).first;
+      var checked = 0;
+      final seen = <String>{};
+      for (final id in ['D9A03', '2A002']) {
+        await tester.scrollUntilVisible(find.text(id), 150, scrollable: panel);
+        await tester.pump();
+        final texts = find.descendant(of: find.byType(ContactCard), matching: find.byType(Text));
+        expect(texts, findsWidgets);
+        for (final e in texts.evaluate()) {
+          final paragraph = tester.renderObject<RenderParagraph>(find.byWidget(e.widget));
+          final text = paragraph.text.toPlainText();
+          if (!seen.add(text)) continue;
+          // Every word is drawn on one line: a word that wrapped would come
+          // back as boxes on two lines.
+          for (final m in RegExp(r'[^\s·]+').allMatches(text)) {
+            final boxes = paragraph.getBoxesForSelection(TextSelection(baseOffset: m.start, extentOffset: m.end));
+            final lines = boxes.map((b) => b.top.round()).toSet();
+            expect(lines.length, lessThanOrEqualTo(1), reason: '"${m.group(0)}" in "$text" is split across lines');
+            checked++;
+          }
+        }
+      }
+      expect(checked, greaterThan(20));
+      // The action is there in full, and the range moved under the name.
+      expect(find.text('GIVE WAY: DESCEND AND LAND D9A03'), findsWidgets);
+      expect(find.textContaining(RegExp(r'^[0-9]+ m · ')), findsWidgets);
     });
 
     testWidgets('44 pt targets: the sheet handle and the range segments', (tester) async {
@@ -460,7 +518,7 @@ void main() {
       expect(
           find.bySemanticsLabel(RegExp(r'^Aircraft N911SIM, BE READY TO LAND DRONES, AIRCRAFT [0-9]+ M ABOVE GROUND')),
           findsOneWidget);
-      expect(find.bySemanticsLabel(RegExp(r'^conflict watch on, 1 low aircraft')), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(r'^conflict watch on, low traffic')), findsOneWidget);
       // Drawn: a bridge from you (the sky's centre) to it.
       final live =
           tester.widgetList<CustomPaint>(find.byType(CustomPaint)).map((p) => p.painter).whereType<SkyPainter>();

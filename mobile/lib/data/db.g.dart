@@ -102,6 +102,11 @@ class $DetectorsTable extends Detectors
       type: DriftSqlType.int,
       requiredDuringInsert: false,
       defaultValue: const Constant(0));
+  static const VerificationMeta _logIdMeta = const VerificationMeta('logId');
+  @override
+  late final GeneratedColumn<int> logId = GeneratedColumn<int>(
+      'log_id', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
   @override
   List<GeneratedColumn> get $columns => [
         id,
@@ -116,7 +121,8 @@ class $DetectorsTable extends Detectors
         bonded,
         lastSyncUtc,
         historyGap,
-        logEpoch
+        logEpoch,
+        logId
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -188,6 +194,10 @@ class $DetectorsTable extends Detectors
       context.handle(_logEpochMeta,
           logEpoch.isAcceptableOrUnknown(data['log_epoch']!, _logEpochMeta));
     }
+    if (data.containsKey('log_id')) {
+      context.handle(
+          _logIdMeta, logId.isAcceptableOrUnknown(data['log_id']!, _logIdMeta));
+    }
     return context;
   }
 
@@ -223,6 +233,8 @@ class $DetectorsTable extends Detectors
           .read(DriftSqlType.bool, data['${effectivePrefix}history_gap'])!,
       logEpoch: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}log_epoch'])!,
+      logId: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}log_id']),
     );
   }
 
@@ -246,6 +258,10 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
   final int? lastSyncUtc;
   final bool historyGap;
   final int logEpoch;
+
+  /// The board's log identity the cursor belongs to (log_done `log_id`);
+  /// null until the firmware sent one.
+  final int? logId;
   const DetectorEntry(
       {required this.id,
       required this.name,
@@ -259,7 +275,8 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
       required this.bonded,
       this.lastSyncUtc,
       required this.historyGap,
-      required this.logEpoch});
+      required this.logEpoch,
+      this.logId});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -280,6 +297,9 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
     }
     map['history_gap'] = Variable<bool>(historyGap);
     map['log_epoch'] = Variable<int>(logEpoch);
+    if (!nullToAbsent || logId != null) {
+      map['log_id'] = Variable<int>(logId);
+    }
     return map;
   }
 
@@ -302,6 +322,8 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
           : Value(lastSyncUtc),
       historyGap: Value(historyGap),
       logEpoch: Value(logEpoch),
+      logId:
+          logId == null && nullToAbsent ? const Value.absent() : Value(logId),
     );
   }
 
@@ -322,6 +344,7 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
       lastSyncUtc: serializer.fromJson<int?>(json['lastSyncUtc']),
       historyGap: serializer.fromJson<bool>(json['historyGap']),
       logEpoch: serializer.fromJson<int>(json['logEpoch']),
+      logId: serializer.fromJson<int?>(json['logId']),
     );
   }
   @override
@@ -341,6 +364,7 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
       'lastSyncUtc': serializer.toJson<int?>(lastSyncUtc),
       'historyGap': serializer.toJson<bool>(historyGap),
       'logEpoch': serializer.toJson<int>(logEpoch),
+      'logId': serializer.toJson<int?>(logId),
     };
   }
 
@@ -357,7 +381,8 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
           bool? bonded,
           Value<int?> lastSyncUtc = const Value.absent(),
           bool? historyGap,
-          int? logEpoch}) =>
+          int? logEpoch,
+          Value<int?> logId = const Value.absent()}) =>
       DetectorEntry(
         id: id ?? this.id,
         name: name ?? this.name,
@@ -372,6 +397,7 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
         lastSyncUtc: lastSyncUtc.present ? lastSyncUtc.value : this.lastSyncUtc,
         historyGap: historyGap ?? this.historyGap,
         logEpoch: logEpoch ?? this.logEpoch,
+        logId: logId.present ? logId.value : this.logId,
       );
   DetectorEntry copyWithCompanion(DetectorsCompanion data) {
     return DetectorEntry(
@@ -391,6 +417,7 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
       historyGap:
           data.historyGap.present ? data.historyGap.value : this.historyGap,
       logEpoch: data.logEpoch.present ? data.logEpoch.value : this.logEpoch,
+      logId: data.logId.present ? data.logId.value : this.logId,
     );
   }
 
@@ -409,14 +436,15 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
           ..write('bonded: $bonded, ')
           ..write('lastSyncUtc: $lastSyncUtc, ')
           ..write('historyGap: $historyGap, ')
-          ..write('logEpoch: $logEpoch')
+          ..write('logEpoch: $logEpoch, ')
+          ..write('logId: $logId')
           ..write(')'))
         .toString();
   }
 
   @override
   int get hashCode => Object.hash(id, name, board, fw, ver, caps, lastSeen,
-      lastSyncSeq, oldestSeq, bonded, lastSyncUtc, historyGap, logEpoch);
+      lastSyncSeq, oldestSeq, bonded, lastSyncUtc, historyGap, logEpoch, logId);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -433,7 +461,8 @@ class DetectorEntry extends DataClass implements Insertable<DetectorEntry> {
           other.bonded == this.bonded &&
           other.lastSyncUtc == this.lastSyncUtc &&
           other.historyGap == this.historyGap &&
-          other.logEpoch == this.logEpoch);
+          other.logEpoch == this.logEpoch &&
+          other.logId == this.logId);
 }
 
 class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
@@ -450,6 +479,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
   final Value<int?> lastSyncUtc;
   final Value<bool> historyGap;
   final Value<int> logEpoch;
+  final Value<int?> logId;
   final Value<int> rowid;
   const DetectorsCompanion({
     this.id = const Value.absent(),
@@ -465,6 +495,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
     this.lastSyncUtc = const Value.absent(),
     this.historyGap = const Value.absent(),
     this.logEpoch = const Value.absent(),
+    this.logId = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   DetectorsCompanion.insert({
@@ -481,6 +512,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
     this.lastSyncUtc = const Value.absent(),
     this.historyGap = const Value.absent(),
     this.logEpoch = const Value.absent(),
+    this.logId = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         name = Value(name);
@@ -498,6 +530,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
     Expression<int>? lastSyncUtc,
     Expression<bool>? historyGap,
     Expression<int>? logEpoch,
+    Expression<int>? logId,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -514,6 +547,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
       if (lastSyncUtc != null) 'last_sync_utc': lastSyncUtc,
       if (historyGap != null) 'history_gap': historyGap,
       if (logEpoch != null) 'log_epoch': logEpoch,
+      if (logId != null) 'log_id': logId,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -532,6 +566,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
       Value<int?>? lastSyncUtc,
       Value<bool>? historyGap,
       Value<int>? logEpoch,
+      Value<int?>? logId,
       Value<int>? rowid}) {
     return DetectorsCompanion(
       id: id ?? this.id,
@@ -547,6 +582,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
       lastSyncUtc: lastSyncUtc ?? this.lastSyncUtc,
       historyGap: historyGap ?? this.historyGap,
       logEpoch: logEpoch ?? this.logEpoch,
+      logId: logId ?? this.logId,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -593,6 +629,9 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
     if (logEpoch.present) {
       map['log_epoch'] = Variable<int>(logEpoch.value);
     }
+    if (logId.present) {
+      map['log_id'] = Variable<int>(logId.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -615,6 +654,7 @@ class DetectorsCompanion extends UpdateCompanion<DetectorEntry> {
           ..write('lastSyncUtc: $lastSyncUtc, ')
           ..write('historyGap: $historyGap, ')
           ..write('logEpoch: $logEpoch, ')
+          ..write('logId: $logId, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -2340,6 +2380,7 @@ typedef $$DetectorsTableCreateCompanionBuilder = DetectorsCompanion Function({
   Value<int?> lastSyncUtc,
   Value<bool> historyGap,
   Value<int> logEpoch,
+  Value<int?> logId,
   Value<int> rowid,
 });
 typedef $$DetectorsTableUpdateCompanionBuilder = DetectorsCompanion Function({
@@ -2356,6 +2397,7 @@ typedef $$DetectorsTableUpdateCompanionBuilder = DetectorsCompanion Function({
   Value<int?> lastSyncUtc,
   Value<bool> historyGap,
   Value<int> logEpoch,
+  Value<int?> logId,
   Value<int> rowid,
 });
 
@@ -2406,6 +2448,9 @@ class $$DetectorsTableFilterComposer
 
   ColumnFilters<int> get logEpoch => $composableBuilder(
       column: $table.logEpoch, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get logId => $composableBuilder(
+      column: $table.logId, builder: (column) => ColumnFilters(column));
 }
 
 class $$DetectorsTableOrderingComposer
@@ -2455,6 +2500,9 @@ class $$DetectorsTableOrderingComposer
 
   ColumnOrderings<int> get logEpoch => $composableBuilder(
       column: $table.logEpoch, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get logId => $composableBuilder(
+      column: $table.logId, builder: (column) => ColumnOrderings(column));
 }
 
 class $$DetectorsTableAnnotationComposer
@@ -2504,6 +2552,9 @@ class $$DetectorsTableAnnotationComposer
 
   GeneratedColumn<int> get logEpoch =>
       $composableBuilder(column: $table.logEpoch, builder: (column) => column);
+
+  GeneratedColumn<int> get logId =>
+      $composableBuilder(column: $table.logId, builder: (column) => column);
 }
 
 class $$DetectorsTableTableManager extends RootTableManager<
@@ -2545,6 +2596,7 @@ class $$DetectorsTableTableManager extends RootTableManager<
             Value<int?> lastSyncUtc = const Value.absent(),
             Value<bool> historyGap = const Value.absent(),
             Value<int> logEpoch = const Value.absent(),
+            Value<int?> logId = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               DetectorsCompanion(
@@ -2561,6 +2613,7 @@ class $$DetectorsTableTableManager extends RootTableManager<
             lastSyncUtc: lastSyncUtc,
             historyGap: historyGap,
             logEpoch: logEpoch,
+            logId: logId,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -2577,6 +2630,7 @@ class $$DetectorsTableTableManager extends RootTableManager<
             Value<int?> lastSyncUtc = const Value.absent(),
             Value<bool> historyGap = const Value.absent(),
             Value<int> logEpoch = const Value.absent(),
+            Value<int?> logId = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               DetectorsCompanion.insert(
@@ -2593,6 +2647,7 @@ class $$DetectorsTableTableManager extends RootTableManager<
             lastSyncUtc: lastSyncUtc,
             historyGap: historyGap,
             logEpoch: logEpoch,
+            logId: logId,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0

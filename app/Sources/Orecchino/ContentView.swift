@@ -100,7 +100,7 @@ struct ConnectionBadge: View {
 struct PortMenu: View {
     @Environment(AppModel.self) private var model
     var body: some View {
-        let ports = SerialManager.candidatePorts()
+        let ports = model.ports
         let connected: String? = {
             if case .connected(let p) = model.serialStatus { return p }
             return nil
@@ -207,7 +207,7 @@ struct ReceiverEmptyState: View {
             Text(health.explanation)
         } actions: {
             if health == .searching {
-                let ports = SerialManager.candidatePorts()
+                let ports = model.ports
                 VStack(spacing: 8) {
                     Picker("Port", selection: portBinding) {
                         Text("Auto-detect").tag(String?.none)
@@ -946,6 +946,8 @@ struct OperatorMarker: View {
                 .foregroundStyle(track.color.opacity(0.9))
         }
         .shadow(radius: 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Operator of \(track.title)")
     }
 }
 
@@ -1006,6 +1008,7 @@ struct DroneDetailCard: View {
                 }
                 .buttonStyle(.plain)
                 .help("Close")
+                .accessibilityLabel("Close")
             }
             // Traffic alerts in the rules' words, above the drone's own (§8.5).
             ForEach(trafficAlerts) { al in
@@ -1399,6 +1402,7 @@ struct TFRCard: View {
                 }
                 .buttonStyle(.plain)
                 .help("Close")
+                .accessibilityLabel("Close")
             }
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
                 KVRow(name: "Type", value: zone.legal, ink: Theme.danger)
@@ -1428,6 +1432,9 @@ struct StatusStrip: View {
         if let b = model.stats.board { parts.append(b) }
         if let d = model.stats.bleDrop { parts.append("BLE lines dropped \(d)") }
         if let d = model.stats.bleRxDrop { parts.append("BLE commands dropped \(d)") }
+        if let d = model.stats.usbDrop {
+            parts.append("USB lines dropped \(d) (the Mac was not reading the port)")
+        }
         if let k = model.stats.rxStack { parts.append("decode stack \(k) B free at least") }
         parts.append(model.receiverTakesTraffic ? "takes ADS-B traffic from this Mac"
                                                 : "does not take ADS-B traffic lines")

@@ -312,6 +312,11 @@ class ContactCard extends StatelessWidget {
       c.stale ? 'STALE ${c.ageSeconds.round()} s' : 'heard ${c.ageSeconds.round()} s ago',
     ];
     final spark = c.rssi == null ? null : 'signal ${c.rssi} dBm';
+    // At large text sizes the range goes under the name instead of a column
+    // of its own: in a side panel that column would leave the words no room
+    // and break them mid-word.
+    final big = MediaQuery.textScalerOf(context).scale(1) > 1.4;
+    final range = [c.rangeText, ...where].join(' · ');
     return MergeSemantics(
       child: Semantics(
         label: c.semantics(headingDeg: h),
@@ -324,7 +329,7 @@ class ContactCard extends StatelessWidget {
           curve: Motion.standard,
           decoration: BoxDecoration(
             color: selected ? color.withValues(alpha: 0.10) : Colors.white.withValues(alpha: 0.035),
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: Glass.flatRadius(BorderRadius.circular(18)),
             border: Border.all(
               color: selected
                   ? color.withValues(alpha: 0.7)
@@ -333,7 +338,7 @@ class ContactCard extends StatelessWidget {
             ),
           ),
           child: InkWell(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: Glass.flatRadius(BorderRadius.circular(18)),
             onTap: onTap,
             onLongPress: onLongPress,
             child: Padding(
@@ -351,6 +356,7 @@ class ContactCard extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(c.label, style: OrecchinoType.heading.copyWith(fontSize: 17)),
+                            if (big) Text(range, style: OrecchinoType.metric.copyWith(fontSize: 14)),
                             // What to do first, then why (the rules' words).
                             if (al != null) ...[
                               const SizedBox(height: 4),
@@ -373,18 +379,20 @@ class ContactCard extends StatelessWidget {
                           ],
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 132),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text(c.rangeText, textAlign: TextAlign.end, style: OrecchinoType.metric),
-                            if (where.isNotEmpty)
-                              Text(where.first, textAlign: TextAlign.end, style: OrecchinoType.caption),
-                          ],
+                      if (!big) ...[
+                        const SizedBox(width: 10),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 132),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(c.rangeText, textAlign: TextAlign.end, style: OrecchinoType.metric),
+                              if (where.isNotEmpty)
+                                Text(where.first, textAlign: TextAlign.end, style: OrecchinoType.caption),
+                            ],
+                          ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
                   if (spark != null && series.isNotEmpty) ...[

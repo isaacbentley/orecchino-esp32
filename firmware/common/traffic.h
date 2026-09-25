@@ -29,9 +29,14 @@
 //                         ground, or with that height unknown
 //
 // LOW (UAS airspace intrusion), the choices:
-// - Ground: the observer's elevation (geometric) when known; else, among the
-//   live drones reporting both alt_geo_m and height_m (height above take-off
-//   or ground), the lowest alt_geo_m minus its height_m; else unknown.
+// - Ground, per anchor (the anchor is chosen below): an aircraft anchored on
+//   a drone uses that drone's alt_geo_m minus its height_m (height above
+//   take-off or ground) when both are known; otherwise, and for an aircraft
+//   anchored on the observer, the fallback: the observer's elevation
+//   (geometric) when known, else among the live drones reporting both
+//   alt_geo_m and height_m the lowest alt_geo_m minus its height_m, else
+//   unknown. The observer may sit in a valley with a drone on a ridge 30 km
+//   away: the ground that matters is the one under the anchor.
 // - Aircraft height: alt_geom_m, else alt_baro_m (then `approx`, words
 //   ", APPROX." / "ABOUT"), else unknown. vert_m = aircraft height - ground
 //   (height above ground, NaN unknown). Unknown -> raised with
@@ -46,8 +51,9 @@
 // - One alert per aircraft (keyed by hex, drone_id is the anchor's). Anchor:
 //   the observer when the aircraft is within 3 km of it (from_observer,
 //   drone_id ""), else the nearest live drone within 3 km (drone_id). horiz_m
-//   and bearing_deg are from the anchor; cpa_s is NaN; vert_rel is ABOVE
-//   when vert_m is known, else UNKNOWN.
+//   and bearing_deg are from the anchor; cpa_s is NaN; vert_rel reads
+//   vert_m as for a pair (ABOVE more than 30 m above ground, LEVEL within
+//   30 m of it, BELOW more than 30 m under it, UNKNOWN when unknown).
 // - Aircraft on the ground never raise LOW (an existing LOW clears 20 s
 //   after landing, reading ", AIRCRAFT ON GROUND" meanwhile).
 // - A warning (NEAR/CONVERGING, airborne) for the same aircraft supersedes
@@ -104,8 +110,9 @@
 //   TRAFFIC DATA STALE, data 45 s old
 //   conflict watch on, no ADS-B conflicts, data 6 s old
 //   conflict watch on, 2 ADS-B conflicts, data 6 s old   (pair alerts shown, held included)
-//   conflict watch on, 1 low aircraft, 1 ADS-B conflict, data 6 s old
-//   (LOW alerts shown count as "low aircraft"; nothing else is counted)
+//   conflict watch on, low traffic, 1 ADS-B conflict, data 6 s old
+//   ("low traffic" whenever a LOW alert is shown, one or many: aircraft are
+//   never counted; ADS-B conflicts counts pair alerts, not aircraft)
 //
 // Definitions and the choices made where §8 leaves room:
 // - Fresh aircraft: position age < 30 s. Present: age <= 60 s (older ones are
@@ -132,8 +139,10 @@
 // - Hysteresis (wall clock, never evaluation counts): an alert, once raised,
 //   is kept while its raise condition holds OR while it is "in hold"; it is
 //   removed when it has been out of hold continuously for >= 20 s. In hold =
-//   both present, horizontal <= 1300 m and (vertical unknown or |vertical|
-//   <= 200 m) — "beyond 1.3 km or 200 m" releases. NEAR stays NEAR while in
+//   the drone live, both present, horizontal <= 1300 m and (vertical unknown
+//   or |vertical| <= 200 m) — "beyond 1.3 km or 200 m" releases, and so does
+//   a drone that goes silent (its last position stays in the caller's table
+//   for minutes; a parked aircraft next to it must not stay held). NEAR stays NEAR while in
 //   hold even if only CONVERGING is raised; outside hold a raised CONVERGING
 //   replaces NEAR. A pair missing from this evaluation is out of hold and
 //   keeps its last numbers and words; a held pair still present gets its
@@ -190,8 +199,8 @@
 //           trimmed, <= 8), ty (type, <= 4), lat/lon (required), altg_m
 //           (geometric altitude, m, WGS-84 ellipsoid), altb_ft (pressure
 //           altitude, ft), gs_kt (ground speed, kt), trk (track, deg true),
-//           vr_fpm (vertical rate, ft/min), sq (squawk, "7700" or 7700), em
-//           (emergency flag, 0/1/true/false), gnd (on the ground, 0/1/true/
+//           vr_fpm (vertical rate, ft/min), sq (squawk, "7700" or 7700; a
+//           bool reads 0), em (emergency flag, 0/1/true/false), gnd (on the ground, 0/1/true/
 //           false; "altb_ft":"ground" means the same), age_s (position age, s;
 //           required: an aircraft with no finite age, or older than 60 s, is
 //           dropped). Any other field is unknown when absent or null.
@@ -201,8 +210,8 @@
 //
 // On receipt of traffic_done the set replaces the live one atomically
 // (traffic_ingest): aircraft older than 60 s dropped, those more than 30 km
-// from g_traffic_observer (when known) dropped, nearest first, at most
-// TRAFFIC_MAX_AIRCRAFT.
+// from g_traffic_observer (when known) dropped, a hex already taken skipped
+// (the nearest copy wins), nearest first, at most TRAFFIC_MAX_AIRCRAFT.
 //
 // ---------------------------------------------------------------------------
 // FIRMWARE CONTRACT
@@ -630,7 +639,7 @@ static inline void traffic_low_words(TrafficAlert* a) {
   traffic_textf(a->text, sizeof(a->text), "LOW TRAFFIC %s %s%s", brg, dist,
                 a->on_ground ? ", AIRCRAFT ON GROUND"
                 : a->height_unknown ? ", HEIGHT UNKNOWN" : (a->approx ? ", APPROX." : ""));
-  a->vert_rel = isnan(a->vert_m) ? TRAFFIC_VERT_UNKNOWN : TRAFFIC_VERT_ABOVE;
+  a->vert_rel = traffic_vert_rel(a->vert_m);
   traffic_textf(a->action, sizeof(a->action), "BE READY TO LAND DRONES");
   long v = isnan(a->vert_m) ? 0 : (long)floor(a->vert_m + 0.5);
   if (a->on_ground) snprintf(vert, sizeof(vert), "AIRCRAFT ON GROUND");
@@ -749,7 +758,7 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
                       (isnan(c.vert_m) || fabs(c.vert_m) <= TRAFFIC_NEAR_V_M);
       bool conv_raw = eligible && !isnan(c.cpa_s) && c.cpa_m < TRAFFIC_CPA_MISS_M &&
                       (isnan(vcpa) || fabs(vcpa) <= TRAFFIC_NEAR_V_M);
-      bool hold = c.horiz_m <= TRAFFIC_HOLD_H_M &&
+      bool hold = d->live && c.horiz_m <= TRAFFIC_HOLD_H_M &&
                   (isnan(c.vert_m) || fabs(c.vert_m) <= TRAFFIC_HOLD_V_M);
       c.kind = near_raw ? TRAFFIC_KIND_NEAR : TRAFFIC_KIND_CONVERGING;
       c.level = traffic_kind_level(c.kind, c.on_ground);
@@ -759,16 +768,18 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
 
   // LOW: airborne aircraft in UAS airspace.
   const bool obs_pos = obs && traffic_known(obs->lat) && traffic_known(obs->lon);
-  double ground = NAN;
+  // The fallback ground (see LOW in the header comment): the observer's
+  // elevation, else the lowest live drone's alt_geo minus its height.
+  double fallback = NAN;
   if (obs && traffic_alt_known(obs->elev_m)) {
-    ground = obs->elev_m;
+    fallback = obs->elev_m;
   } else {
     double lowest = NAN;
     for (int i = 0; i < nd; i++) {
       const TrafficDrone* d = &drones[i];
       if (!d->live || !traffic_known(d->lat) || !traffic_known(d->lon)) continue;
       if (!traffic_alt_known(d->alt_geo_m) || !traffic_known(d->height_m)) continue;
-      if (isnan(lowest) || d->alt_geo_m < lowest) { lowest = d->alt_geo_m; ground = d->alt_geo_m - d->height_m; }
+      if (isnan(lowest) || d->alt_geo_m < lowest) { lowest = d->alt_geo_m; fallback = d->alt_geo_m - d->height_m; }
     }
   }
   for (int j = 0; j < na; j++) {
@@ -820,6 +831,11 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
     c.bearing_deg = traffic_bearing_of(dx, dy);
     c.cpa_s = NAN;
     c.cpa_m = NAN;
+    // Ground under the anchor: the anchor drone's alt_geo minus its height,
+    // else the fallback.
+    double ground = fallback;
+    if (anchor >= 0 && traffic_alt_known(drones[anchor].alt_geo_m) && traffic_known(drones[anchor].height_m))
+      ground = drones[anchor].alt_geo_m - drones[anchor].height_m;
     double h = NAN;
     if (traffic_alt_known(a->alt_geom_m)) h = a->alt_geom_m;
     else if (traffic_alt_known(a->alt_baro_m)) { h = a->alt_baro_m; c.approx = true; }
@@ -899,6 +915,7 @@ static inline void traffic_evaluate(const TrafficDrone* drones, int nd,
 //   TRAFFIC DATA STALE, data 45 s old
 //   conflict watch on, no ADS-B conflicts, data 6 s old
 //   conflict watch on, 2 ADS-B conflicts, data 6 s old
+//   conflict watch on, low traffic, 2 ADS-B conflicts, data 6 s old
 static inline void traffic_summary(const TrafficResult* r, char* out, size_t n) {
   if (!r->have_data) { snprintf(out, n, "CONFLICT WATCH OFF: no ADS-B source"); return; }
   long age = (long)floor(r->data_age_s + 0.5);
@@ -911,7 +928,7 @@ static inline void traffic_summary(const TrafficResult* r, char* out, size_t n) 
     unsigned low = 0, conf = 0;
     for (int i = 0; i < r->n; i++) { if (r->alerts[i].kind == TRAFFIC_KIND_LOW) low++; else conf++; }
     char a[40] = "", b[40] = "";
-    if (low) snprintf(a, sizeof(a), "%u low aircraft, ", low);
+    if (low) snprintf(a, sizeof(a), "low traffic, ");   // never a count of aircraft
     if (conf) snprintf(b, sizeof(b), "%u ADS-B conflict%s, ", conf, conf == 1 ? "" : "s");
     snprintf(out, n, "conflict watch on, %s%sdata %ld s old", a, b, age);
   }
@@ -969,10 +986,12 @@ static inline const char* traffic_skip(const char* p) {
   return p;
 }
 
-// Scalar value: number (finite), true/false, null (NaN), or string (its text).
+// Scalar value: number (finite), true/false (num 1/0, is_bool), null (NaN),
+// or string (its text).
 typedef struct {
   bool   present;
   bool   is_str;
+  bool   is_bool;
   double num;              // NaN for null / non-numbers
   char   str[24];
 } TrafficJv;
@@ -981,12 +1000,13 @@ static inline const char* traffic_value(const char* p, TrafficJv* v) {
   p = traffic_ws(p);
   v->present = true;
   v->is_str = false;
+  v->is_bool = false;
   v->num = NAN;
   v->str[0] = 0;
   if (*p == '"') { v->is_str = true; return traffic_str(p, v->str, sizeof(v->str)); }
   if (*p == '{' || *p == '[') return traffic_skip(p);
-  if (!strncmp(p, "true", 4)) { v->num = 1; return p + 4; }
-  if (!strncmp(p, "false", 5)) { v->num = 0; return p + 5; }
+  if (!strncmp(p, "true", 4)) { v->num = 1; v->is_bool = true; return p + 4; }
+  if (!strncmp(p, "false", 5)) { v->num = 0; v->is_bool = true; return p + 5; }
   if (!strncmp(p, "null", 4)) return p + 4;
   char* end = NULL;
   double d = strtod(p, &end);
@@ -1078,7 +1098,7 @@ static inline const char* traffic_ac_member(const char* key, const char* val, vo
       bool ok = l > 0 && l <= 4;
       for (size_t i = 0; i < l && ok; i++) ok = s[i] >= '0' && s[i] <= '7';
       q = ok ? strtol(s, NULL, 10) : 0;
-    } else if (isfinite(n) && n >= 0 && n <= 7777) {
+    } else if (!v.is_bool && isfinite(n) && n >= 0 && n <= 7777) {   // true is not squawk 1
       q = (long)n;
     }
     a->squawk = (uint16_t)q;
@@ -1152,7 +1172,8 @@ static inline void traffic_ingest(const TrafficAircraft* ac, int n, uint32_t dat
   int taken = 0;
   double last_d = -1.0;
   int last_i = -1;
-  // Selection by distance (ties by index): O(32 n), no scratch array.
+  // Selection by distance (ties by index): O(32 n), no scratch array. A hex
+  // already taken is skipped: one entry per aircraft, its nearest copy.
   while (taken < TRAFFIC_MAX_AIRCRAFT) {
     int best = -1;
     double best_d = 0;
@@ -1166,9 +1187,11 @@ static inline void traffic_ingest(const TrafficAircraft* ac, int n, uint32_t dat
       if (best < 0 || d < best_d) { best = i; best_d = d; }
     }
     if (best < 0) break;
-    g_traffic_ac[taken++] = ac[best];
     last_d = best_d;
     last_i = best;
+    bool dup = false;
+    for (int k = 0; k < taken && !dup; k++) dup = !strcmp(g_traffic_ac[k].hex, ac[best].hex);
+    if (!dup) g_traffic_ac[taken++] = ac[best];
   }
   g_traffic_count = (uint8_t)taken;
   g_traffic_have = true;

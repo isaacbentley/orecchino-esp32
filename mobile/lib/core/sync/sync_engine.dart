@@ -11,9 +11,24 @@
 //   (then it stays, and the next sync asks again).
 // - `oldest` above the cursor: records rotated out before this phone saw
 //   them (a gap, remembered on the detector).
-// - A cursor above `total`: the board's log was cleared. The log epoch is
+// - The board's log was cleared (its seqs start again) when log_done says
+//   so in one of three ways: its `log_id` (the board's persisted log
+//   identity, bumped by every clear; firmware that sends it) differs from
+//   the one the cursor was stored with; the cursor is above `total`; or
+//   `oldest` is below the `oldest` stored at the last sync, which a ring
+//   that only appends can never do (the fallback for firmware without
+//   `log_id`, for a log cleared while the phone was away and refilled past
+//   the cursor; it needs the old log to have rotated). The log epoch is
 //   bumped (so the new seqs never overwrite older history) and the sync
-//   asks again from `oldest`, once.
+//   asks again from `oldest`, once. (The first returned record's first_utc
+//   says nothing: the record at the cursor is a new contact whenever none
+//   was live at the last sync, cleared or not.)
+// - A cut reply (log_done `"err":"dropped"`: the link dropped part of it;
+//   `next` is then the `since` asked for) or no log_done within [timeout]:
+//   the records that came are stored (they are good, and come again
+//   harmlessly), the cursor stays, and the same question is asked again,
+//   up to [maxRetries] times, then the sync ends with an error and the
+//   next one asks from the same cursor.
 // Ended records are written in batches (up to [batchSize] at a time, and
 // the rest before log_done is acted on), not one write per record.
 // Messages are handled strictly in order: [handleMessage] queues behind the
@@ -66,16 +81,23 @@ class SyncEngine {
   String? _detectorId;
   int _cursor = 0;
   int _epoch = 0;
+  int? _logId; // the log the cursor belongs to (null: the board never said)
+  int? _knownOldest; // `oldest` at the last sync (null: none, or reset)
   bool _restarted = false;
   bool _gap = false;
   bool _cleared = false;
   int _received = 0;
   int _failed = 0;
+  int _retries = 0; // cut replies and timeouts asked again this sync
   final List<DetectionsCompanion> _active = [];
   final List<DetectionsCompanion> _ended = []; // received, not yet written
+  int? _afterUtc; // this sync's filter, kept for a re-ask
 
   /// Ended records written per database batch.
   static const batchSize = 64;
+
+  /// How many times one sync asks again after a cut reply or a timeout.
+  static const maxRetries = 3;
   Timer? _watchdog;
   /// The previous message's handling; null before the first. (Not a
   /// pre-made completed future: its callbacks would be scheduled in the
@@ -114,19 +136,35 @@ class SyncEngine {
     _gap = false;
     _cleared = false;
     _restarted = false;
+    _retries = 0;
     _active.clear();
     _ended.clear();
     final d = await db.getDetector(detectorId);
     _cursor = d?.lastSyncSeq ?? 0;
     _epoch = d?.logEpoch ?? 0;
+    _logId = d?.logId;
+    _knownOldest = d?.oldestSeq;
+    _afterUtc = afterUtc;
     _emit();
-    return _ask(afterUtc: afterUtc);
+    return _ask();
   }
 
-  Future<bool> _ask({int? afterUtc}) async {
+  /// log_done describes another log than the cursor's (see the file
+  /// comment): its id changed, the cursor is past its end, or its oldest
+  /// held seq went backwards.
+  bool _otherLog(LogDoneMessage m, int? total, int? oldest) {
+    if (m.logId != null && _logId != null && m.logId != _logId) return true;
+    if (total != null && _cursor > total) return true;
+    if (oldest != null && _knownOldest != null && oldest < _knownOldest!) return true;
+    return false;
+  }
+
+  /// Asks from the cursor with the sync's own filter, so a re-ask or a
+  /// restart asks the same question.
+  Future<bool> _ask() async {
     _kick();
     try {
-      await sendCommand(HostCommands.logGet(since: _cursor, afterUtc: afterUtc));
+      await sendCommand(HostCommands.logGet(since: _cursor, afterUtc: _afterUtc));
       return true;
     } catch (e) {
       _finish(error: 'could not ask for the log: $e');
@@ -136,7 +174,24 @@ class SyncEngine {
 
   void _kick() {
     _watchdog?.cancel();
-    _watchdog = Timer(timeout, () => _finish(error: 'the detector stopped answering'));
+    _watchdog = Timer(timeout, () {
+      if (!_isSyncing) return;
+      if (_retries < maxRetries) {
+        unawaited(_askAgain().catchError((Object _) {}));
+      } else {
+        _finish(error: 'the detector stopped answering');
+      }
+    });
+  }
+
+  /// A cut reply or a timeout: keep what came (the records are good), keep
+  /// the cursor, and ask the same question again.
+  Future<void> _askAgain() async {
+    _retries++;
+    await _flush();
+    _active.clear();
+    _emit();
+    await _ask();
   }
 
   /// Abandon a running sync (the link dropped). The cursor is not moved, so
@@ -223,21 +278,36 @@ class SyncEngine {
   }
 
   Future<void> _done(String id, LogDoneMessage m) async {
-    await _flush();
     final total = m.total ?? m.nextSeq;
     final next = m.nextSeq ?? total;
     final oldest = m.oldestSeq;
-    if (total != null && _cursor > total && !_restarted) {
-      // The board's log was cleared (or reset): its seqs start again.
+    if (!_restarted && _otherLog(m, total, oldest)) {
+      // The board's log was cleared (or reset): its seqs start again. The
+      // records not yet written were the new log's, keyed to the old
+      // epoch: dropped, they come again from oldest under the new one.
+      _ended.clear();
+      _received = 0;
       _restarted = true;
       _cleared = true;
       _epoch++;
       _cursor = oldest ?? 0;
+      _logId = m.logId;
+      _knownOldest = null;
       _active.clear();
       _emit();
       await _ask();
       return;
     }
+    if (m.cut) {
+      if (_retries < maxRetries) {
+        await _askAgain();
+      } else {
+        await _flush();
+        _finish(error: 'the detector\'s reply was cut short $maxRetries times; the next sync asks again');
+      }
+      return;
+    }
+    await _flush();
     if (oldest != null && oldest > _cursor) _gap = true;
     try {
       await db.replaceActive(id, List.of(_active));
@@ -245,7 +315,8 @@ class SyncEngine {
       _failed++;
     }
     if (next != null && _failed == 0) {
-      await db.updateSyncCursor(id, next, oldest, gap: _gap ? true : null, epoch: _epoch, syncUtc: nowUtc());
+      await db.updateSyncCursor(id, next, oldest,
+          gap: _gap ? true : null, epoch: _epoch, syncUtc: nowUtc(), logId: m.logId);
       _cursor = next;
       _finish();
     } else {

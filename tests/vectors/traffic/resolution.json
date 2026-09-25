@@ -10,6 +10,49 @@
   "b10004: vertical +10.0 m -> level -> 'GIVE WAY: DESCEND AND LAND D9A11; AIRCRAFT LEVEL WITHIN 30 M, 2.0 KM W, CLOSEST IN 32 S'.",
   "Below (more than 30 m): descending would close on the aircraft, so move directly away from it (the opposite 8-point direction) and land."
  ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "b10001",
+   "horiz_m": 600.0,
+   "vert_m": 20.0,
+   "bearing_deg": 90.0,
+   "why": "600 m E, 120 - 100 = 20: level"
+  },
+  {
+   "t_s": 0,
+   "hex": "b10002",
+   "horiz_m": 500.63,
+   "vert_m": -80.0,
+   "bearing_deg": 45.0,
+   "why": "354 E, 354 N: 354 * sqrt(2) = 500.63"
+  },
+  {
+   "t_s": 0,
+   "hex": "b10003",
+   "horiz_m": 900.0,
+   "vert_m": 140.0,
+   "bearing_deg": 0.0,
+   "cpa_s": 17.49,
+   "why": "900 m N heading S at 100 kt = 51.444 m/s, the drone still: 900 / 51.444 = 17.49 s"
+  },
+  {
+   "t_s": 0,
+   "hex": "b10004",
+   "horiz_m": 2000.0,
+   "vert_m": 10.0,
+   "bearing_deg": 270.0,
+   "cpa_s": 32.4,
+   "why": "2000 m W heading E at 120 kt = 61.733 m/s: 2000 / 61.733 = 32.40 s"
+  },
+  {
+   "t_s": 0,
+   "hex": "b10005",
+   "horiz_m": 700.0,
+   "vert_m": null,
+   "bearing_deg": 180.0
+  }
+ ],
  "drones": [
   {
    "id": "1581F20000D9A11",

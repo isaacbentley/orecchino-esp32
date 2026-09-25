@@ -7,6 +7,41 @@
   "t=41 900 m -> raised again. t=42 the aircraft is missing from the set -> out since t=42, shown with the last numbers; t=61 (19 s) held; t=62 cleared.",
   "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): a1b2c3 at t=40 'LOW TRAFFIC N 1.4 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.4 KM N'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
  ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 800.0,
+   "vert_m": 50.0,
+   "bearing_deg": 0.0
+  },
+  {
+   "t_s": 5,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "horiz_m": 1200.0
+  },
+  {
+   "t_s": 6,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "vert_m": 250.0
+  },
+  {
+   "t_s": 15,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "horiz_m": 1250.0
+  },
+  {
+   "t_s": 20,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "horiz_m": 1400.0
+  }
+ ],
  "observer": {
   "lat": 37.7749,
   "lon": -122.4194,
@@ -459,7 +494,7 @@
     "stale": false,
     "highest": "caution",
     "aircraft_count": 1,
-    "summary": "conflict watch on, 1 low aircraft, data 2 s old",
+    "summary": "conflict watch on, low traffic, data 2 s old",
     "alerts": [
      {
       "level": "caution",

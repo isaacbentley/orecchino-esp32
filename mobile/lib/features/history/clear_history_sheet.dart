@@ -172,7 +172,7 @@ class ClearHistorySheetState extends State<ClearHistorySheet> {
         padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
         decoration: BoxDecoration(
           color: confirming ? OrecchinoColors.warning.withValues(alpha: 0.10) : Colors.white.withValues(alpha: 0.04),
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: Glass.flatRadius(BorderRadius.circular(16)),
           border: Border.all(color: confirming ? OrecchinoColors.warning.withValues(alpha: 0.7) : OrecchinoColors.line),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [

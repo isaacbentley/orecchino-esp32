@@ -63,9 +63,21 @@ struct RidMessage: Decodable {
     var auth_state: String? = nil
     var tfr: Bool? = nil
     var emerg: Bool? = nil
+    // log v3: the last System message's classification, as SystemMsg has it
+    // on a rid line (class_type 1 = EU, and only then cat_eu / class_eu).
+    var class_type: Int? = nil
+    var cat_eu: Int? = nil
+    var class_eu: Int? = nil
     var msgs: Int? = nil
     var live: Int? = nil
     var clock: Bool? = nil
+    /// log_done: "dropped" when the receiver lost lines of this dump (a BLE
+    /// or USB drop) and `next` is the `since` that was asked for: read
+    /// again later from the same cursor.
+    var err: String? = nil
+    /// log_done / log_cleared: which log this is; kept on the board and
+    /// bumped by a clear, so a cursor from another log is known for stale.
+    var log_id: Int? = nil
 
     // heartbeat / boot fields
     var up: Int? = nil
@@ -82,6 +94,7 @@ struct RidMessage: Decodable {
     var caps: [String]? = nil      // boot/hb, when the firmware sends it (see AppModel.receiverTakesTraffic)
     var ble_drop: Int? = nil       // hb, optional: BLE lines dropped
     var ble_rx_drop: Int? = nil    // hb, optional: BLE host lines dropped
+    var usb_drop: Int? = nil       // hb, optional: lines dropped toward USB while the host did not read
     var rx_stack: Int? = nil       // hb, optional: decode task's least free stack (bytes)
 }
 

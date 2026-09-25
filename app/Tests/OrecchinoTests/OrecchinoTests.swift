@@ -14,6 +14,16 @@ private func decode(_ s: String) throws -> RidMessage {
         #expect(m.type == "hb")
         #expect(m.wifi_frames == 117)
         #expect(m.ble_ext == true)
+        #expect(m.usb_drop == nil)
+    }
+
+    @Test @MainActor func heartbeatDropCountersReachTheStats() throws {
+        let model = AppModel(startServices: false)
+        model.ingest(line: #"{"type":"hb","up":1000,"rid":0,"ble_drop":3,"ble_rx_drop":1,"usb_drop":12}"#)
+        #expect(model.stats.bleDrop == 3 && model.stats.bleRxDrop == 1 && model.stats.usbDrop == 12)
+        // Only sent when there were any: a later heartbeat without them clears them.
+        model.ingest(line: #"{"type":"hb","up":2000,"rid":0}"#)
+        #expect(model.stats.usbDrop == nil && model.stats.bleDrop == nil)
     }
 
     @Test func ridLineWithPhyAndNoVspeed() throws {
@@ -109,6 +119,96 @@ private func decode(_ s: String) throws -> RidMessage {
     }
 }
 
+@Suite struct SerialManagerTests {
+    /// What the serial queue delivered, read from the test's thread.
+    final class Delivered: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        private var statuses: [SerialStatus] = []
+        func line(_ s: String) { lock.lock(); lines.append(s); lock.unlock() }
+        func status(_ s: SerialStatus) { lock.lock(); statuses.append(s); lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+        var last: SerialStatus? { lock.lock(); defer { lock.unlock() }; return statuses.last }
+    }
+
+    private func settle(_ done: () -> Bool) async {
+        for _ in 0..<300 where !done() { try? await Task.sleep(nanoseconds: 10_000_000) }
+    }
+
+    @Test func drainSplitsLinesAcrossReadsTrimsAndDropsRunawayGarbage() async throws {
+        var fds: [Int32] = [-1, -1]
+        #expect(pipe(&fds) == 0)
+        let (rd, wr) = (fds[0], fds[1])
+        let got = Delivered()
+        let sm = SerialManager()
+        sm.onLine = { got.line($0) }
+        sm.onStatus = { got.status($0) }
+        sm.attachAsync(fd: rd, path: "pipe")
+        await settle { got.last == .connected("pipe") }
+        #expect(got.last == .connected("pipe"))
+
+        func put(_ s: String) {
+            let b = Array(s.utf8)
+            var off = 0
+            while off < b.count {
+                let n = b.withUnsafeBufferPointer { write(wr, $0.baseAddress! + off, $0.count - off) }
+                if n <= 0 { break }
+                off += n
+            }
+        }
+        // Half a line waits; the rest of it, blank lines and CRLF are tidied.
+        put(#"{"type":"hb","up":1"#)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(got.all.isEmpty)
+        put("}\r\n\r\n  \n{\"type\":\"boot\"}\n")
+        await settle { got.all.count == 2 }
+        #expect(got.all == [#"{"type":"hb","up":1}"#, #"{"type":"boot"}"#])
+
+        // More than 1 MB without a newline is dropped as garbage; the line
+        // after it still arrives, and nothing of that size is ever a line.
+        put(String(repeating: "x", count: (1 << 20) + 4096))
+        put("\nok\n")
+        await settle { got.all.last == "ok" }
+        #expect(got.all.last == "ok")
+        #expect(got.all.allSatisfy { $0.utf8.count <= 1 << 20 })
+
+        // The writer going away is EOF: the port closes and the search resumes.
+        close(wr)
+        await settle { got.last == .searching }
+        #expect(got.last == .searching)
+    }
+
+    @Test func txBufferDropsOldestWholeLines() {
+        let buf = Data("aaaa\nbbbb\ncccc\n".utf8)
+        #expect(SerialManager.capped(buf, at: 100) == buf)
+        #expect(SerialManager.capped(buf, at: 10) == Data("bbbb\ncccc\n".utf8))
+        #expect(SerialManager.capped(buf, at: 9) == Data("cccc\n".utf8))
+        // The last line is never cut, so a partial line is never sent.
+        #expect(SerialManager.capped(Data("x\nyyyyyyyyyy\n".utf8), at: 4) == Data("yyyyyyyyyy\n".utf8))
+        #expect(SerialManager.txCap == 64 * 1024)
+    }
+}
+
+@Suite struct TrackCapTests {
+    @Test @MainActor func aFloodOfAddressesEvictsAnonymousTracksFirst() throws {
+        let model = AppModel(startServices: false)
+        model.ingest(line: #"{"type":"rid","src":"ble","mac":"02:00:5E:7E:00:01","basic_id":[{"id_type":1,"ua_type":2,"uas_id":"KEEP-1"}]}"#)
+        model.selection = "uas:KEEP-1"
+        let n = AppModel.maxTracks + 40
+        for i in 0..<n {
+            model.ingest(line: #"{"type":"rid","src":"ble","mac":"C0:FF:EE:00:\#(String(format: "%02X:%02X", i / 256, i % 256))","rssi":-80}"#)
+        }
+        #expect(model.tracks.count == AppModel.maxTracks)
+        #expect(model.trackList.count == AppModel.maxTracks)
+        // The oldest track has a Basic ID, so the random addresses went first.
+        #expect(model.tracks["uas:KEEP-1"] != nil && model.selection == "uas:KEEP-1")
+        #expect(model.tracks["mac:C0:FF:EE:00:\(String(format: "%02X:%02X", (n - 1) / 256, (n - 1) % 256))"] != nil)
+        // The sorted list follows the table.
+        model.ingest(line: #"{"type":"rid","src":"wifi","mac":"02:00:5E:7E:00:02","basic_id":[{"id_type":1,"ua_type":2,"uas_id":"KEEP-2"}]}"#)
+        #expect(model.trackList.last?.id == "uas:KEEP-2" && model.trackList.first?.id == "uas:KEEP-1")
+    }
+}
+
 @Suite struct TrackConflictTests {
     @Test @MainActor func conflictingUasIdPreservesBothTracks() throws {
         let model = AppModel(startServices: false)
@@ -138,10 +238,18 @@ private func decode(_ s: String) throws -> RidMessage {
 }
 
 @Suite struct TileSyncTests {
-    @Test @MainActor func tileSyncCancelResetsState() {
+    @Test @MainActor func tileSyncCancelResetsState() throws {
         let ts = TileSync()
+        var sent: [String] = []
+        ts.sendLine = { sent.append($0) }
+        ts.isConnected = { true }
+        ts.plan(around: (37.8, -122.4))
+        #expect(ts.running && ts.phase == .planning && sent.count == 1)
         ts.cancel()
-        #expect(!ts.running)
+        #expect(!ts.running && ts.phase == .idle)
+        // The board's late answer must neither revive the plan nor send more.
+        ts.handle(try decode(#"{"type":"fs_stat","total":13565952,"used":65536}"#))
+        #expect(!ts.running && ts.phase == .idle && sent.count == 1)
     }
 
     @Test @MainActor func strayRepliesWhileIdleAreIgnored() throws {
@@ -445,7 +553,7 @@ private func decode(_ s: String) throws -> RidMessage {
 
 @Suite struct DeviceLogTests {
     // A line as rx_core's emit_log_rec writes it.
-    static let ended = #"{"type":"log","i":7,"active":false,"uas":"1581F5FHD23AB00D","mac":"60:60:1F:AA:BB:CC","srcs":5,"fmts":1,"ua_type":2,"first":1790000000,"last":1790000312,"dur":312,"lat":37.80390,"lon":-122.46400,"max_h":118,"peak_rssi":-58,"auth_state":"none","tfr":true,"emerg":false,"msgs":644}"#
+    static let ended = #"{"type":"log","i":7,"active":false,"uas":"1581F5FHD23AB00D","mac":"60:60:1F:AA:BB:CC","srcs":5,"fmts":1,"ua_type":2,"first":1790000000,"last":1790000312,"dur":312,"lat":37.80390,"lon":-122.46400,"max_h":118,"peak_rssi":-58,"auth_state":"none","tfr":true,"in_tfr":false,"tfr_id":"6/3221","emerg":false,"class_type":1,"cat_eu":1,"class_eu":2,"msgs":644}"#
     static let live = #"{"type":"log","i":-1,"active":true,"uas":"","mac":"02:00:5E:7E:57:01","srcs":4,"fmts":1,"ua_type":0,"first":0,"last":0,"dur":3,"peak_rssi":-70,"auth_state":"partial","tfr":false,"emerg":true,"msgs":4}"#
 
     @Test func endedRecordDecodes() throws {
@@ -455,6 +563,11 @@ private func decode(_ s: String) throws -> RidMessage {
         #expect(e.first == Date(timeIntervalSince1970: 1_790_000_000))
         #expect(e.duration == 312 && e.maxHeight == 118 && e.inTFR)
         #expect(e.lat == 37.8039)
+        // Log v3: was inside TFR 6/3221, not at the end; EU Open, class 2 = C1.
+        #expect(!e.inTFRNow && e.tfrId == "6/3221" && e.tfrText == "TFR 6/3221")
+        #expect(e.classification == "EU · Open · C1")
+        let inside = try #require(DeviceLogEntry(try decode(Self.ended.replacingOccurrences(of: #""in_tfr":false"#, with: #""in_tfr":true"#))))
+        #expect(inside.tfrText == "IN TFR 6/3221")
     }
 
     @Test func liveRecordWithoutClockOrPosition() throws {
@@ -464,6 +577,8 @@ private func decode(_ s: String) throws -> RidMessage {
         #expect(e.lat == nil && e.maxHeight == nil)
         #expect(e.displayName == "02:00:5E:7E:57:01")  // no UAS ID: the MAC stands in
         #expect(e.emergency)
+        // Written before log v3: no TFR name, no class.
+        #expect(!e.inTFR && !e.inTFRNow && e.tfrId == nil && e.tfrText == nil && e.classification == nil)
     }
 
     @MainActor @Test func fetchCollectsUntilDoneAndOrdersLiveFirst() throws {
@@ -476,8 +591,14 @@ private func decode(_ s: String) throws -> RidMessage {
         log.handle(try decode(#"{"type":"log_done","n":2,"live":1,"total":9,"clock":false}"#))
         #expect(log.phase == .done && !log.clockSet && log.totalEver == 9)
         #expect(log.entries.map(\.index) == [nil, 7, 3])  // live, then newest ended first
+        // Cleared on the receiver: this Mac's copy stays until the next read.
         log.handle(try decode(#"{"type":"log_cleared"}"#))
-        #expect(log.entries.count == 1 && log.entries[0].active)
+        #expect(log.entries.count == 3 && log.clearedSinceRead && log.cursor == 0)
+        log.send = { _ in }
+        log.isConnected = { true }
+        log.fetch()
+        log.handle(try decode(#"{"type":"log_done","n":0,"live":0,"total":0,"clock":true,"next":0,"oldest":0}"#))
+        #expect(log.entries.isEmpty && !log.clearedSinceRead && log.phase == .done)
     }
 
     @MainActor @Test func disconnectMidReadSaysSoAndDropsPartialRecords() throws {
@@ -500,7 +621,12 @@ private func decode(_ s: String) throws -> RidMessage {
     @Test func csvQuotesAndLeavesUnknownsEmpty() throws {
         let e = try #require(DeviceLogEntry(try decode(Self.live)))
         let csv = DeviceLog.csv([e])
+        #expect(csv.hasPrefix("status,uas_id,mac,sources,first_utc,last_utc,duration_s,lat,lon,max_height_m,peak_rssi,auth,tfr,in_tfr,tfr_id,class,emergency,messages\n"))
         let row = csv.split(separator: "\n")[1]
-        #expect(row == #"live,"","02:00:5E:7E:57:01","BLE",,,3,,,,-70,"partial",no,yes,4"#)
+        #expect(row == #"live,"","02:00:5E:7E:57:01","BLE",,,3,,,,-70,"partial",no,no,,,yes,4"#)
+        // Log v3 fields, when the record has them.
+        let ended = try #require(DeviceLogEntry(try decode(Self.ended)))
+        let row2 = DeviceLog.csv([ended]).split(separator: "\n")[1]
+        #expect(row2.hasSuffix(#"-58,"none",yes,no,"6/3221","EU · Open · C1",no,644"#))
     }
 }

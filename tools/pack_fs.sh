@@ -9,8 +9,12 @@ DATA=firmware/orecchino_sensecap/data
 OFFSET=0x210000
 SIZE=0x5E0000   # keep in sync with firmware/orecchino_sensecap/partitions.csv
 
-MKLFS=$(ls ~/Library/Arduino15/packages/esp32/tools/mklittlefs/*/mklittlefs | tail -1)
-ESPTOOL=$(ls ~/Library/Arduino15/packages/esp32/tools/esptool_py/*/esptool | tail -1)
+# The newest installed version of each esp32 core tool (one directory per
+# version under tools/<name>/).
+TOOLS=~/Library/Arduino15/packages/esp32/tools
+MKLFS=$(find "$TOOLS/mklittlefs" -mindepth 2 -maxdepth 2 -name mklittlefs | sort | tail -n 1)
+ESPTOOL=$(find "$TOOLS/esptool_py" -mindepth 2 -maxdepth 2 -name esptool | sort | tail -n 1)
+[ -n "$MKLFS" ] && [ -n "$ESPTOOL" ] || { echo "mklittlefs/esptool not found under $TOOLS; install the esp32 core first" >&2; exit 1; }
 
 IMG=$(mktemp -t orecchino_fs)
 trap 'rm -f "$IMG"' EXIT   # also when mklittlefs or esptool fails

@@ -26,15 +26,20 @@
 //          (1 MB reserve; tiles outside the plan may be evicted), shrunk z15
 //          first until it fits. Then only missing tiles, at most 4 requests
 //          a second, each streamed to /tiles/fetch.part (JPEG signature
-//          checked, 256 KB cap) and renamed into place as z/x/y.jpg; it
-//          stops before free space falls under the reserve. At most `tile_budget` new
-//          tiles per window (8 automatically, all for UPDATE MAP). Needs an
+//          checked, NET_TILE_MAX_BYTES cap: 64 KB, what the screens decode)
+//          and renamed into place as z/x/y.jpg; it stops before free space
+//          falls under the reserve. At most `tile_budget` new tiles per
+//          window (8 automatically, all for UPDATE MAP). Needs an
 //          internal-RAM task stack (flash writes).
-//   Every HTTPS request first checks the internal heap (mbedTLS allocates
-//   its ~33 KB of record buffers there): under NET_TLS_MIN_FREE free or
-//   NET_TLS_MIN_BLOCK largest block, the job fails with "low memory (..)".
-//   The numbers are reported in the "synced" status line (heap_int,
-//   heap_blk, heap_tls).
+//   Every HTTPS request first checks the internal heap: a TLS session
+//   takes ~52 KB of it (measured on the T5: heap_int 76,648 -> heap_tls
+//   24,320 with the session open; 68,732 -> 18,196), mbedTLS's record
+//   buffers and the socket. Under NET_TLS_MIN_FREE free (65 KB: that plus
+//   ~13 KB for the Wi-Fi/BT drivers' RX buffers) or NET_TLS_MIN_BLOCK
+//   largest block, the job fails with "low memory (..)". The numbers are
+//   reported in the "synced" status line (heap_int, heap_blk, heap_tls).
+//   An HTTP 429 is reported with its Retry-After (NetJobResult
+//   rate_limited / retry_after_s); net_sync.h holds the job that long.
 //   A cancel (a phone connecting, a new CONNECT, mode OFF) is checked
 //   between jobs, in every HTTPS read, between the tile job's listing,
 //   planning and downloads, and on every plan tile walked; a job it cuts
@@ -60,11 +65,15 @@
 #include "net_parse.h"
 
 #ifndef NET_TLS_MIN_FREE
-#define NET_TLS_MIN_FREE  (40u * 1024u)
+#define NET_TLS_MIN_FREE  (65u * 1024u)   // a session takes ~52 KB (measured) + ~13 KB for the radios
 #endif
 #ifndef NET_TLS_MIN_BLOCK
 #define NET_TLS_MIN_BLOCK (18u * 1024u)
 #endif
+// The screens decode a tile of at most TILE_JPG_MAX (64 KB: ui_epd.cpp,
+// display.cpp); a bigger one would be stored, counted present and never
+// drawn, so the fetch refuses it too. Esri dark-grey tiles run <= 20 KB.
+#define NET_TILE_MAX_BYTES (64u * 1024u)
 #define NET_ADSB_STAGE    64
 #define NET_OBJ_BUF       (16 * 1024)
 #define NET_IO_BUF        2048
@@ -105,6 +114,8 @@ typedef struct {
   uint32_t*    victims;
   NetArea      adsb;            // where to ask adsb.lol this time
   uint32_t     tile_last_ms;    // rate limit
+  int          http_status;     // of the last request (0: none / no answer)
+  uint32_t     retry_after_s;   // its Retry-After, seconds (0: none)
 } NetFetch;
 
 static NetFetch s_nf;
@@ -129,6 +140,14 @@ static void net_job_stop(uint32_t bit, const char* job) {
   } else {
     s_nf.res.failed |= bit;
   }
+}
+
+/// After a failed request: was it an HTTP 429? Then the job is reported
+/// rate limited with the first Retry-After seen (net_sync.h holds it).
+static void net_job_rate_limited(uint32_t bit) {
+  if (s_nf.http_status != 429) return;
+  s_nf.res.rate_limited |= bit;
+  if (s_nf.retry_after_s > s_nf.res.retry_after_s) s_nf.res.retry_after_s = s_nf.retry_after_s;   // the longest wait asked for
 }
 
 /// Enough internal RAM for a TLS session? Records the first measurement.
@@ -156,6 +175,8 @@ static bool net_http_get(const char* job, const char* url, NetBodyFn fn, void* c
   cfg.buffer_size = 1536;      // response headers (the FAA's Set-Cookie echoes the URL)
   cfg.buffer_size_tx = 768;
   cfg.disable_auto_redirect = true;
+  s_nf.http_status = 0;        // before any early return: a failed init is not last time's 429
+  s_nf.retry_after_s = 0;
   esp_http_client_handle_t c = esp_http_client_init(&cfg);
   if (!c) { net_fetch_err(job, "no memory"); return false; }
   bool ok = false;
@@ -166,8 +187,13 @@ static bool net_http_get(const char* job, const char* url, NetBodyFn fn, void* c
   } else {
     int64_t len = esp_http_client_fetch_headers(c);
     int status = esp_http_client_get_status_code(c);
+    s_nf.http_status = status;
     if (!s_nf.res.heap_tls) s_nf.res.heap_tls = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (status != 200) {
+    if (status == 429) {   // too many requests: the server says how long to wait
+      char* ra = nullptr;
+      if (esp_http_client_get_header(c, "Retry-After", &ra) == ESP_OK && ra) s_nf.retry_after_s = net_retry_after_s(ra);
+      net_fetch_err(job, "HTTP 429");
+    } else if (status != 200) {
       net_fetch_err(job, "HTTP %d", status);
     } else if (len > (int64_t)max_bytes) {
       net_fetch_err(job, "answer too large");
@@ -269,7 +295,7 @@ static void net_job_tfr() {
   net_split_init(&sp, "features", s_nf.obj, NET_OBJ_BUF, net_tfr_on_obj, &set);
   bool ok = net_http_get("TFR", s_nf.url, net_split_sink, &sp, 1024u * 1024u, 30000);
   if (ok && !sp.complete) { ok = false; net_fetch_err("TFR", "unexpected answer"); }
-  if (!ok) { net_job_stop(NET_JOB_TFR, "TFR"); return; }
+  if (!ok) { net_job_stop(NET_JOB_TFR, "TFR"); net_job_rate_limited(NET_JOB_TFR); return; }
   s_nf.tfr_n = set.n;
   s_nf.tfr_ok = true;
   s_nf.res.tfr_n = (uint16_t)set.n;
@@ -299,7 +325,7 @@ static void net_job_adsb() {
   net_split_init(&sp, "ac", s_nf.obj, NET_OBJ_BUF, net_adsb_on_obj, &set);
   bool ok = net_http_get("ADS-B", s_nf.url, net_split_sink, &sp, 512u * 1024u, 15000);
   if (ok && !sp.complete) { ok = false; net_fetch_err("ADS-B", "unexpected answer"); }
-  if (!ok) { net_job_stop(NET_JOB_ADSB, "ADS-B"); return; }
+  if (!ok) { net_job_stop(NET_JOB_ADSB, "ADS-B"); net_job_rate_limited(NET_JOB_ADSB); return; }
   s_nf.ac_n = set.n;
   s_nf.ac_ms = set.now_ms;
   s_nf.ac_ok = true;
@@ -349,7 +375,7 @@ static int net_tile_fetch(void*, int z, int32_t x, int32_t y, uint32_t* bytes) {
   t.n = 0;
   t.jpeg = false;
   if (!t.f) { net_fetch_err("MAP", "cannot write"); return -1; }
-  bool ok = net_http_get("MAP", s_nf.url, net_tile_sink, &t, TILE_FILE_MAX, 20000);
+  bool ok = net_http_get("MAP", s_nf.url, net_tile_sink, &t, NET_TILE_MAX_BYTES, 20000);
   t.f.close();
   // Only a whole JPEG is renamed into place: a cancelled or cut download
   // leaves nothing but the temp file, removed here.
@@ -359,6 +385,11 @@ static int net_tile_fetch(void*, int z, int32_t x, int32_t y, uint32_t* bytes) {
   }
   if (!ok || !t.jpeg) {
     LittleFS.remove(NET_TILE_TMP);
+    if (s_nf.http_status == 429) {   // stop now, hold the job (rate limited is also failed)
+      net_job_stop(NET_JOB_TILES, "MAP");
+      net_job_rate_limited(NET_JOB_TILES);
+      return -1;
+    }
     return 0;
   }
   *bytes = t.n;

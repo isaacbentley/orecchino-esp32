@@ -11,7 +11,11 @@
 
 #define TILE_PATH_MAX    72            // "/tiles/22/4194303/4194303.png" is 29
 #define TILE_FILE_MAX    (256u * 1024u) // a 256 px PNG is ~5-40 KB; refuse anything absurd
+#define TILE_JPEG_MAX    (64u * 1024u)  // a JPEG past this cannot be decoded on the boards and
+                                       // leaves an undrawable hole (the T5's own fetch caps the
+                                       // same: net_fetch.h NET_TILE_MAX_BYTES)
 #define TILE_FS_MARGIN   16384u        // block granularity + metadata
+#define TILE_SOURCE_MARK "/tiles/.src"  // the basemap mark (below): never removed by a host
 
 /// n decimal digits (1..max) at *p; advances p past them.
 static inline bool tile_digits(const char** p, int max) {
@@ -36,9 +40,11 @@ static inline bool tile_path_ok(const char* path) {
 /// What fs_rm may remove: anything inside /tiles, so the host can prune a
 /// stray file (a .DS_Store packed by an old image) it saw in fs_ls, but
 /// never a path that climbs out: plain names only, no "." or ".." parts,
-/// no empty parts.
+/// no empty parts. Nor the basemap mark: without it the T5 wipes every tile
+/// at its next boot (tile_store_check_source).
 static inline bool tile_rm_path_ok(const char* path) {
   if (!path || strlen(path) >= TILE_PATH_MAX || strncmp(path, "/tiles/", 7) != 0) return false;
+  if (strcmp(path, TILE_SOURCE_MARK) == 0) return false;
   const char* part = path + 7;
   for (const char* p = part;; p++) {
     char c = *p;
@@ -56,11 +62,18 @@ static inline bool tile_rm_path_ok(const char* path) {
   }
 }
 
+/// The most a file at `path` may hold: TILE_JPEG_MAX for a .jpg tile, else
+/// TILE_FILE_MAX.
+static inline uint64_t tile_file_max(const char* path) {
+  size_t n = path ? strlen(path) : 0;
+  return n >= 4 && strcmp(path + n - 4, ".jpg") == 0 ? TILE_JPEG_MAX : TILE_FILE_MAX;
+}
+
 /// Bytes an fs_begin must find free before writing a file of `size`, or 0
-/// when the file is refused outright (too big, or larger than the whole
-/// filesystem: evicting everything would still not fit it).
-static inline uint64_t tile_bytes_needed(uint64_t size, uint64_t fs_total) {
-  if (size == 0 || size > TILE_FILE_MAX) return 0;
+/// when the file is refused outright (too big for its kind, or larger than
+/// the whole filesystem: evicting everything would still not fit it).
+static inline uint64_t tile_bytes_needed(uint64_t size, uint64_t fs_total, uint64_t max = TILE_FILE_MAX) {
+  if (size == 0 || size > max) return 0;
   uint64_t need = size + TILE_FS_MARGIN;
   return need <= fs_total ? need : 0;
 }
@@ -76,7 +89,6 @@ static inline uint64_t tile_bytes_needed(uint64_t size, uint64_t fs_total) {
 // TILE_SOURCE_ID (tile_store_check_source). The SenseCAP's bundled .png
 // pack is genuine and is never wiped.
 #define TILE_SOURCE_ID    "esri-dg1"
-#define TILE_SOURCE_MARK  "/tiles/.src"
 #define TILE_BASE_URL     "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/%d/%d/%d"   // z, y, x
 #define TILE_ATTRIBUTION  "Esri, HERE, Garmin, (c) OpenStreetMap contributors"
 

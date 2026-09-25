@@ -9,7 +9,10 @@
 //   -> pairing: bond (the board shows passkey 123456, the phone asks for it)
 //      and subscribe to TX, which the board allows only on an encrypted link
 //   -> ready.
-// The board drops a peer that has not paired within 10 s of connecting.
+// The board drops a peer that has not paired within 10 s of connecting, and
+// refuses a pairing that did not use the passkey (Just Works: bond deleted,
+// peer dropped), so a failure in the pairing step is reported with the
+// passkey to enter ([passkeyHint]), never as a bare error.
 //
 // A reconnect to a pinned detector can be a pending connect ([connect]
 // with pending: true): it waits, with no timeout and no scan, until the
@@ -18,12 +21,15 @@
 //
 // Every connection attempt has a generation number; a callback from an
 // older attempt (a late disconnect, a slow step) is ignored, so it can never
-// tear down a newer link. Commands are written in MTU-sized chunks, one
+// tear down a newer link. Commands are written in chunks of min(MTU - 3,
+// 512) bytes (a with-response write is capped at 512 by the ATT attribute
+// limit, which flutter_blue_plus enforces even when the MTU is 517), one
 // command at a time, and [send] throws when there is no ready link.
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
@@ -191,7 +197,9 @@ class BleService extends ChangeNotifier implements DetectorLink {
       return info;
     } catch (e) {
       if (gen != _gen || (peer != null && !identical(_peer, peer))) return null;
-      final reason = _words(e);
+      // In the pairing step (bonding, or the subscription the board allows
+      // only on a passkey-paired link): say what to do, not just what failed.
+      final reason = _state == BleLinkState.pairing ? 'pairing failed (${_words(e)}): $passkeyHint' : _words(e);
       _peer = null;
       _info = null;
       try {
@@ -219,8 +227,14 @@ class BleService extends ChangeNotifier implements DetectorLink {
     // pair within 10 s); once ready it is a lost link.
     final wasReady = _state == BleLinkState.ready;
     _set(wasReady ? BleLinkState.idle : BleLinkState.failed,
-        error: wasReady ? 'connection lost' : 'the detector disconnected before pairing finished');
+        error: wasReady ? 'connection lost' : 'the detector disconnected before pairing finished: $passkeyHint');
   }
+
+  /// What a failed pairing needs: the board's fixed passkey (README,
+  /// firmware/common/ble_link.h). A pairing without it (Just Works) is
+  /// refused by the board.
+  static const passkeyHint =
+      'pair with the passkey 123456 the detector shows (see the README); a pairing without it is refused';
 
   Future<void> _teardown() async {
     final w = _waitingFor;
@@ -263,7 +277,7 @@ class BleService extends ChangeNotifier implements DetectorLink {
     // One command at a time: two commands' chunks must never interleave.
     final done = _writeChain.then((_) async {
       if (gen != _gen || !identical(_peer, peer)) throw const LinkNotReady('connection lost');
-      final chunk = peer.mtu > 23 ? peer.mtu - 3 : 20;
+      final chunk = maxWrite(peer.mtu);
       for (var off = 0; off < bytes.length; off += chunk) {
         final end = off + chunk < bytes.length ? off + chunk : bytes.length;
         await peer.write(bytes.sublist(off, end));
@@ -272,6 +286,11 @@ class BleService extends ChangeNotifier implements DetectorLink {
     _writeChain = done.catchError((_) {});
     return done;
   }
+
+  /// The most a with-response write may carry at [mtu]: MTU - 3, never
+  /// more than the 512-byte attribute limit (an Android MTU of 517 gives
+  /// 512, not 514), never less than the 20 of the default MTU.
+  static int maxWrite(int mtu) => math.min(mtu - 3, 512).clamp(20, 512);
 
   static String _words(Object e) {
     if (e is _Refused) return e.message;

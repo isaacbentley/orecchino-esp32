@@ -63,6 +63,8 @@ class FakeBackend implements BleScanBackend {
   @override
   bool get isScanningNow => on;
   @override
+  Stream<bool> get adapterOn => const Stream.empty();
+  @override
   Future<void> start(BleScanFilter filter, {ScanDuty duty = ScanDuty.lowLatency}) async {
     on = true;
     _scanning.add(true);

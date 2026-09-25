@@ -447,7 +447,7 @@ class TrafficRules {
     const action = 'BE READY TO LAND DRONES';
     return a.copyWith(
       text: 'LOW TRAFFIC $brg $dist$suffix',
-      vertRel: a.vertM == null ? TrafficVertical.unknown : TrafficVertical.above,
+      vertRel: vertRel(a.vertM),
       action: action,
       resolution: '$action; $vert, $dist $brg',
     );
@@ -559,7 +559,7 @@ class TrafficRules {
         final eligible = canRaise && d.live && age < freshS;
         final nearRaw = eligible && horiz <= nearHM && (vert.isNaN || vert.abs() <= nearVM);
         final convRaw = eligible && !cpaS.isNaN && cpaM < cpaMissM && (vcpa.isNaN || vcpa.abs() <= nearVM);
-        final hold = horiz <= holdHM && (vert.isNaN || vert.abs() <= holdVM);
+        final hold = d.live && horiz <= holdHM && (vert.isNaN || vert.abs() <= holdVM);
         final kind = nearRaw ? TrafficKind.near : TrafficKind.converging;
         final c = TrafficAlert(
           level: kind.levelFor(onGround: a.onGround),
@@ -585,9 +585,11 @@ class TrafficRules {
     // LOW: airborne aircraft in UAS airspace.
     final obs = observer;
     final obsPos = _known(obs.lat) && _known(obs.lon);
-    var ground = double.nan;
+    // The fallback ground (see LOW in traffic.h): the observer's elevation,
+    // else the lowest live drone's alt_geo minus its height.
+    var fallback = double.nan;
     if (_altKnown(obs.elevM)) {
-      ground = obs.elevM!;
+      fallback = obs.elevM!;
     } else {
       var lowest = double.nan;
       for (final d in drones) {
@@ -595,7 +597,7 @@ class TrafficRules {
         if (!_altKnown(d.altGeoM) || !_known(d.heightM)) continue;
         if (lowest.isNaN || d.altGeoM! < lowest) {
           lowest = d.altGeoM!;
-          ground = d.altGeoM! - d.heightM!;
+          fallback = d.altGeoM! - d.heightM!;
         }
       }
     }
@@ -639,6 +641,12 @@ class TrafficRules {
         }
       }
       if (!fromObs && anchor == null) continue;
+      // Ground under the anchor: the anchor drone's alt_geo minus its height,
+      // else the fallback.
+      var ground = fallback;
+      if (anchor != null && _altKnown(drones[anchor].altGeoM) && _known(drones[anchor].heightM)) {
+        ground = drones[anchor].altGeoM! - drones[anchor].heightM!;
+      }
       var h = double.nan;
       var approx = false;
       if (_altKnown(a.altGeomM)) {
@@ -719,7 +727,7 @@ class TrafficRules {
     final n = r.alerts.length;
     if (n == 0) return 'conflict watch on, no ADS-B conflicts, data $a s old';
     final low = r.alerts.where((x) => x.kind == TrafficKind.low).length, conf = n - low;
-    final l = low > 0 ? '$low low aircraft, ' : '';
+    final l = low > 0 ? 'low traffic, ' : ''; // never a count of aircraft
     final c = conf > 0 ? '$conf ADS-B conflict${conf == 1 ? '' : 's'}, ' : '';
     return 'conflict watch on, $l${c}data $a s old';
   }
@@ -878,7 +886,13 @@ class TrafficHostFeed {
       cand.add((d, i, a));
     }
     cand.sort((x, y) => x.$1 != y.$1 ? x.$1.compareTo(y.$1) : x.$2.compareTo(y.$2));
-    aircraft = cand.take(TrafficRules.maxAircraft).map((c) => c.$3).toList();
+    final taken = <TrafficAircraft>[];
+    final seen = <String>{};
+    for (final c in cand) {
+      if (taken.length >= TrafficRules.maxAircraft) break;
+      if (seen.add(c.$3.hex)) taken.add(c.$3); // one entry per hex, its nearest copy
+    }
+    aircraft = taken;
     haveData = true;
     this.dataMs = dataMs;
   }

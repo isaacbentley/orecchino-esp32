@@ -250,42 +250,44 @@ class _DroneDetailsSheetState extends State<DroneDetailsSheet> {
     final label = Text(r.label, style: OrecchinoType.label);
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 44),
-      child: Row(children: [
-        Expanded(
-          child: Semantics(
-            container: true,
-            label: r.semantics,
-            excludeSemantics: true,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 9),
-              // Side by side when there is room; stacked on a narrow width or
-              // at large text sizes.
-              child: LayoutBuilder(builder: (context, box) {
-                final scale = MediaQuery.textScalerOf(context).scale(1);
-                if (box.maxWidth < 330 * scale) {
-                  return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [label, const SizedBox(height: 2), value]);
-                }
-                return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SizedBox(width: box.maxWidth * 0.38, child: label),
-                  const SizedBox(width: 10),
-                  Expanded(child: value),
-                ]);
-              }),
+      // The label's width comes from the whole row, so the values line up
+      // whether or not the row ends in a copy button.
+      child: LayoutBuilder(builder: (context, box) {
+        final scale = MediaQuery.textScalerOf(context).scale(1);
+        // Side by side when there is room; stacked on a narrow width or at
+        // large text sizes.
+        final stacked = box.maxWidth < 330 * scale;
+        return Row(children: [
+          Expanded(
+            child: Semantics(
+              container: true,
+              label: r.semantics,
+              excludeSemantics: true,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                child: stacked
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [label, const SizedBox(height: 2), value])
+                    : Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        SizedBox(width: box.maxWidth * 0.38, child: label),
+                        const SizedBox(width: 10),
+                        Expanded(child: value),
+                      ]),
+              ),
             ),
           ),
-        ),
-        if (r.copy != null)
-          IconButton(
-            tooltip: 'Copy ${r.label}',
-            icon: Icon(_copied == r.label ? Icons.check_rounded : Icons.copy_rounded,
-                size: 18, color: _copied == r.label ? OrecchinoColors.ok : OrecchinoColors.inkMuted),
-            onPressed: () => _copy(r),
-          )
-        else
-          const SizedBox(width: 8),
-      ]),
+          if (r.copy != null)
+            IconButton(
+              tooltip: 'Copy ${r.label}',
+              icon: Icon(_copied == r.label ? Icons.check_rounded : Icons.copy_rounded,
+                  size: 18, color: _copied == r.label ? OrecchinoColors.ok : OrecchinoColors.inkMuted),
+              onPressed: () => _copy(r),
+            )
+          else
+            const SizedBox(width: 8),
+        ]);
+      }),
     );
   }
 }

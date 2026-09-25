@@ -60,7 +60,9 @@ final class TFRService {
                 var req = URLRequest(url: Self.url)
                 req.timeoutInterval = 30
                 let (data, _) = try await URLSession.shared.data(for: req)
-                let zones = try Self.parse(data)
+                // A multi-MB feed with thousands of ring points: decoded
+                // off the main actor, or the map hitches every 15 min.
+                let zones = try await Task.detached(priority: .utility) { try Self.parse(data) }.value
                 await MainActor.run {
                     self?.zones = zones
                     self?.status = .loaded(zones.count, Date())

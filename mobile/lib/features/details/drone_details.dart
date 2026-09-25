@@ -562,7 +562,12 @@ DroneDetails recordDroneDetails(DetectionEntry d, {ObserverFix? observer, String
         DetailRow('TFR', d.tfr ? d.tfrId : null,
             mono: true,
             secondary: d.tfr && d.tfrId == null ? 'This detector\'s firmware does not send the TFR\'s name' : null),
-        DetailRow('ID signature', d.authState == AuthState.invalid ? 'ID SIGNATURE INVALID' : 'No problem found',
+        // Unsigned (or never checked): nothing to say, as on the live path.
+        DetailRow(
+            'ID signature',
+            d.authState == AuthState.invalid
+                ? 'ID SIGNATURE INVALID'
+                : (d.authState == AuthState.none ? null : 'No problem found'),
             tone: d.authState == AuthState.invalid ? DetailTone.warning : DetailTone.plain),
       ]),
     ],

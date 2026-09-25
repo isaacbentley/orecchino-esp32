@@ -17,10 +17,11 @@
 //     FETCH: the due jobs on a worker task (net_fetch.h): TIME (SNTP), TFR,
 //            ADS-B, TILES; the loop keeps running, it only polls
 //     SYNC mode: LEAVE -> IDLE.  STAY mode: ONLINE (associated; ADS-B every
-//            10 s, TFR/clock every 15 min; a dropped link rejoins at once,
-//            then backs off)
+//            NET_ADSB_EVERY_MS (15 s), TFR/clock every 15 min; a dropped
+//            link rejoins at once, then backs off)
 //   Join failures back off 1, 2, 5, 15 min (never longer than the SYNC
-//   interval); each job backs off on its own the same way.
+//   interval); each job backs off on its own the same way. An HTTP 429
+//   holds that job for max(Retry-After, its back-off) ("rate limited, N s").
 //
 //   Modes (NVS "orwifi"/"mode"): OFF (no automatic joins; SYNC NOW and a
 //   CONNECT still work, and a successful CONNECT from OFF switches to SYNC),
@@ -62,7 +63,8 @@
 //   {"cmd":"wifi_forget","ssid":"Home"}                    -> wifi_status
 //   {"cmd":"wifi_mode","mode":"off|sync|stay","every_min":15}  -> wifi_status
 //   {"cmd":"wifi_config","adsb_km":10,"tile_km":3}  (either or both; clamped:
-//       ADS-B 5-30 km, map 1 km to what the flash holds) -> wifi_status
+//       ADS-B 5-30 km, map 1 km to what the flash holds; a stored map radius
+//       above that is cut to it, and kept, when a tile plan arrives) -> wifi_status
 //   A refused or malformed command: {"type":"wifi_err","cmd":"wifi_join","reason":"..."}
 //   wifi_join/forget/mode/config need a bonded BLE link, or USB while the board's
 //   SYSTEM screen has Wi-Fi setup open (net_serial_setup(); 5 min), so a USB
@@ -123,7 +125,12 @@
 #define NET_EVERY_MIN_MAX     60
 #define NET_CLOCK_EVERY_MS    (15u * 60u * 1000u)
 #define NET_TFR_EVERY_MS      (15u * 60u * 1000u)
-#define NET_ADSB_EVERY_MS     10000u               // STAY mode (SYNC: every window)
+// STAY mode's ADS-B cadence (SYNC: every window). adsb.lol answered HTTP
+// 429 after four fetches 10 s apart; 15 s stays under its limit, and a 429
+// still holds the job for max(Retry-After, the back-off), never shorter.
+#define NET_ADSB_EVERY_MS     15000u
+#define NET_RATE_LIMIT_MIN_MS 60000u               // an HTTP 429 without Retry-After holds this long
+#define NET_RATE_LIMIT_MAX_S  3600u                // a Retry-After longer than this is cut to it
 #define NET_TILES_EVERY_MS    (7u * 24u * 3600u * 1000u)
 #define NET_TILE_BUDGET_AUTO  8                    // new tiles per automatic window (~4 s)
 #define NET_SKIP_RETRY_MS     60000u               // a job skipped (no position...) retries after
@@ -206,6 +213,8 @@ typedef struct {
 typedef struct {
   uint32_t ok, failed, skipped;   // NET_JOB_* bits
   uint32_t cancelled;             // cut short or never started by a cancel: not failures (no back-off)
+  uint32_t rate_limited;          // answered HTTP 429 (also in failed): held for Retry-After at least
+  uint32_t retry_after_s;         // the first 429's Retry-After in seconds (0: none given)
   uint32_t utc;                   // TIME: the server's time...
   uint32_t utc_at_ms;             // ...at this millis()
   uint16_t tfr_n, ac_n;
@@ -400,6 +409,23 @@ static inline uint32_t net__backoff_ms(uint8_t k) {
   uint8_t i = k == 0 ? 0 : (uint8_t)(k - 1);
   if (i > 3) i = 3;
   return (uint32_t)min[i] * 60000u;
+}
+
+/// A Retry-After header's value in seconds: "120" -> 120 (cut to
+/// NET_RATE_LIMIT_MAX_S); an HTTP-date, or nothing, -> 0 (the caller's
+/// minimum applies; the board's clock may not be set to compare a date).
+static inline uint32_t net_retry_after_s(const char* v) {
+  if (!v) return 0;
+  while (*v == ' ' || *v == '\t') v++;
+  uint32_t s = 0;
+  const char* p = v;
+  for (; *p >= '0' && *p <= '9'; p++) {
+    s = s * 10 + (uint32_t)(*p - '0');
+    if (s > NET_RATE_LIMIT_MAX_S) s = NET_RATE_LIMIT_MAX_S;
+  }
+  if (p == v) return 0;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  return *p ? 0 : s;   // digits followed by anything else: a date ("Wed, 21 Oct...")
 }
 
 static inline size_t net__status_json(char* out, size_t n) {
@@ -698,7 +724,9 @@ static inline uint32_t net__due() {
   if (force || (net__job_ready(1) && (!g.tfr_ok || now - g.tfr_ms + NET_DUE_SLACK_MS >= NET_TFR_EVERY_MS)))
     j |= NET_JOB_TFR;
   if (force || (net__job_ready(2) && (!g.adsb_tried || now - g.adsb_try_ms >= NET_ADSB_EVERY_MS))) j |= NET_JOB_ADSB;
-  if (g.rq_tiles || (net__job_ready(3) && (!g.tiles_ok || now - g.tiles_ms >= NET_TILES_EVERY_MS)))
+  // UPDATE MAP lifts a back-off when asked (net_update_map), but a hold
+  // set since (a tile source's 429) keeps even that waiting.
+  if (net__job_ready(3) && (g.rq_tiles || !g.tiles_ok || now - g.tiles_ms >= NET_TILES_EVERY_MS))
     j |= NET_JOB_TILES;
   return j;
 }
@@ -743,6 +771,16 @@ static inline void net__job_outcome(const NetJobResult* r, int k, uint32_t bit) 
   }
 }
 
+/// A map radius setting within what the flash holds: 1 km to the last
+/// plan's tile_max_m (up to 30 km before any plan).
+static inline uint8_t net__tile_km_fit(uint8_t km) {
+  uint8_t top = NET_TILE_KM_MAX;
+  if (g_net.tile_max_m > 0 && g_net.tile_max_m / 1000.0 < top) top = (uint8_t)(g_net.tile_max_m / 1000.0);
+  if (km > top) km = top;
+  if (km < NET_TILE_KM_MIN) km = NET_TILE_KM_MIN;
+  return km;
+}
+
 static inline void net__fetch_done(const NetJobResult* r) {
   NetSm& g = g_net;
   uint32_t now = g.now;
@@ -769,6 +807,29 @@ static inline void net__fetch_done(const NetJobResult* r) {
   if (g.fetch_cancel && !drained && !g.rq_join && !g.rq_leave) o.failed |= o.cancelled;
   if (o.failed & NET_JOB_TILES) g.rq_tiles = false;   // an UPDATE MAP that failed is reported, not retried forever
   for (int k = 0; k < NET_JOB_COUNT; k++) net__job_outcome(&o, k, 1u << k);
+  // HTTP 429: the source asked for a pause. Hold the job for its Retry-After
+  // (NET_RATE_LIMIT_MIN_MS at least), or the back-off if that is longer, so
+  // STAY's cadence never runs into the limit again at once.
+  const char* err = r->err;
+  char rate_err[64];
+  if (r->rate_limited) {
+    static const char* const jobs[NET_JOB_COUNT] = { "CLOCK", "TFR", "ADS-B", "MAP" };
+    uint32_t ra_ms = (r->retry_after_s > NET_RATE_LIMIT_MAX_S ? NET_RATE_LIMIT_MAX_S : r->retry_after_s) * 1000u;
+    bool said = false;
+    for (int k = 0; k < NET_JOB_COUNT; k++) {
+      if (!(r->rate_limited & (1u << k))) continue;
+      uint32_t hold = g.job_wait[k] && (int32_t)(g.job_retry[k] - now) > 0 ? g.job_retry[k] - now : 0;
+      if (hold < NET_RATE_LIMIT_MIN_MS) hold = NET_RATE_LIMIT_MIN_MS;
+      if (hold < ra_ms) hold = ra_ms;
+      g.job_wait[k] = true;
+      g.job_retry[k] = now + hold;
+      if (!said) {
+        snprintf(rate_err, sizeof(rate_err), "%s: rate limited, %lu s", jobs[k], (unsigned long)(hold / 1000u));
+        err = rate_err;
+        said = true;
+      }
+    }
+  }
   if (r->heap_free) { g.heap_free = r->heap_free; g.heap_block = r->heap_block; }
   if (r->heap_tls) g.heap_tls = r->heap_tls;
   g.no_position = r->no_position;
@@ -777,10 +838,15 @@ static inline void net__fetch_done(const NetJobResult* r) {
     g.plan = r->plan;
     if (r->tile_max_m > 0) g.tile_max_m = r->tile_max_m;
     g.storage_full = r->storage_full;
+    // A stored radius the flash cannot hold is cut to what does, and kept:
+    // the next plan starts from it instead of shrinking 30 km in 250 m steps.
+    uint8_t km = net__tile_km_fit(g.cfg.tile_km);
+    if (km != g.cfg.tile_km) { g.cfg.tile_km = km; net__store(); }
   }
   if (r->adsb_radius_m > 0) g.adsb_radius_m = r->adsb_radius_m;
-  // A failure, or a job skipped for a reason worth showing ("TFR: no position").
-  if (r->failed || r->skipped || r->cancelled) net__copy(g.fetch_err, sizeof(g.fetch_err), r->err);
+  // A failure, or a job skipped for a reason worth showing ("TFR: no
+  // position"), or a source that asked for a pause.
+  if (r->failed || r->skipped || r->cancelled || r->rate_limited) net__copy(g.fetch_err, sizeof(g.fetch_err), err);
   else g.fetch_err[0] = 0;
   if (r->ok && g.ops.utc_now) {
     uint32_t u = g.ops.utc_now();
@@ -803,7 +869,7 @@ static inline void net__fetch_done(const NetJobResult* r) {
       }
     if (k < sizeof(extra)) k += (size_t)snprintf(extra + k, sizeof(extra) - k, "]");
   }
-  net_json_esc(esc, sizeof(esc), r->err);
+  net_json_esc(esc, sizeof(esc), err);
   if (k < sizeof(extra))
     snprintf(extra + k, sizeof(extra) - k,
              ",\"tfr\":%u,\"ac\":%u,\"tiles\":%u,\"tiles_left\":%u,\"heap_int\":%lu,\"heap_blk\":%lu,\"heap_tls\":%lu,\"position\":%s,\"err\":\"%s\"",
@@ -1120,10 +1186,12 @@ static inline void net_sync_now() {
   g_net.force_jobs = true;
 }
 
-/// Fetch the map tiles around home that are missing (UPDATE MAP).
+/// Fetch the map tiles around home that are missing (UPDATE MAP): now,
+/// whatever the tile job's back-off.
 static inline void net_update_map() {
   g_net.rq_tiles = true;
   g_net.rq_sync = true;
+  g_net.job_wait[3] = false;
 }
 
 static inline const char* net_get_ip() { return g_net.state == NET_STATE_CONNECTED ? g_net.ip : ""; }
@@ -1148,10 +1216,7 @@ static inline double net_get_tile_radius_max_km() { return g_net.tile_max_m / 10
 /// the automatic fills use it; a plan that does not fit shrinks z15 first.
 static inline uint8_t net_get_tile_radius_km() { return g_net.cfg.tile_km; }
 static inline void net_set_tile_radius_km(uint8_t km) {
-  uint8_t top = NET_TILE_KM_MAX;   // no plan yet: up to 30
-  if (g_net.tile_max_m > 0 && g_net.tile_max_m / 1000.0 < top) top = (uint8_t)(g_net.tile_max_m / 1000.0);
-  if (km > top) km = top;
-  if (km < NET_TILE_KM_MIN) km = NET_TILE_KM_MIN;
+  km = net__tile_km_fit(km);
   if (km != g_net.cfg.tile_km) { g_net.cfg.tile_km = km; net__store(); }
 }
 /// The last tile plan (per-zoom radius, tile counts, estimated bytes, flash

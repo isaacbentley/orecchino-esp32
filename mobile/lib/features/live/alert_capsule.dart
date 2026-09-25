@@ -38,6 +38,13 @@ class AlertCapsule extends StatefulWidget {
     required this.onSelect,
   });
 
+  /// What the live region says for a traffic alert: the action and the
+  /// rule's words, nothing that ticks (the geometry, the age).
+  static String liveAlertLabel(TrafficAlert t) => [trafficAction(t), if (t.text.isNotEmpty) t.text].join(', ');
+
+  /// The live region for a drone alert: its words and the drone, no range.
+  static String liveDroneLabel(LiveContactItem d) => '${d.alertWords.join(', ')}, drone ${d.label}';
+
   @override
   State<AlertCapsule> createState() => _AlertCapsuleState();
 }
@@ -165,55 +172,64 @@ class _AlertCapsuleState extends State<AlertCapsule> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // The live region carries only the action and the rule's words, so
+          // a screen reader announces an alert when it starts or changes
+          // level, not again every second as the age and the range tick;
+          // those are on the button, its own node, read on demand.
           Semantics(
+            container: true,
             liveRegion: true,
-            button: true,
-            expanded: _open,
-            label: lines.join(', '),
-            excludeSemantics: true,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(OrecchinoTheme.radius),
-              onTap: () {
-                setState(() => _open = !_open);
-                widget.onSelect('ac:${t.hex}');
-              },
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(top: 1),
-                      child: Icon(
-                        t.level == TrafficLevel.warning ? Icons.warning_rounded : Icons.flight_rounded,
-                        color: color,
-                        size: 22,
+            label: AlertCapsule.liveAlertLabel(t),
+            child: Semantics(
+              container: true,
+              button: true,
+              expanded: _open,
+              label: lines.join(', '),
+              excludeSemantics: true,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(OrecchinoTheme.radius),
+                onTap: () {
+                  setState(() => _open = !_open);
+                  widget.onSelect('ac:${t.hex}');
+                },
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 1),
+                        child: Icon(
+                          t.level == TrafficLevel.warning ? Icons.warning_rounded : Icons.flight_rounded,
+                          color: color,
+                          size: 22,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(trafficAction(t), style: OrecchinoType.alert.copyWith(color: color, fontSize: 15)),
-                          if (geometry.isNotEmpty) ...[
-                            const SizedBox(height: 3),
-                            Text(geometry, style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(trafficAction(t), style: OrecchinoType.alert.copyWith(color: color, fontSize: 15)),
+                            if (geometry.isNotEmpty) ...[
+                              const SizedBox(height: 3),
+                              Text(geometry, style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
+                            ],
+                            const SizedBox(height: 2),
+                            // A non-breaking hyphen on screen only, so "ADS-B" never splits.
+                            Text(why.replaceAll('ADS-B', 'ADS\u2011B'), style: OrecchinoType.caption),
+                            if (widget.trafficExtra != null) Text(widget.trafficExtra!, style: OrecchinoType.caption),
                           ],
-                          const SizedBox(height: 2),
-                          // A non-breaking hyphen on screen only, so "ADS-B" never splits.
-                          Text(why.replaceAll('ADS-B', 'ADS\u2011B'), style: OrecchinoType.caption),
-                          if (widget.trafficExtra != null) Text(widget.trafficExtra!, style: OrecchinoType.caption),
-                        ],
+                        ),
                       ),
-                    ),
-                    AnimatedRotation(
-                      turns: _open ? 0.5 : 0,
-                      duration: Motion.of(context, Motion.base),
-                      curve: Motion.standard,
-                      child: Icon(Icons.expand_more_rounded, color: OrecchinoColors.inkMuted),
-                    ),
-                  ],
+                      AnimatedRotation(
+                        turns: _open ? 0.5 : 0,
+                        duration: Motion.of(context, Motion.base),
+                        curve: Motion.standard,
+                        child: Icon(Icons.expand_more_rounded, color: OrecchinoColors.inkMuted),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -238,31 +254,38 @@ class _AlertCapsuleState extends State<AlertCapsule> {
   Widget _drone(LiveContactItem d, Color color) {
     return SizedBox(
       width: double.infinity,
+      // As _traffic: the live region says the alert once; the range ticks on
+      // the button's own node.
       child: Semantics(
+        container: true,
         liveRegion: true,
-        button: true,
-        label: '${d.alertWords.join(', ')}, drone ${d.label}, ${d.rangeText}',
-        excludeSemantics: true,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(OrecchinoTheme.radius),
-          onTap: () => widget.onSelect(d.id),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-            child: Row(children: [
-              Icon(Icons.warning_rounded, color: color, size: 22),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(d.alertWords.join(' · '), style: OrecchinoType.alert.copyWith(color: color, fontSize: 15)),
-                    const SizedBox(height: 3),
-                    Text('${d.label} · ${d.rangeText}',
-                        style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
-                  ],
+        label: AlertCapsule.liveDroneLabel(d),
+        child: Semantics(
+          container: true,
+          button: true,
+          label: '${AlertCapsule.liveDroneLabel(d)}, ${d.rangeText}',
+          excludeSemantics: true,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(OrecchinoTheme.radius),
+            onTap: () => widget.onSelect(d.id),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              child: Row(children: [
+                Icon(Icons.warning_rounded, color: color, size: 22),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(d.alertWords.join(' · '), style: OrecchinoType.alert.copyWith(color: color, fontSize: 15)),
+                      const SizedBox(height: 3),
+                      Text('${d.label} · ${d.rangeText}',
+                          style: OrecchinoType.label.copyWith(color: OrecchinoColors.ink)),
+                    ],
+                  ),
                 ),
-              ),
-            ]),
+              ]),
+            ),
           ),
         ),
       ),
