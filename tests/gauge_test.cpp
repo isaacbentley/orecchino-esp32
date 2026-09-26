@@ -63,6 +63,8 @@ struct FakeGauge {
   uint8_t mac_data[32] = {};
   int commits = 0, rejects = 0, resets = 0, checksum_writes = 0;
   int soc = 54, mv = 4110, ma = 250;
+  uint16_t remaining = 810, cycles = 3, soh = 97, batt_status = 0x0201;
+  uint16_t op_flags = 0;             // OperationStatus bits besides SEC/INITCOMP/CFGUPDATE (VDQ, EDV2)
   uint32_t slept_ms = 0;
   std::vector<Xfer> log;
 };
@@ -173,7 +175,7 @@ static bool fake_read(uint8_t reg, uint8_t* out, size_t n) {
   switch (reg) {
     case 0x3A:
       if (G.nacks > 0) { G.nacks--; return false; }
-      v = (uint16_t)(G.sec << 1 | (G.initcomp ? 0x20 : 0) | (G.cfgupdate ? 0x400 : 0));
+      v = (uint16_t)(G.sec << 1 | (G.initcomp ? 0x20 : 0) | (G.cfgupdate ? 0x400 : 0) | G.op_flags);
       break;
     case 0x00: v = G.batt_id; break;                      // CONTROL_STATUS
     case 0x40: memcpy(out, G.mac_data, n); return true;
@@ -182,6 +184,10 @@ static bool fake_read(uint8_t reg, uint8_t* out, size_t n) {
     case 0x2C: v = (uint16_t)G.soc; break;
     case 0x08: v = (uint16_t)G.mv; break;
     case 0x0C: v = (uint16_t)(int16_t)G.ma; break;
+    case 0x0A: v = G.batt_status; break;
+    case 0x10: v = G.remaining; break;
+    case 0x2A: v = G.cycles; break;
+    case 0x2E: v = G.soh; break;
   }
   out[0] = (uint8_t)v;
   if (n > 1) out[1] = (uint8_t)(v >> 8);
@@ -374,9 +380,39 @@ static void test_readouts(void) {
   CHECK(bq27220::current_ma(kIo, &ma) && ma == -320, "bq27220: current is signed (negative discharging)");
   G.soc = 250;
   CHECK(bq27220::soc_pct(kIo) == 100, "bq27220: SOC above 100 clamps");
+  // The whole state, each value from its own register (distinct numbers,
+  // so a swapped register shows).
+  G.soc = 54; G.remaining = 810; G.cycles = 3; G.soh = 97;
+  G.batt_status = 0x0001; G.op_flags = 0;
+  bq27220::State s = bq27220::state(kIo);
+  CHECK(s.soc_pct == 54 && s.mv == 4110 && s.ma_ok && s.ma == -320 && s.remaining_mah == 810 &&
+        s.full_mah == dm16(0x929D) && s.design_mah == dm16(0x929F) && s.cycles == 3 && s.soh_pct == 97,
+        "bq27220: state reads SOC, mV, mA, remaining, full, design, cycles and health from their registers");
+  CHECK(s.battery_status == 0x0001 && !s.full && !s.vdq && !s.edv2 && (s.operation_status & 0x20),
+        "bq27220: mid-discharge: no learning flag set, OperationStatus raw (INITCOMP)");
+  // The learning cycle's milestones, each from its own bit: FC in
+  // BatteryStatus, then VDQ and EDV2 in OperationStatus.
+  G.batt_status = 0x0200;
+  s = bq27220::state(kIo);
+  CHECK(s.full && !s.vdq && !s.edv2, "bq27220: BatteryStatus bit 9 is the full charge");
+  G.batt_status = 0x0001; G.op_flags = 0x10;
+  s = bq27220::state(kIo);
+  CHECK(!s.full && s.vdq && !s.edv2, "bq27220: OperationStatus bit 4 is a qualified discharge");
+  G.op_flags = 0x18;
+  s = bq27220::state(kIo);
+  CHECK(s.vdq && s.edv2, "bq27220: OperationStatus bit 3 is the low threshold reached");
+  G.ma = -1;
+  s = bq27220::state(kIo);
+  CHECK(s.ma_ok && s.ma == -1, "bq27220: -1 mA is a reading, not a failure");
+  G.op_flags = 0;
   G.present = false;
   CHECK(bq27220::soc_pct(kIo) == -1 && bq27220::voltage_mv(kIo) == -1 && !bq27220::current_ma(kIo, &ma),
         "bq27220: no answer -> -1");
+  s = bq27220::state(kIo);
+  CHECK(s.soc_pct == -1 && s.mv == -1 && !s.ma_ok && s.remaining_mah == -1 && s.full_mah == -1 &&
+        s.design_mah == -1 && s.cycles == -1 && s.soh_pct == -1 && s.battery_status == -1 &&
+        s.operation_status == -1 && !s.full && !s.vdq && !s.edv2,
+        "bq27220: state with no answer: every value -1, the current unread, no flag set");
 }
 
 // The tables themselves: a transposed digit here is a wrong gauge for good.

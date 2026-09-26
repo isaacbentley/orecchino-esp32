@@ -52,6 +52,9 @@ int  periph_batt_mv();             // -1 when no gauge (cell mV from BQ27220)
 int  periph_batt_full_mah();
 /// True when the gauge holds this board's cell profile.
 bool periph_gauge_configured();
+/// The gauge's whole state as one JSON line (the host's `gauge` command);
+/// false when there is no gauge.
+bool periph_gauge_json(char* out, size_t n);
 bool periph_gps_detected();        // true when valid NMEA sentences received on UART1
 bool periph_gps_fix();
 int  periph_gps_sats();

@@ -62,8 +62,10 @@ struct Report {
 };
 
 namespace detail {
-constexpr uint8_t CMD_CONTROL = 0x00, CMD_VOLTAGE = 0x08, CMD_CURRENT = 0x0C,
-                  CMD_FULL_CAP = 0x12, CMD_SOC = 0x2C, CMD_OP_STATUS = 0x3A,
+constexpr uint8_t CMD_CONTROL = 0x00, CMD_VOLTAGE = 0x08, CMD_BATT_STATUS = 0x0A,
+                  CMD_CURRENT = 0x0C, CMD_REMAINING = 0x10,
+                  CMD_FULL_CAP = 0x12, CMD_CYCLES = 0x2A, CMD_SOC = 0x2C,
+                  CMD_SOH = 0x2E, CMD_OP_STATUS = 0x3A,
                   CMD_DESIGN_CAP = 0x3C, CMD_MAC = 0x3E, CMD_MAC_DATA = 0x40,
                   CMD_MAC_SUM = 0x60;
 constexpr uint16_t SUB_DEVICE_NUMBER = 0x0001, SUB_SEALED = 0x0030,
@@ -72,7 +74,8 @@ constexpr uint16_t SUB_DEVICE_NUMBER = 0x0001, SUB_SEALED = 0x0030,
                    KEY_UNSEAL_1 = 0x0414, KEY_UNSEAL_2 = 0x3672, KEY_FULL = 0xFFFF;
 constexpr uint16_t DEVICE_ID = 0x0220;
 // OperationStatus(): SEC in bits 1-2, INITCOMP bit 5, CFGUPDATE bit 10.
-constexpr uint16_t OS_INITCOMP = 1u << 5, OS_CFGUPDATE = 1u << 10;
+constexpr uint16_t OS_EDV2 = 1u << 3, OS_VDQ = 1u << 4, OS_INITCOMP = 1u << 5, OS_CFGUPDATE = 1u << 10;
+constexpr uint16_t BS_FC = 1u << 9;   // BatteryStatus: full charge detected
 enum : uint8_t { SEC_FULL = 1, SEC_UNSEALED = 2, SEC_SEALED = 3 };
 inline uint8_t sec(uint16_t op_status) { return (op_status >> 1) & 3; }
 
@@ -280,6 +283,40 @@ inline bool current_ma(const Io& io, int* ma) {
   if (!detail::word(io, detail::CMD_CURRENT, &v)) return false;
   *ma = (int16_t)v;
   return true;
+}
+
+// Everything the gauge knows about the cell, for following it through a
+// learning cycle: FullChargeCapacity moves from the profile's value to the
+// cell's own after a full charge (FC) followed by one discharge that stays
+// qualified (VDQ) down to the low threshold (EDV2) with no charge in
+// between. Plain register reads, all answered while sealed. -1 for any
+// value the gauge did not answer; the current has its own flag, since -1 mA
+// is a real reading.
+struct State {
+  int soc_pct, mv, remaining_mah, full_mah, design_mah, cycles, soh_pct;
+  int ma; bool ma_ok;
+  int battery_status;     // BatteryStatus(), raw
+  int operation_status;   // OperationStatus(), raw
+  bool full, vdq, edv2;   // FC, VDQ, EDV2: false when unread
+};
+inline State state(const Io& io) {
+  using namespace detail;
+  State s;
+  s.soc_pct = soc_pct(io);
+  s.mv = voltage_mv(io);
+  s.ma = 0;
+  s.ma_ok = current_ma(io, &s.ma);
+  s.remaining_mah = read_u16(io, CMD_REMAINING);
+  s.full_mah = read_u16(io, CMD_FULL_CAP);
+  s.design_mah = read_u16(io, CMD_DESIGN_CAP);
+  s.cycles = read_u16(io, CMD_CYCLES);
+  s.soh_pct = read_u16(io, CMD_SOH);
+  s.battery_status = read_u16(io, CMD_BATT_STATUS);
+  s.operation_status = read_u16(io, CMD_OP_STATUS);
+  s.full = s.battery_status >= 0 && (s.battery_status & BS_FC);
+  s.vdq = s.operation_status >= 0 && (s.operation_status & OS_VDQ);
+  s.edv2 = s.operation_status >= 0 && (s.operation_status & OS_EDV2);
+  return s;
 }
 
 }  // namespace bq27220

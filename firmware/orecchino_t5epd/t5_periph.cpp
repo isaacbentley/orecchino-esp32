@@ -348,6 +348,35 @@ bool periph_gauge_configured() {
   return s_have_gauge && (s_gauge_result == bq27220::Result::Ok ||
                           s_gauge_result == bq27220::Result::Provisioned);
 }
+bool periph_gauge_json(char* out, size_t n) {
+  if (!s_have_gauge) return false;
+  static const char* const kResult[] = { "ok", "provisioned", "not_found", "bus_error", "locked", "write_failed" };
+  bq27220::State s = bq27220::state(kGaugeIo);
+  // The BQ25896's side of a charge: its state (REG0B CHRG_STAT), the
+  // fast-charge current it is set to (REG04 ICHG, 64 mA steps), the
+  // termination voltage (REG06 VREG, 3840 mV + 16 mV steps) and the input
+  // limit (REG00 IINLIM, 100 mA + 50 mA steps). This firmware leaves them
+  // at the chip's power-on values.
+  static const char* const kChg[] = { "not_charging", "pre_charge", "fast", "done" };
+  char chg[128] = "null";
+  uint8_t r00 = 0, r04 = 0, r06 = 0, r0b = 0;
+  if (s_have_charger && bq25896_read(0x00, &r00) && bq25896_read(0x04, &r04) &&
+      bq25896_read(0x06, &r06) && bq25896_read(0x0B, &r0b))
+    snprintf(chg, sizeof(chg), "{\"state\":\"%s\",\"ichg_ma\":%d,\"vreg_mv\":%d,\"iinlim_ma\":%d}",
+             kChg[(r0b >> 3) & 3], (r04 & 0x7F) * 64, 3840 + ((r06 >> 2) & 0x3F) * 16, 100 + (r00 & 0x3F) * 50);
+  char ma[12] = "null";
+  if (s.ma_ok) snprintf(ma, sizeof(ma), "%d", s.ma);
+  snprintf(out, n,
+           "{\"type\":\"gauge\",\"profile\":\"%s\",\"cell_mah\":%u,\"soc\":%d,\"mv\":%d,\"ma\":%s,"
+           "\"remaining_mah\":%d,\"full_mah\":%d,\"design_mah\":%d,\"cycles\":%d,\"soh\":%d,"
+           "\"learning\":{\"full\":%s,\"vdq\":%s,\"edv2\":%s},"
+           "\"battery_status\":%d,\"operation_status\":%d,\"charger\":%s}\n",
+           kResult[(int)s_gauge_result], (unsigned)bq27220::kT5CellMah, s.soc_pct, s.mv, ma,
+           s.remaining_mah, s.full_mah, s.design_mah, s.cycles, s.soh_pct,
+           s.full ? "true" : "false", s.vdq ? "true" : "false", s.edv2 ? "true" : "false",
+           s.battery_status, s.operation_status, chg);
+  return true;
+}
 
 // ---- RTC (PCF8563 at 0x51) & System Time
 #define PCF8563_ADDR 0x51

@@ -310,6 +310,14 @@ gauge with the 1500 mAh cell profile LilyGO publishes for this board and
 rewrites it only when they differ, which costs a few seconds once. The
 settings screen shows the capacity the percentage is counted against.
 
+The profile starts the gauge at the cell's rated 1500 mAh; the gauge then
+learns the cell's real capacity by itself, from one uninterrupted cycle:
+charge to full on USB (the gauge sets its full flag), unplug, and run the
+board on battery until it is nearly empty (about 7 %, where the gauge's
+low threshold lies) without charging in between; plug it back in. The
+`gauge` command (below) shows `full_mah` before and after: an aged cell
+reads lower, and the percentage then counts against what it really holds.
+
 It has touch. The header has TABLE, MAP and SIDE tabs. On the table, tap a row to
 select it, then DETAILS (or a second tap) for its details; tap an aircraft
 on the plot to select it, or an empty spot on the plot to open the map.
@@ -798,6 +806,7 @@ only to the host that asked.
 | `fs_ls`, `fs_begin`, `fs_data`, `fs_end`, `fs_rm`, `fs_stat` | Map tile sync (SenseCAP and T5; the T-Embed and AMOLED answer `fs_err`) |
 | `traffic`, `traffic_done` | ADS-B aircraft for the traffic rules (boards with `traffic` in `caps`, the T5) |
 | `wifi_status`, `wifi_scan`, `wifi_join`, `wifi_forget`, `wifi_mode`, `wifi_config` | The T5's Wi-Fi (below) |
+| `gauge` | The T5's fuel gauge: `{"type":"gauge","profile":"ok","cell_mah":1500,"soc":…,"mv":…,"ma":…,"remaining_mah":…,"full_mah":…,"design_mah":…,"cycles":…,"soh":…,"learning":{"full":…,"vdq":…,"edv2":…},"battery_status":…,"operation_status":…,"charger":{"state":"fast","ichg_ma":…,"vreg_mv":…,"iinlim_ma":…}}` (`profile`: whether this boot found the cell profile in place, `ok`, or wrote it, `provisioned`; `ma` negative while discharging, `null` when unread; `learning`: the cycle's milestones, `full` once a charge has finished, `vdq` while the discharge after it still counts for learning, `edv2` once it reaches the low threshold; the status words raw, as TI's BQ27220 manual lays them out; `charger`: the BQ25896's state, `not_charging`, `pre_charge`, `fast` or `done`, and its fast-charge current, termination voltage and input limit, or `null` without one). For following a learning cycle, above |
 
 Tile sync writes only `/tiles/<z>/<x>/<y>.jpg` or `.png` (decimal
 numbers, checked by `firmware/common/tile_path.h`), 64 KB at most for a

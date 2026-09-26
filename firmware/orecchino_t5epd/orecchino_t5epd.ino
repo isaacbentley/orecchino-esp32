@@ -104,6 +104,12 @@ bool rx_hook_host_line(const char* cmd, char* line, uint32_t now, HostSrc src) {
                      (unsigned long)epoch, set ? "true" : "false");
     return true;
   }
+  if (!strcmp(cmd, "gauge")) {
+    char g[448];
+    if (periph_gauge_json(g, sizeof(g))) host_print_to(src, g);
+    else host_print_to(src, "{\"type\":\"gauge\",\"err\":\"no gauge\"}\n");
+    return true;
+  }
   if (net_host_line(cmd, line, (uint8_t)src)) return true;   // wifi_* (net_sync.h)
   return tile_store_host_line(cmd, line, now, src);
 }
