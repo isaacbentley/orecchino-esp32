@@ -16,6 +16,7 @@
 #include "bq27220_profiles.h"
 #include "axp2101.h"
 #include "bq25896.h"
+#include "power_report.h"
 
 static int g_fails = 0;
 #define CHECK(c, name) do { if (c) printf("ok   %s\n", name); else { printf("FAIL %s\n", name); g_fails++; } } while (0)
@@ -492,6 +493,7 @@ static void c_defaults() {
   memset(C, 0, sizeof C);
   C[0x04] = 0x20;   // ICHG 2048 mA, EN_PUMPX off
   C[0x07] = 0x9D;   // EN_TERM, WATCHDOG 40 s, EN_TIMER, 12 h, JEITA_ISET
+  C[0x14] = 0x46;   // PN 000, DEV_REV 10: what the T5's chip reads
 }
 static void c_watchdog_expires() { if (C[0x07] & 0x30) c_defaults(); }
 static bool c_read(uint8_t r, uint8_t* v) { if (!c_present || r >= sizeof C) return false; *v = C[r]; return true; }
@@ -526,10 +528,78 @@ static void test_bq25896(void) {
         "bq25896: clamped to the chip's 3008 mA");
   C[0x04] = 0x7F;   // a code past the chip's range: it charges at 3008 mA
   CHECK(bq25896::charge_current_ma(kChg) == 3008, "bq25896: an out-of-range code reads as the 3008 mA it gives");
+  // The charge as the chip reports it, each field from its own register.
+  c_defaults();
+  C[0x00] = 0x3F;           // IINLIM 100 + 63 x 50 = 3250 mA
+  C[0x06] = 0x5E;           // VREG 3840 + 23 x 16 = 4208 mV
+  C[0x0B] = 0x10 | 0x04;    // CHRG_STAT 2 (fast), PG_STAT
+  bq25896::set_charge_current(kChg, 845);
+  bq25896::State st;
+  CHECK(bq25896::state(kChg, &st) && !strcmp(st.charging, "fast") && st.ichg_ma == 832 &&
+        st.vreg_mv == 4208 && st.iinlim_ma == 3250,
+        "bq25896: state decodes CHRG_STAT, ICHG (845 asked -> 832), VREG and IINLIM");
+  C[0x0B] = 0x18;
+  CHECK(bq25896::state(kChg, &st) && !strcmp(st.charging, "done"), "bq25896: CHRG_STAT 3 is done");
+  C[0x0B] = 0x00;
+  CHECK(bq25896::state(kChg, &st) && !strcmp(st.charging, "not_charging"), "bq25896: CHRG_STAT 0 is not charging");
+  CHECK(st.part == 0x46, "bq25896: state carries REG14 raw");
+  // Another part at the same address is never written.
+  c_defaults();
+  C[0x14] = 0x00;   // a register that reads zero (another chip's)
+  c_writes = 0;
+  CHECK(!bq25896::identify(kChg) && !bq25896::set_charge_current(kChg, 1000) && c_writes == 0 && C[0x04] == 0x20,
+        "bq25896: a chip whose REG14 is not PN 000 / DEV_REV 10 is refused, nothing written");
+  C[0x14] = 0x3E;   // PN 111 (a BQ25895)
+  CHECK(!bq25896::set_charge_current(kChg, 1000) && c_writes == 0, "bq25896: another PN is refused");
   c_present = false;
-  CHECK(!bq25896::set_charge_current(kChg, 1000) && bq25896::charge_current_ma(kChg) == -1,
+  CHECK(!bq25896::set_charge_current(kChg, 1000) && bq25896::charge_current_ma(kChg) == -1 &&
+        !bq25896::state(kChg, &st),
         "bq25896: no answer -> false / -1");
   c_present = true;
+  // Each board's current, as the chip will hold it: between 0.5C and 0.7C
+  // of its cell, never the 2048 mA power-on value.
+  struct Board { const char* name; int ask_ma; int cell_mah; int held_ma; };
+  const Board boards[] = { { "T5", bq27220::kT5ChargeMa, bq27220::kT5CellMah, 960 },
+                           { "T-Embed", bq27220::kTEmbedChargeMa, bq27220::kTEmbedCellMah, 832 } };
+  for (const Board& b : boards) {
+    c_defaults();
+    bool ok = bq25896::set_charge_current(kChg, b.ask_ma);
+    int held = bq25896::charge_current_ma(kChg);
+    char what[96];
+    snprintf(what, sizeof what, "bq25896: %s charges at %d mA, 0.5C-0.7C of its %d mAh cell", b.name, held,
+             b.cell_mah);
+    CHECK(ok && held == b.held_ma && held * 10 >= b.cell_mah * 5 && held * 10 <= b.cell_mah * 7, what);
+  }
+}
+
+// -------------------------------------------------------------- gauge reply
+
+static void test_power_report(void) {
+  bq27220::State s = {};
+  s.soc_pct = 92; s.mv = 4153; s.ma = -1; s.ma_ok = true; s.remaining_mah = 1370; s.full_mah = 1500;
+  s.design_mah = 1500; s.cycles = 0; s.soh_pct = 100; s.battery_status = 16424; s.operation_status = 166;
+  s.full = true;
+  bq25896::State c = { "done", 960, 4208, 3250, 0x46 };
+  char out[448];
+  power_report_json(out, sizeof out, bq27220::result_name(bq27220::Result::Ok), 1500, s, &c);
+  CHECK(!strcmp(out,
+                "{\"type\":\"gauge\",\"profile\":\"ok\",\"cell_mah\":1500,\"soc\":92,\"mv\":4153,\"ma\":-1,"
+                "\"remaining_mah\":1370,\"full_mah\":1500,\"design_mah\":1500,\"cycles\":0,\"soh\":100,"
+                "\"learning\":{\"full\":true,\"vdq\":false,\"edv2\":false},"
+                "\"battery_status\":16424,\"operation_status\":166,"
+                "\"charger\":{\"state\":\"done\",\"ichg_ma\":960,\"vreg_mv\":4208,\"iinlim_ma\":3250,\"part\":70}}\n"),
+        "report: the whole line, -1 mA printed as a reading");
+  s.ma_ok = false;
+  power_report_json(out, sizeof out, bq27220::result_name(bq27220::Result::Provisioned), 1300, s, nullptr);
+  CHECK(!strcmp(out,
+                "{\"type\":\"gauge\",\"profile\":\"provisioned\",\"cell_mah\":1300,\"soc\":92,\"mv\":4153,\"ma\":null,"
+                "\"remaining_mah\":1370,\"full_mah\":1500,\"design_mah\":1500,\"cycles\":0,\"soh\":100,"
+                "\"learning\":{\"full\":true,\"vdq\":false,\"edv2\":false},"
+                "\"battery_status\":16424,\"operation_status\":166,\"charger\":null}\n"),
+        "report: the whole line with an unread current and no charger: both null");
+  CHECK(!strcmp(bq27220::result_name(bq27220::Result::WriteFailed), "write_failed") &&
+        !strcmp(bq27220::result_name(bq27220::Result::NotFound), "not_found"),
+        "report: provisioning results by name");
 }
 
 int main(void) {
@@ -542,6 +612,7 @@ int main(void) {
   test_profiles();
   test_axp2101();
   test_bq25896();
+  test_power_report();
   if (g_fails) printf("%d FAILED\n", g_fails); else printf("all gauge checks passed\n");
   return g_fails ? 1 : 0;
 }

@@ -239,7 +239,9 @@ shows 2.4 GHz activity by Wi-Fi channel and uses the CC1101 to sweep
 300–928 MHz across its three tuning ranges, with a knob-driven cursor
 readout. Battery percentage comes from the board's fuel gauge, which the
 firmware checks against the board's 1300 mAh cell at every boot, as on the
-e-paper board below.
+e-paper board below. Its charger is set at every boot (and checked every minute) to 832 mA (about
+0.65C, the same rate as the e-paper board's) instead of its 2048 mA
+power-on value, and it answers the same `gauge` command.
 
 ```bash
 arduino-cli lib install "GFX Library for Arduino"
@@ -309,7 +311,8 @@ wanders far from the real charge. At every boot the firmware compares the
 gauge with the 1500 mAh cell profile LilyGO publishes for this board and
 rewrites it only when they differ, which costs a few seconds once. The
 settings screen shows the capacity the percentage is counted against.
-The charger (a TI BQ25896) is set at every boot to charge at 960 mA,
+The charger (a TI BQ25896) is set at every boot, and checked every minute
+after, to charge at 960 mA,
 about 0.65C for this cell, instead of its 2048 mA power-on value; its I²C
 watchdog is switched off so the setting holds (an expired watchdog puts
 the chip back to its defaults).
@@ -810,7 +813,7 @@ only to the host that asked.
 | `fs_ls`, `fs_begin`, `fs_data`, `fs_end`, `fs_rm`, `fs_stat` | Map tile sync (SenseCAP and T5; the T-Embed and AMOLED answer `fs_err`) |
 | `traffic`, `traffic_done` | ADS-B aircraft for the traffic rules (boards with `traffic` in `caps`, the T5) |
 | `wifi_status`, `wifi_scan`, `wifi_join`, `wifi_forget`, `wifi_mode`, `wifi_config` | The T5's Wi-Fi (below) |
-| `gauge` | The T5's fuel gauge: `{"type":"gauge","profile":"ok","cell_mah":1500,"soc":…,"mv":…,"ma":…,"remaining_mah":…,"full_mah":…,"design_mah":…,"cycles":…,"soh":…,"learning":{"full":…,"vdq":…,"edv2":…},"battery_status":…,"operation_status":…,"charger":{"state":"fast","ichg_ma":…,"vreg_mv":…,"iinlim_ma":…}}` (`profile`: whether this boot found the cell profile in place, `ok`, or wrote it, `provisioned`; `ma` negative while discharging, `null` when unread; `learning`: the cycle's milestones, `full` once a charge has finished, `vdq` while the discharge after it still counts for learning, `edv2` once it reaches the low threshold; the status words raw, as TI's BQ27220 manual lays them out; `charger`: the BQ25896's state, `not_charging`, `pre_charge`, `fast` or `done`, and its fast-charge current, termination voltage and input limit, or `null` without one). For following a learning cycle, above |
+| `gauge` | The fuel gauge and charger (T5 and T-Embed): `{"type":"gauge","profile":"ok","cell_mah":1500,"soc":…,"mv":…,"ma":…,"remaining_mah":…,"full_mah":…,"design_mah":…,"cycles":…,"soh":…,"learning":{"full":…,"vdq":…,"edv2":…},"battery_status":…,"operation_status":…,"charger":{"state":"fast","ichg_ma":…,"vreg_mv":…,"iinlim_ma":…,"part":…}}` (`profile`: whether this boot found the cell profile in place, `ok`, or wrote it, `provisioned`; `ma` negative while discharging, `null` when unread; `learning`: the cycle's milestones, `full` once a charge has finished, `vdq` while the discharge after it still counts for learning, `edv2` once it reaches the low threshold; the status words raw, as TI's BQ27220 manual lays them out; `charger`: the BQ25896's state, `not_charging`, `pre_charge`, `fast` or `done`, its fast-charge current, termination voltage and input limit, and its part register (REG14, 70 on a BQ25896), or `null` without one). For following a learning cycle, above |
 
 Tile sync writes only `/tiles/<z>/<x>/<y>.jpg` or `.png` (decimal
 numbers, checked by `firmware/common/tile_path.h`), 64 KB at most for a
@@ -1062,7 +1065,10 @@ lands seconds after the command, and data that reads back as junk for
 seconds after the gauge re-initialises. The tests pin the exact bytes of a
 data-memory write. They also check that a gauge already holding the
 profile is never written, and that no failure leaves it unsealed or stuck
-in configuration mode, where it stops counting.
+in configuration mode, where it stops counting. The simulated BQ25896
+charger resets every register when its watchdog expires, as the real one
+does, which is why the charge current is set with the watchdog off; the
+tests also pin the `gauge` reply line.
 
 Every receiver shares one Remote ID decoder (`firmware/common/odid_decode.h`,
 with `gb46750_decode.h` for GB 46750-2025) and one radio core

@@ -153,7 +153,7 @@ project.
   not compatible with this project's GPL-3.0-or-later, so **no code from it
   is vendored or copied** — only the register facts. The PCA9555 accesses
   are from its datasheet.
-- `firmware/common/bq27220.h`, `bq27220_profiles.h`, `axp2101.h`, `bq25896.h` — written
+- `firmware/common/bq27220.h`, `bq27220_profiles.h`, `axp2101.h`, `bq25896.h`, `power_report.h` — written
   for this project. The BQ27220 commands and register map are from TI's
   technical reference manual (SLUUBD4). The data-memory write sequence and
   the delays that work follow the behaviour documented in Flipper Zero's

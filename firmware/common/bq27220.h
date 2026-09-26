@@ -269,6 +269,19 @@ inline Report provision(const Io& io, const Param* profile, size_t n) {
   return r;
 }
 
+// A provisioning result as a word for a log or a host.
+inline const char* result_name(Result r) {
+  switch (r) {
+    case Result::Ok: return "ok";
+    case Result::Provisioned: return "provisioned";
+    case Result::NotFound: return "not_found";
+    case Result::BusError: return "bus_error";
+    case Result::Locked: return "locked";
+    case Result::WriteFailed: return "write_failed";
+  }
+  return "unknown";
+}
+
 // Read-outs; -1 when the gauge does not answer.
 inline int soc_pct(const Io& io) {
   int v = detail::read_u16(io, detail::CMD_SOC);

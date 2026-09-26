@@ -16,6 +16,12 @@ namespace bq27220 {
 // off: reaching charge termination does not snap the count to full.
 constexpr uint16_t kGaugingConfig = 0x0D31;
 
+// The boards' BQ25896 fast-charge currents (bq25896.h rounds each down to
+// its 64 mA step): about 0.65C of each cell, instead of the charger's
+// 2048 mA power-on value. Here beside the cells so a test holds them to it.
+constexpr int kT5ChargeMa = 1000;      // -> 960 mA for the 1500 mAh cell
+constexpr int kTEmbedChargeMa = 845;   // -> 832 mA for the 1300 mAh cell
+
 // LilyGO T5 E-Paper S3 Pro: 3.7 V 1500 mAh cell.
 constexpr uint16_t kT5CellMah = 1500;
 constexpr Param kT5EpdProfile[] = {

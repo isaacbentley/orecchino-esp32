@@ -7,6 +7,7 @@
 #include "../common/bq27220.h"
 #include "../common/bq27220_profiles.h"
 #include "../common/bq25896.h"
+#include "../common/power_report.h"
 #include "t5_nmea.h"
 #include <Preferences.h>
 #include <esp_sleep.h>
@@ -99,11 +100,14 @@ static bool bq25896_write(uint8_t reg, uint8_t val) {
   return wr(s_charger, w, 2);
 }
 static const bq25896::Io kChargerIo = { bq25896_read, bq25896_write };
-// The fast-charge current for the T5's 1500 mAh cell: 960 mA (the chip's
-// 64 mA step at or below 1000 mA, about 0.65C) instead of its 2048 mA
-// power-on value (about 1.4C). Set at every boot: the chip keeps its
-// registers across an ESP reset but not across a battery disconnect.
-static const int T5_CHARGE_MA = 1000;
+// The fast-charge current for the T5's 1500 mAh cell (bq25896::kT5ChargeMa,
+// 960 mA) instead of the chip's 2048 mA power-on value. Set at boot and
+// checked every minute after (only reads while it holds): the chip keeps
+// its registers across an ESP reset but not across a battery disconnect.
+static void charger_apply() {
+  if (s_have_charger && !bq25896::set_charge_current(kChargerIo, bq27220::kT5ChargeMa))
+    Serial.println("[T5] charger: could not set the charge current");
+}
 
 // ---- PCA9555: read-modify-write on port 0 only; port 1 belongs to epdiy
 static bool pca_rmw(uint8_t reg, uint8_t clear, uint8_t set) {
@@ -357,31 +361,10 @@ bool periph_gauge_configured() {
 }
 bool periph_gauge_json(char* out, size_t n) {
   if (!s_have_gauge) return false;
-  static const char* const kResult[] = { "ok", "provisioned", "not_found", "bus_error", "locked", "write_failed" };
-  bq27220::State s = bq27220::state(kGaugeIo);
-  // The BQ25896's side of a charge: its state (REG0B CHRG_STAT), the
-  // fast-charge current it is set to (REG04 ICHG, 64 mA steps), the
-  // termination voltage (REG06 VREG, 3840 mV + 16 mV steps) and the input
-  // limit (REG00 IINLIM, 100 mA + 50 mA steps). Only the fast-charge
-  // current is this firmware's (T5_CHARGE_MA); the rest are the chip's.
-  static const char* const kChg[] = { "not_charging", "pre_charge", "fast", "done" };
-  char chg[128] = "null";
-  uint8_t r00 = 0, r06 = 0, r0b = 0;
-  int ichg = s_have_charger ? bq25896::charge_current_ma(kChargerIo) : -1;
-  if (ichg >= 0 && bq25896_read(0x00, &r00) && bq25896_read(0x06, &r06) && bq25896_read(0x0B, &r0b))
-    snprintf(chg, sizeof(chg), "{\"state\":\"%s\",\"ichg_ma\":%d,\"vreg_mv\":%d,\"iinlim_ma\":%d}",
-             kChg[(r0b >> 3) & 3], ichg, 3840 + ((r06 >> 2) & 0x3F) * 16, 100 + (r00 & 0x3F) * 50);
-  char ma[12] = "null";
-  if (s.ma_ok) snprintf(ma, sizeof(ma), "%d", s.ma);
-  snprintf(out, n,
-           "{\"type\":\"gauge\",\"profile\":\"%s\",\"cell_mah\":%u,\"soc\":%d,\"mv\":%d,\"ma\":%s,"
-           "\"remaining_mah\":%d,\"full_mah\":%d,\"design_mah\":%d,\"cycles\":%d,\"soh\":%d,"
-           "\"learning\":{\"full\":%s,\"vdq\":%s,\"edv2\":%s},"
-           "\"battery_status\":%d,\"operation_status\":%d,\"charger\":%s}\n",
-           kResult[(int)s_gauge_result], (unsigned)bq27220::kT5CellMah, s.soc_pct, s.mv, ma,
-           s.remaining_mah, s.full_mah, s.design_mah, s.cycles, s.soh_pct,
-           s.full ? "true" : "false", s.vdq ? "true" : "false", s.edv2 ? "true" : "false",
-           s.battery_status, s.operation_status, chg);
+  bq25896::State c;
+  bool chg = s_have_charger && bq25896::state(kChargerIo, &c);
+  power_report_json(out, n, bq27220::result_name(s_gauge_result), bq27220::kT5CellMah,
+                    bq27220::state(kGaugeIo), chg ? &c : nullptr);
   return true;
 }
 
@@ -763,8 +746,7 @@ void periph_begin() {
   if (present(BQ27220_ADDR)) { s_gauge = dev_add(BQ27220_ADDR); s_have_gauge = s_gauge != nullptr; }
   if (s_have_gauge) gauge_begin();   // before the input task shares the bus
   if (present(BQ25896_ADDR)) { s_charger = dev_add(BQ25896_ADDR); s_have_charger = s_charger != nullptr; }
-  if (s_have_charger && !bq25896::set_charge_current(kChargerIo, T5_CHARGE_MA))
-    Serial.println("[T5] charger: could not set the charge current");
+  charger_apply();
   if (present(PCF8563_ADDR)) {
     s_rtc = dev_add(PCF8563_ADDR);
     s_have_rtc = (s_rtc != nullptr);
@@ -805,6 +787,8 @@ void periph_begin() {
 }
 
 void periph_tick(uint32_t now) {
+  static uint32_t s_charger_ms = 0;
+  if (now - s_charger_ms >= 60000) { s_charger_ms = now; charger_apply(); }
   // A fix parked by the GPS reader becomes the home position here, on the loop.
   bool fix = false;
   double lat = 0, lon = 0;
