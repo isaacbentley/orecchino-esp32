@@ -51,7 +51,7 @@ c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I firmware/orecchino_t5epd tests/t5_gps_test.cpp -o "$BIN/t5_gps_test"
 "$BIN/t5_gps_test"
 
-echo "== Fuel gauges (C++ against simulated BQ27220 and AXP2101 chips)"
+echo "== Fuel gauges and charger (C++ against simulated BQ27220, AXP2101 and BQ25896 chips)"
 c++ -std=c++17 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Werror \
   -I firmware/common tests/gauge_test.cpp -o "$BIN/gauge_test"
 "$BIN/gauge_test"

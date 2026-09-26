@@ -309,6 +309,10 @@ wanders far from the real charge. At every boot the firmware compares the
 gauge with the 1500 mAh cell profile LilyGO publishes for this board and
 rewrites it only when they differ, which costs a few seconds once. The
 settings screen shows the capacity the percentage is counted against.
+The charger (a TI BQ25896) is set at every boot to charge at 960 mA,
+about 0.65C for this cell, instead of its 2048 mA power-on value; its I²C
+watchdog is switched off so the setting holds (an expired watchdog puts
+the chip back to its defaults).
 
 The profile starts the gauge at the cell's rated 1500 mAh; the gauge then
 learns the cell's real capacity by itself, from one uninterrupted cycle:

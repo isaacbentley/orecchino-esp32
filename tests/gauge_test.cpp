@@ -1,5 +1,5 @@
-// Host tests for the fuel-gauge code (firmware/common/bq27220.h,
-// bq27220_profiles.h, axp2101.h) against simulated chips. The BQ27220 fake
+// Host tests for the fuel-gauge and charger code (firmware/common/bq27220.h,
+// bq27220_profiles.h, axp2101.h, bq25896.h) against simulated chips. The BQ27220 fake
 // models what provisioning depends on: the sealed / unsealed / full-access
 // states and their keys, CONFIG UPDATE mode, data-memory block reads, writes
 // that only land with the right checksum and length, and RESET reloading
@@ -15,6 +15,7 @@
 #include "bq27220.h"
 #include "bq27220_profiles.h"
 #include "axp2101.h"
+#include "bq25896.h"
 
 static int g_fails = 0;
 #define CHECK(c, name) do { if (c) printf("ok   %s\n", name); else { printf("FAIL %s\n", name); g_fails++; } } while (0)
@@ -480,6 +481,57 @@ static void test_axp2101(void) {
   a_present = true;
 }
 
+// ------------------------------------------------------------------- BQ25896
+
+// A register file with the watchdog that matters: in host mode, when it
+// expires, every register goes back to its power-on value.
+static uint8_t C[0x15];
+static bool c_present = true;
+static int c_writes = 0;
+static void c_defaults() {
+  memset(C, 0, sizeof C);
+  C[0x04] = 0x20;   // ICHG 2048 mA, EN_PUMPX off
+  C[0x07] = 0x9D;   // EN_TERM, WATCHDOG 40 s, EN_TIMER, 12 h, JEITA_ISET
+}
+static void c_watchdog_expires() { if (C[0x07] & 0x30) c_defaults(); }
+static bool c_read(uint8_t r, uint8_t* v) { if (!c_present || r >= sizeof C) return false; *v = C[r]; return true; }
+static bool c_write(uint8_t r, uint8_t v) { if (!c_present || r >= sizeof C) return false; C[r] = v; c_writes++; return true; }
+static const bq25896::Io kChg = { c_read, c_write };
+
+static void test_bq25896(void) {
+  c_defaults(); c_present = true;
+  CHECK(bq25896::charge_current_ma(kChg) == 2048, "bq25896: power-on fast charge reads 2048 mA");
+  const uint8_t timer_before = C[0x07];
+  CHECK(bq25896::set_charge_current(kChg, 1000), "bq25896: set answers");
+  CHECK(bq25896::charge_current_ma(kChg) == 960 && bq25896::charge_current_ma(kChg) <= 1000 &&
+        1000 - bq25896::charge_current_ma(kChg) < 64,
+        "bq25896: 1000 mA asked -> 960 mA, the 64 mA step at or below it");
+  CHECK((C[0x07] & 0x30) == 0 && (C[0x07] & ~0x30) == (timer_before & ~0x30),
+        "bq25896: watchdog off, every other REG07 bit (termination, the safety timer) kept");
+  c_watchdog_expires();
+  CHECK(bq25896::charge_current_ma(kChg) == 960, "bq25896: with the watchdog off, the current outlives its timeout");
+  // Without the watchdog step, the same write would not have lasted.
+  c_defaults();
+  C[0x04] = 0x0F;
+  c_watchdog_expires();
+  CHECK(bq25896::charge_current_ma(kChg) == 2048, "bq25896: (the model) a live watchdog restores 2048 mA");
+  c_defaults();
+  C[0x04] = 0xA0;   // EN_PUMPX set
+  bq25896::set_charge_current(kChg, 1000);
+  CHECK(C[0x04] == 0x8F, "bq25896: EN_PUMPX kept");
+  c_writes = 0;
+  CHECK(bq25896::set_charge_current(kChg, 1000) && c_writes == 0, "bq25896: nothing written when already set");
+  c_defaults();
+  CHECK(bq25896::set_charge_current(kChg, 9000) && bq25896::charge_current_ma(kChg) == 3008,
+        "bq25896: clamped to the chip's 3008 mA");
+  C[0x04] = 0x7F;   // a code past the chip's range: it charges at 3008 mA
+  CHECK(bq25896::charge_current_ma(kChg) == 3008, "bq25896: an out-of-range code reads as the 3008 mA it gives");
+  c_present = false;
+  CHECK(!bq25896::set_charge_current(kChg, 1000) && bq25896::charge_current_ma(kChg) == -1,
+        "bq25896: no answer -> false / -1");
+  c_present = true;
+}
+
 int main(void) {
   test_provision_fresh();
   test_already_right();
@@ -489,6 +541,7 @@ int main(void) {
   test_readouts();
   test_profiles();
   test_axp2101();
+  test_bq25896();
   if (g_fails) printf("%d FAILED\n", g_fails); else printf("all gauge checks passed\n");
   return g_fails ? 1 : 0;
 }
