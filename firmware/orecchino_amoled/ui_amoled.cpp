@@ -2,12 +2,16 @@
 #include "board_amoled.h"
 #include "../common/ui_common.h"
 #include <Wire.h>
+#include "driver/gpio.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #include <Arduino_GFX_Library.h>
 #include <Adafruit_GFX.h>  // for its Fonts/ (GFXfont layout is shared)
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSansBold18pt7b.h>
+
+void rx_log_flush();
 
 #define W LCD_W
 #define H LCD_H
@@ -28,11 +32,135 @@ static Arduino_DataBus* s_bus;
 // the touch chip that answers on I2C tells us which revision — and so which
 // panel driver to build — since the QSPI panel has no address to probe.
 static Arduino_OLED*    s_panel;         // the AMOLED controller (brightness, flush target)
-// All drawing goes to an 8-bit palette canvas and reaches the panel as one
-// full-width bitmap per frame. These QSPI AMOLED controllers drop writes at
-// odd column addresses, so per-pixel glyph drawing straight to the panel
-// loses text (shapes survive because they are bulk even-aligned windows);
-// a canvas sidesteps that entirely, and 165 KB fits the C6 without PSRAM.
+// All drawing goes to a 4-bit (16-colour) palette canvas and reaches the panel
+// in 8-row full-width strips per frame. These QSPI AMOLED controllers drop
+// writes at odd column addresses, so per-pixel glyph drawing straight to the
+// panel loses text; a full-screen 8-bit canvas (165 KB) leaves too little
+// internal SRAM on the ESP32-C6 (no PSRAM) for both NimBLE and the Wi-Fi
+// driver, whereas a 4-bit canvas (82.4 KB + 2.9 KB strip buffer) saves ~80 KB
+// and leaves ample internal heap for both radios.
+class AmoledCanvas4 : public Arduino_GFX {
+public:
+  static constexpr int STRIP_H = 8;
+  AmoledCanvas4(int16_t w, int16_t h, Arduino_G* output)
+      : Arduino_GFX(w, h), _output(output) {}
+  ~AmoledCanvas4() override { free(_fb); }
+
+  bool begin(int32_t speed = GFX_NOT_DEFINED) override {
+    if (speed != GFX_SKIP_OUTPUT_BEGIN && !_output->begin(speed)) return false;
+    if (!_fb) {
+      _fb = (uint8_t*)malloc((size_t)(WIDTH * HEIGHT) / 2);
+      if (!_fb) return false;
+    }
+    reset_palette(C_BG);
+    memset(_fb, 0, (size_t)(WIDTH * HEIGHT) / 2);
+    return true;
+  }
+
+  void writePixelPreclipped(int16_t x, int16_t y, uint16_t color) override {
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+    uint8_t idx = get_color_index(color);
+    uint8_t& b = _fb[((int32_t)y * WIDTH + x) >> 1];
+    if (x & 1) b = (uint8_t)((b & 0x0F) | (idx << 4));
+    else       b = (uint8_t)((b & 0xF0) | idx);
+  }
+
+  void writeFillRectPreclipped(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) override {
+    if (w <= 0 || h <= 0) return;
+    if (x <= 0 && y <= 0 && w >= WIDTH && h >= HEIGHT) {
+      reset_palette(color);
+      memset(_fb, 0, (size_t)(WIDTH * HEIGHT) / 2);
+      return;
+    }
+    uint8_t idx = get_color_index(color);
+    uint8_t pair = (uint8_t)(idx | (idx << 4));
+    for (int16_t ry = y; ry < y + h; ++ry) {
+      uint8_t* row = _fb + ((int32_t)ry * (WIDTH / 2));
+      int16_t cx = x, rem = w;
+      if (cx & 1) {
+        row[cx >> 1] = (uint8_t)((row[cx >> 1] & 0x0F) | (idx << 4));
+        cx++;
+        rem--;
+      }
+      int16_t pairs = rem >> 1;
+      if (pairs > 0) {
+        memset(row + (cx >> 1), pair, (size_t)pairs);
+        cx += (int16_t)(pairs << 1);
+        rem -= (int16_t)(pairs << 1);
+      }
+      if (rem > 0) {
+        row[cx >> 1] = (uint8_t)((row[cx >> 1] & 0xF0) | idx);
+      }
+    }
+  }
+
+  void writeFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) override {
+    if (y < 0 || y >= HEIGHT || w == 0) return;
+    if (w < 0) { x += w + 1; w = -w; }
+    if (x < 0) { w += x; x = 0; }
+    if (x + w > WIDTH) w = WIDTH - x;
+    if (w > 0) writeFillRectPreclipped(x, y, w, 1, color);
+  }
+
+  void writeFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) override {
+    if (x < 0 || x >= WIDTH || h == 0) return;
+    if (h < 0) { y += h + 1; h = -h; }
+    if (y < 0) { h += y; y = 0; }
+    if (y + h > HEIGHT) h = HEIGHT - y;
+    if (h > 0) writeFillRectPreclipped(x, y, 1, h, color);
+  }
+
+  void flush(bool force_flush = false) override {
+    (void)force_flush;
+    if (!_output || !_fb) return;
+    for (int16_t y = 0; y < HEIGHT; y += STRIP_H) {
+      int16_t sh = (y + STRIP_H <= HEIGHT) ? STRIP_H : (HEIGHT - y);
+      const uint8_t* src = _fb + ((int32_t)y * (WIDTH / 2));
+      int32_t nbytes = ((int32_t)sh * WIDTH) >> 1;
+      for (int32_t i = 0; i < nbytes; ++i) {
+        uint8_t b = src[i];
+        _strip[i << 1]       = (uint8_t)(b & 0x0F);
+        _strip[(i << 1) | 1] = (uint8_t)(b >> 4);
+      }
+      _output->drawIndexedBitmap(0, y, _strip, _palette, WIDTH, sh);
+    }
+  }
+
+private:
+  void reset_palette(uint16_t bg) {
+    _palette[0] = bg;
+    _pal_n = 1;
+  }
+
+  uint8_t get_color_index(uint16_t color) {
+    for (uint8_t i = 0; i < _pal_n; ++i) {
+      if (_palette[i] == color) return i;
+    }
+    if (_pal_n < 16) {
+      _palette[_pal_n] = color;
+      return _pal_n++;
+    }
+    int r0 = (color >> 11) & 0x1F, g0 = (color >> 5) & 0x3F, b0 = color & 0x1F;
+    uint8_t best = 0;
+    int best_d = 0x7FFFFFFF;
+    for (uint8_t i = 0; i < 16; ++i) {
+      uint16_t c = _palette[i];
+      int dr = r0 - ((c >> 11) & 0x1F);
+      int dg = g0 - ((c >> 5) & 0x3F);
+      int db = b0 - (c & 0x1F);
+      int d = dr * dr * 4 + dg * dg + db * db * 4;
+      if (d < best_d) { best_d = d; best = i; }
+    }
+    return best;
+  }
+
+  Arduino_G* _output = nullptr;
+  uint8_t*   _fb = nullptr;
+  uint16_t   _palette[16] = {};
+  uint8_t    _pal_n = 0;
+  uint8_t    _strip[LCD_W * STRIP_H];
+};
+
 static Arduino_GFX*     s_gfx;
 static uint8_t          s_tp_addr = 0;   // 0x38 FT3168 / 0x15 CST816, 0 = none
 enum View : uint8_t { V_LIST, V_DETAIL, V_SPECTRUM };
@@ -50,13 +178,21 @@ static uint8_t s_bright = BRIGHT;
 #define N_CH 13
 #define WF_ROWS 36
 static volatile bool s_spec = false;
-static volatile int32_t s_wsum[N_CH + 1];
-static volatile uint16_t s_wcnt[N_CH + 1];
+static portMUX_TYPE s_spec_mux = portMUX_INITIALIZER_UNLOCKED;
+static int32_t s_wsum[N_CH + 1];
+static uint16_t s_wcnt[N_CH + 1];
 static volatile uint8_t s_dwell = 0;
 static float   s_a24[N_CH];
 static uint8_t s_wf[WF_ROWS][13];
 static int     s_wf_head = 0;
-void ui_feed_wifi(uint8_t chan, int8_t rssi) { if (s_spec && chan >= 1 && chan <= N_CH) { s_wsum[chan] += rssi; s_wcnt[chan] += 1; } }
+void ui_feed_wifi(uint8_t chan, int8_t rssi) {
+  if (s_spec && chan >= 1 && chan <= N_CH) {
+    portENTER_CRITICAL(&s_spec_mux);
+    s_wsum[chan] += rssi;
+    s_wcnt[chan] += 1;
+    portEXIT_CRITICAL(&s_spec_mux);
+  }
+}
 void ui_set_wifi_channel(uint8_t chan) { s_dwell = chan; }
 bool ui_spectrum_active() { return s_spec; }
 
@@ -76,7 +212,7 @@ static void meter(int x, int y, int w, int rssi, uint16_t col) {
   s_gfx->fillRect(x, y, (int)(w * ui_rssi01(rssi)), 4, col);
 }
 static uint16_t heat(uint8_t v) {  // 0..255 -> black-blue-cyan-yellow-white
-  v &= 0xF8;                        // 32 steps: an indexed canvas has 256 slots
+  v &= 0xE0;                        // 8 steps: fits the 16-slot 4-bit canvas palette
   if (v < 64)  return RGB565(0, 0, v * 2);
   if (v < 128) return RGB565(0, (v - 64) * 4, 128 + (v - 64) * 2);
   if (v < 192) return RGB565((v - 128) * 4, 255, 255 - (v - 128) * 4);
@@ -207,7 +343,29 @@ static void draw_list() {
   s_dirty = false;
 }
 
+static bool iox_read(uint8_t reg, uint8_t* v) {
+  Wire.beginTransmission(TCA9554_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)TCA9554_ADDR, 1) != 1) return false;
+  *v = (uint8_t)Wire.read();
+  return true;
+}
+
+static void iox_write(uint8_t reg, uint8_t v) {
+  Wire.beginTransmission(TCA9554_ADDR); Wire.write(reg); Wire.write(v); Wire.endTransmission();
+}
+
+static void iox_update(uint8_t reg, uint8_t clear_mask, uint8_t set_mask, uint8_t fallback) {
+  uint8_t v = fallback;
+  iox_read(reg, &v);
+  v = (uint8_t)((v & ~clear_mask) | set_mask);
+  iox_write(reg, v);
+}
+
 void amoled_power_off() {
+  s_spec = false;
+  rx_log_flush();
   if (s_gfx) {
     s_gfx->startWrite();
     s_gfx->fillScreen(C_BG);
@@ -218,20 +376,24 @@ void amoled_power_off() {
     s_gfx->setFont(&FreeSansBold9pt7b);
     s_gfx->setTextColor(C_MUTED);
     s_gfx->setCursor(70, 240);
-    s_gfx->print("Hold BOOT to wake");
+    s_gfx->print("Press BOOT to wake");
     s_gfx->endWrite();
     s_gfx->flush();
     delay(500);
   }
 
+  // Wait for the user to release BOOT (or up to 3 s) so the held button
+  // does not immediately trigger the wakeup interrupt on entry to sleep.
+  uint32_t t0 = millis();
+  while (digitalRead(PIN_BOOT_BTN) == LOW && millis() - t0 < 3000) delay(10);
+  delay(50);
+
   // Blank panel
   if (s_panel) s_panel->setBrightness(0);
 
-  // Turn off display power and touch power via TCA9554
-  Wire.beginTransmission(TCA9554_ADDR);
-  Wire.write(0x01); // Output Port register
-  Wire.write(0x00); // clear P4 (LCD) and P5 (TP)
-  Wire.endTransmission();
+  // Turn off display power and touch power via TCA9554 while preserving other pins
+  const uint8_t pwr_mask = (uint8_t)((1 << IOX_LCD_PWR) | (1 << IOX_TP_PWR));
+  iox_update(0x01, pwr_mask, 0x00, 0x00);
 
   // Send power off command to AXP2101 PMU
   Wire.beginTransmission(AXP2101_ADDR);
@@ -241,9 +403,13 @@ void amoled_power_off() {
 
   delay(200);
 
-  // Fallback if USB power is connected or PMU power off not triggered
-  esp_sleep_enable_ext1_wakeup(1ULL << PIN_BOOT_BTN, ESP_EXT1_WAKEUP_ANY_LOW);
-  esp_deep_sleep_start();
+  // Fallback when USB VBUS keeps the 3.3V rail alive: PIN_BOOT_BTN (GPIO9) is
+  // an HP GPIO on ESP32-C6 (not an LP GPIO 0..7), so ext1 deep-sleep wakeup is
+  // unsupported on GPIO9. Use GPIO low-level wakeup in light sleep, then reboot.
+  gpio_wakeup_enable((gpio_num_t)PIN_BOOT_BTN, GPIO_INTR_LOW_LEVEL);
+  esp_sleep_enable_gpio_wakeup();
+  esp_light_sleep_start();
+  esp_restart();
 }
 
 static void draw_detail() {
@@ -311,10 +477,12 @@ static void draw_spectrum() {
   draw_top(sm, "2.4 GHz SPECTRUM");
   txt(&FreeSansBold9pt7b, 12, 54, C_MUTED, "Wi-Fi only");
   for (int c = 1; c <= 13; c++) {
+    portENTER_CRITICAL(&s_spec_mux);
     uint16_t cnt = s_wcnt[c];
     int32_t sum = s_wsum[c];
     s_wcnt[c] = 0;
     s_wsum[c] = 0;
+    portEXIT_CRITICAL(&s_spec_mux);
     if (cnt) s_a24[c - 1] = s_a24[c - 1] * 0.5f + ((float)sum / cnt) * 0.5f;
     else if (c == s_dwell) s_a24[c - 1] = s_a24[c - 1] * 0.8f - 115 * 0.2f;
     else s_a24[c - 1] -= 0.5f;
@@ -357,10 +525,6 @@ static bool touch_read(int* x, int* y) {
   return true;
 }
 
-static void iox_write(uint8_t reg, uint8_t v) {
-  Wire.beginTransmission(TCA9554_ADDR); Wire.write(reg); Wire.write(v); Wire.endTransmission();
-}
-
 static bool i2c_present(uint8_t a) {
   Wire.beginTransmission(a);
   return Wire.endTransmission() == 0;
@@ -369,18 +533,21 @@ static bool i2c_present(uint8_t a) {
 bool ui_begin() {
   pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
   pinMode(PIN_TP_INT, INPUT_PULLUP);
-  // Which revision? The touch chip that answers decides panel + touch driver.
-  bool co5300 = !i2c_present(0x38);           // no FT3168 -> newer CO5300 rev
-  s_tp_addr = i2c_present(0x38) ? 0x38 : i2c_present(0x15) ? 0x15 : 0;
   // TCA9554: P4 = display power, P5 = touch power. This board has no panel
-  // reset line — power-cycling P4 IS the reset — so pulse low, then hold high
-  // and wait 500 ms for the controller to come up before any QSPI init (a
-  // shorter wait leaves the panel dark because init runs before it is ready).
-  iox_write(0x03, (uint8_t)~((1 << IOX_LCD_PWR) | (1 << IOX_TP_PWR)));  // P4/P5 output
-  iox_write(0x01, 0x00);                                               // power off
+  // reset line — power-cycling P4/P5 IS the reset — so pulse low, then hold
+  // high and wait 500 ms for both controllers to come up BEFORE probing the
+  // touch chip on I2C or initializing QSPI.
+  const uint8_t pwr_mask = (uint8_t)((1 << IOX_LCD_PWR) | (1 << IOX_TP_PWR));
+  iox_update(0x03, pwr_mask, 0x00, (uint8_t)~pwr_mask);  // P4/P5 output
+  iox_update(0x01, pwr_mask, 0x00, 0x00);                // power off
   delay(60);
-  iox_write(0x01, (1 << IOX_LCD_PWR) | (1 << IOX_TP_PWR));             // power on
+  iox_update(0x01, pwr_mask, pwr_mask, pwr_mask);        // power on
   delay(500);
+  // Which revision? Now that P5 is powered, the touch chip that answers
+  // decides both the panel and touch driver.
+  bool ft3168 = i2c_present(0x38);
+  bool co5300 = !ft3168;                                 // no FT3168 -> newer CO5300 rev
+  s_tp_addr = ft3168 ? 0x38 : (i2c_present(0x15) ? 0x15 : 0);
   s_bus = new Arduino_ESP32QSPI(PIN_LCD_CS, PIN_LCD_SCK, PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3);
   // Pick the panel driver from the detected revision. CO5300 needs a 16-px
   // column offset; SH8601 starts at 0.
@@ -388,8 +555,8 @@ bool ui_begin() {
   else        s_panel = new Arduino_SH8601(s_bus, GFX_NOT_DEFINED, 0, LCD_W, LCD_H);
   // The canvas's begin() initialises its output (the panel + QSPI bus) itself;
   // calling the panel's begin() as well re-inits the SPI bus and aborts.
-  Arduino_Canvas_Indexed* cv = new Arduino_Canvas_Indexed(LCD_W, LCD_H, s_panel);
-  if (!cv->begin()) return false;      // panel init + the 165 KB framebuffer
+  AmoledCanvas4* cv = new AmoledCanvas4(LCD_W, LCD_H, s_panel);
+  if (!cv->begin()) return false;      // panel init + the 82 KB 4-bit framebuffer
   s_gfx = cv;
   s_panel->setBrightness(0);           // dark while the first frame is painted
   s_gfx->fillScreen(C_BG);
@@ -400,6 +567,7 @@ bool ui_begin() {
 }
 
 void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
+  if (!s_gfx || !s_panel) return;
   s_now = now; s_ble_ok = ble_ok; s_batt = batt_pct;
 
   // touch: tap vs drag
@@ -439,35 +607,52 @@ void ui_tick(uint32_t now, bool ble_ok, int batt_pct) {
     if (t) s_last_touch = now;
     t_was = t;
   }
-  // BOOT button: tap = back to list; hold 1.5s = spectrum; hold 3s = power off
-  static bool k_was = false; static uint32_t k_down = 0;
-  static bool k_spec_fired = false; static bool k_pwr_fired = false;
+  // BOOT button: tap = back to list; hold 1.5..3s (on release) = spectrum; hold 3s = power off
+  static bool k_was = false; static uint32_t k_down = 0, k_last_prog = 0;
+  static bool k_pwr_fired = false;
   bool k = digitalRead(PIN_BOOT_BTN) == LOW;
-  if (k && !k_was) { k_down = now; k_spec_fired = false; k_pwr_fired = false; }
-  if (k && !k_pwr_fired && now - k_down >= 400) {
+  if (k && !k_was) { k_down = now; k_last_prog = 0; k_pwr_fired = false; }
+  if (k && !k_pwr_fired && now - k_down >= 400 && now - k_last_prog >= 50) {
+    k_last_prog = now;
     int prog_w = (int)(W * (now - k_down) / 3000);
     if (prog_w > W) prog_w = W;
-    uint16_t col = (now - k_down >= 1500) ? C_DANGER : C_ACCENT;
+    uint16_t col = (now - k_down >= 2200) ? C_DANGER : (now - k_down >= 1500) ? C_OK : C_ACCENT;
     s_gfx->startWrite();
     s_gfx->fillRect(0, 0, prog_w, 3, col);
     s_gfx->endWrite();
-  }
-  if (k && !k_spec_fired && now - k_down > 1500) {
-    k_spec_fired = true;
-    if (s_view != V_SPECTRUM) {
-      memset((void*)s_wsum, 0, sizeof(s_wsum)); memset((void*)s_wcnt, 0, sizeof(s_wcnt));
-      memset(s_a24, 0, sizeof(s_a24)); memset(s_wf, 0, sizeof(s_wf));
-      s_gfx->fillScreen(C_BG);
-      s_spec = true; s_view = V_SPECTRUM;
-    } else { s_spec = false; s_view = V_LIST; }
-    s_dirty = true; s_last_touch = now;
+    s_gfx->flush();
   }
   if (k && !k_pwr_fired && now - k_down > 3000) {
     k_pwr_fired = true;
     amoled_power_off();
   }
-  if (!k && k_was && !k_spec_fired && !k_pwr_fired && now - k_down > 30) {
-    s_view = V_LIST; s_spec = false; s_dirty = true; s_last_touch = now;
+  if (!k && k_was && !k_pwr_fired) {
+    uint32_t held = now - k_down;
+    if (held > 1500) {
+      if (s_view != V_SPECTRUM) {
+        portENTER_CRITICAL(&s_spec_mux);
+        memset(s_wsum, 0, sizeof(s_wsum));
+        memset(s_wcnt, 0, sizeof(s_wcnt));
+        portEXIT_CRITICAL(&s_spec_mux);
+        memset(s_a24, 0, sizeof(s_a24));
+        memset(s_wf, 0, sizeof(s_wf));
+        s_gfx->fillScreen(C_BG);
+        s_spec = true;
+        s_view = V_SPECTRUM;
+      } else {
+        s_spec = false;
+        s_view = V_LIST;
+      }
+      s_dirty = true;
+      s_top_sig = 0;
+      s_last_touch = now;
+    } else if (held > 30) {
+      s_view = V_LIST;
+      s_spec = false;
+      s_dirty = true;
+      s_top_sig = 0;
+      s_last_touch = now;
+    }
   }
   k_was = k;
 

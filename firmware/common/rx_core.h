@@ -330,9 +330,14 @@ static void handle_adv(const uint8_t* addr, int rssi, uint8_t phy,
 // only an extended advertisement that arrives in fragments is copied, into
 // a small fixed table, until its last fragment lands.
 
-struct BleFrag { bool used; uint8_t addr[6], sid; uint16_t len; uint32_t ms; uint8_t data[256]; };
+struct BleFrag { bool used, poisoned; uint8_t addr[6], sid; uint16_t len; uint32_t ms; uint8_t data[256]; };
 #define BLE_FRAG_N 4
 static BleFrag* s_frag = ext_new<BleFrag>(BLE_FRAG_N);
+static uint8_t s_frag_active = 0;
+static inline void ble_frag_release(BleFrag* f) {
+  f->used = false;
+  s_frag_active &= (uint8_t)~(1u << (f - s_frag));
+}
 static bool    s_ble_scanning = false;
 static void    rx_ble_scan(bool on);
 
@@ -346,7 +351,11 @@ static int rx_gap_event(struct ble_gap_event* ev, void*) {
   if (ev->type == BLE_GAP_EVENT_EXT_DISC) {
     const struct ble_gap_ext_disc_desc& d = ev->ext_disc;
     uint8_t phy = d.prim_phy;                        // 1 = 1M, 3 = coded
-    if (d.sec_phy == 3) phy = 3;                     // payload rode long range
+    if (d.sec_phy == 2 || d.sec_phy == 3) phy = d.sec_phy;  // payload rode 2M or long range
+    if (!s_frag_active && d.data_status == BLE_GAP_EXT_ADV_DATA_STATUS_COMPLETE) {
+      ble_report(&d.addr, d.rssi, phy, d.data, d.length_data);
+      return 0;
+    }
     // A fragment continues an assembly for the same advertiser and set.
     // One whose last fragment never came (older than a second) is dropped,
     // not continued: the next advertisement must not land on its tail.
@@ -354,12 +363,15 @@ static int rx_gap_event(struct ble_gap_event* ev, void*) {
     uint32_t now_ms = millis();
     for (int i = 0; i < BLE_FRAG_N; i++) {
       BleFrag& x = s_frag[i];
-      if (x.used && x.sid == d.sid && !memcmp(x.addr, d.addr.val, 6)) {
-        if (now_ms - x.ms > 1000) x.used = false; else f = &x;
-        break;
-      }
+      if (x.used && now_ms - x.ms > 1000) ble_frag_release(&x);
+      if (x.used && x.sid == d.sid && !memcmp(x.addr, d.addr.val, 6)) f = &x;
     }
     bool more = d.data_status == BLE_GAP_EXT_ADV_DATA_STATUS_INCOMPLETE;
+    if (d.data_status != BLE_GAP_EXT_ADV_DATA_STATUS_COMPLETE && !more) {
+      if (f) ble_frag_release(f);
+      s_cnt_dropped += 1;  // controller-truncated data is not a complete RID report
+      return 0;
+    }
     if (!f && !more) {                               // the common case: one whole report
       ble_report(&d.addr, d.rssi, phy, d.data, d.length_data);
       return 0;
@@ -367,16 +379,26 @@ static int rx_gap_event(struct ble_gap_event* ev, void*) {
     if (!f) {                                        // first fragment: take a slot (oldest if full)
       for (int i = 0; i < BLE_FRAG_N; i++)
         if (!s_frag[i].used || now_ms - s_frag[i].ms > 1000) { f = &s_frag[i]; break; }
-      if (!f) f = &s_frag[0];
-      f->used = true; f->sid = d.sid; f->len = 0; f->ms = now_ms;
+      if (!f) {
+        f = &s_frag[0];
+        for (int i = 1; i < BLE_FRAG_N; ++i)
+          if (now_ms - s_frag[i].ms > now_ms - f->ms) f = &s_frag[i];
+      }
+      s_frag_active |= (uint8_t)(1u << (f - s_frag));
+      f->used = true; f->poisoned = false; f->sid = d.sid; f->len = 0; f->ms = now_ms;
       memcpy(f->addr, d.addr.val, 6);
     }
-    size_t room = sizeof(f->data) - f->len, n = d.length_data < room ? d.length_data : room;
-    memcpy(f->data + f->len, d.data, n);
-    f->len += n;
-    if (!more) {                                     // complete (or truncated): report it
-      ble_report(&d.addr, d.rssi, phy, f->data, f->len);
-      f->used = false;
+    if (!f->poisoned && d.length_data > sizeof(f->data) - f->len) {
+      f->poisoned = true;
+      s_cnt_dropped += 1;
+    }
+    if (!f->poisoned) {
+      memcpy(f->data + f->len, d.data, d.length_data);
+      f->len += d.length_data;
+    }
+    if (!more) {
+      if (!f->poisoned) ble_report(&d.addr, d.rssi, phy, f->data, f->len);
+      ble_frag_release(f);
     }
   } else if (ev->type == BLE_GAP_EVENT_DISC_COMPLETE) {
     // Forever means forever -- unless a board hook has the radios. The
@@ -384,7 +406,9 @@ static int rx_gap_event(struct ble_gap_event* ev, void*) {
     // the loop while an assembly may be under way.
     s_ble_scanning = false;
     for (int i = 0; i < BLE_FRAG_N; i++) s_frag[i].used = false;
+    s_frag_active = 0;
     if (!rx_hook_paused()) rx_ble_scan(true);
+    s_ble_ok = s_ble_scanning;
   }
   return 0;
 }
@@ -403,6 +427,7 @@ static void rx_ble_scan(bool on) {
     int rc = ble_gap_ext_disc(BLE_OWN_ADDR_PUBLIC, 0 /* forever */, 0, 0 /* no dup filter */,
                               0, 0, &p, &p, rx_gap_event, nullptr);
     s_ble_scanning = rc == 0 || rc == BLE_HS_EALREADY;
+    s_ble_ok = s_ble_scanning;
   } else if (!on && s_ble_scanning) {
     ble_gap_disc_cancel();   // no DISC_COMPLETE follows: a stale fragment ages out in a second
     s_ble_scanning = false;
@@ -410,9 +435,13 @@ static void rx_ble_scan(bool on) {
 }
 
 static bool ble_start_scanner() {
-  NimBLEDevice::init("");
+  // Called on startup or controller resynchronization.
+  s_ble_scanning = false;
+  s_frag_active = 0;
+  for (int i = 0; i < BLE_FRAG_N; ++i) s_frag[i].used = false;
   s_ble_ext = true;          // scanning 1M + coded PHY
   rx_ble_scan(true);
+  s_ble_ok = s_ble_scanning;
   return s_ble_scanning;
 }
 #else
@@ -426,7 +455,7 @@ class RidScanCallbacks : public NimBLEScanCallbacks {
     uint8_t phy = 0;
 #if CONFIG_BT_NIMBLE_EXT_ADV
     phy = dev->getPrimaryPhy();                     // 1 = 1M, 3 = coded
-    if (dev->getSecondaryPhy() == 3) phy = 3;       // payload rode long range
+    if (dev->getSecondaryPhy() == 2 || dev->getSecondaryPhy() == 3) phy = dev->getSecondaryPhy();
 #endif
     const std::vector<uint8_t>& p = dev->getPayload();
     handle_adv(mac, dev->getRSSI(), phy, p.data(), (int)p.size());
@@ -434,18 +463,17 @@ class RidScanCallbacks : public NimBLEScanCallbacks {
 
   void onScanEnd(const NimBLEScanResults&, int) override {
     // Forever means forever — unless a board hook has the radios.
-    if (s_scan && !rx_hook_paused()) s_scan->start(0, false, true);
+    if (s_scan && !rx_hook_paused()) s_ble_ok = s_scan->start(0, false, true);
   }
 };
 
 static void rx_ble_scan(bool on) {
   if (!s_scan) return;
-  if (on) s_scan->start(0, false, true);
+  if (on) s_ble_ok = s_scan->start(0, false, true);
   else s_scan->stop();               // onScanEnd guard keeps it down
 }
 
 static bool ble_start_scanner() {
-  NimBLEDevice::init("");
   s_scan = NimBLEDevice::getScan();
   if (!s_scan) return false;
   static RidScanCallbacks cb;
@@ -463,7 +491,8 @@ static bool ble_start_scanner() {
 #if CONFIG_BT_NIMBLE_EXT_ADV
   s_ble_ext = true;          // scanning 1M + coded PHY (SCAN_ALL default)
 #endif
-  return s_scan->start(0 /* forever */, false, true);
+  s_ble_ok = s_scan->start(0 /* forever */, false, true);
+  return s_ble_ok;
 }
 
 #endif
@@ -1025,8 +1054,9 @@ static size_t format_log_rec(const LogRec* r, int32_t i, bool active) {
 /// live contacts) last heard at or after that UTC second. Live contacts
 /// ignore `since`.
 static void emit_log(uint32_t now, HostSrc dst, uint32_t since = 0, uint32_t after_utc = 0) {
-  static LogRec* recs = ext_new<LogRec>(LOG_MAX + TRK_MAX);
-  static bool* live_of = ext_new<bool>(LOG_MAX + TRK_MAX);
+  LogRec* recs = ext_new<LogRec>(LOG_MAX + TRK_MAX);
+  bool* live_of = ext_new<bool>(LOG_MAX + TRK_MAX);
+  if (!recs || !live_of) { free(recs); free(live_of); return; }
   int n = 0, live = 0;
   RX_LOCK();
   int held = s_log_n;
@@ -1064,6 +1094,8 @@ static void emit_log(uint32_t now, HostSrc dst, uint32_t since = 0, uint32_t aft
     host_write_to(dst, (const uint8_t*)s_jb, len);
     cut = host_reply_drops(dst) != drops0;
   }
+  free(recs);
+  free(live_of);
   RX_LOCK();
   jbegin(s_jb, JLINE_MAX);
   jraw("{\"type\":\"log_done\",\"n\":"); juint(held);
@@ -1082,12 +1114,17 @@ static void emit_log(uint32_t now, HostSrc dst, uint32_t since = 0, uint32_t aft
 /// Write the match log to NVS now if anything is pending: the explicit
 /// save points (power-off, mode switch) between the rare timed saves.
 void rx_log_flush() {
-  static LogImage* img = ext_new<LogImage>();
-  bool save = false;
+  LogImage* img = nullptr;
   RX_LOCK();
-  if (s_log_dirty) { log_snapshot(img); save = true; }
+  if (s_log_dirty) {
+    img = ext_new<LogImage>();
+    if (img) log_snapshot(img);
+  }
   RX_UNLOCK();
-  if (save) log_write(img);
+  if (img) {
+    log_write(img);
+    free(img);
+  }
 }
 
 /// Clear the match log (the host's log_clear, the T5 SYSTEM screen, the
@@ -1345,12 +1382,14 @@ static void poll_host_serial(uint32_t now) {
   static char* buf = (char*)ext_calloc(RX_HOST_LINE_MAX);
   static int len = 0;
   static bool overlong = false;
-  for (int ch; (ch = host_serial_getc()) >= 0;) {
+  int lines = 0;
+  for (int ch; lines < 16 && (ch = host_serial_getc()) >= 0;) {
     char c = (char)ch;
     if (c == '\n' || c == '\r') {
       if (!overlong && len > 0) {
         buf[len] = 0;
         handle_host_line(buf, now, SRC_SERIAL);
+        lines++;
       }
       len = 0;
       overlong = false;
@@ -1520,13 +1559,26 @@ static void rx_tick(uint32_t now) {
   }
 
   // Match log: snapshot under the lock, write flash outside it.
-  static LogImage* s_img = ext_new<LogImage>();
-  bool save = false;
-  RX_LOCK();
-  log_uptime_tick(now);   // the log's 64-bit clock follows the loop
-  if (log_due(now)) { log_snapshot(s_img); save = true; }
-  RX_UNLOCK();
-  if (save) log_write(s_img);
+#if RX_ASYNC
+  static uint32_t last_maintenance = 0;
+  if (now - last_maintenance >= 100) {
+    last_maintenance = now;
+#endif
+    LogImage* s_img = nullptr;
+    RX_LOCK();
+    log_uptime_tick(now);   // the log's 64-bit clock follows the loop
+    if (log_due(now)) {
+      s_img = ext_new<LogImage>();
+      if (s_img) log_snapshot(s_img);
+    }
+    RX_UNLOCK();
+    if (s_img) {
+      log_write(s_img);
+      free(s_img);
+    }
+#if RX_ASYNC
+  }
+#endif
 
 #if RX_ASYNC
   // The screen's copy, refreshed only when the live table moved.

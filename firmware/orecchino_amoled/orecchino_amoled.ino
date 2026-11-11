@@ -45,6 +45,8 @@ static const axp2101::Io kPmu = { pmu_read, pmu_write };
 // Percent, or -1 with no battery fitted or no answer from the PMU.
 static int batt_pct() { return axp2101::batt_pct(kPmu); }
 
+static bool s_disp = false;
+
 void setup() {
   // Host lines run to 1.6 KB (TFR polygons, tile chunks) and land in one
   // USB burst; the default CDC ring buffer cannot hold one whole line.
@@ -54,8 +56,8 @@ void setup() {
   while (!Serial && millis() - t0 < 2000) delay(10);
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   axp2101::begin(kPmu);   // battery detection + fuel gauge on, or 0xA4 means nothing
-  bool disp = ui_begin();
-  rx_begin(disp ? ",\"display\":true" : ",\"display\":false");
+  s_disp = ui_begin();
+  rx_begin(s_disp ? ",\"display\":true" : ",\"display\":false");
 }
 
 void loop() {
@@ -74,6 +76,6 @@ void loop() {
   if (now - last_batt >= 10000 || last_batt == 0) { last_batt = now; batt = batt_pct(); }
   RxStats st;
   rx_stats(&st);
-  ui_tick(now, st.ble_ok, batt);
+  if (s_disp) ui_tick(now, st.ble_ok, batt);
   delay(3);
 }
