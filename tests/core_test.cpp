@@ -661,6 +661,83 @@ static void test_sniffer(void) {
   CHECK(t && !t->has_pos, "sniffer: 0,0 is no position");
 }
 
+/// A beacon with nothing in it but an SSID (empty: hidden), sent from `sa`.
+static std::vector<uint8_t> plain_beacon(const uint8_t* sa, const char* ssid) {
+  std::vector<uint8_t> f;
+  unhex("80000000ffffffffffff", f);                      // beacon, to everyone
+  f.insert(f.end(), sa, sa + 6); f.insert(f.end(), sa, sa + 6);   // SA, BSSID
+  unhex("0000" "0000000000000000" "6400" "0000", f);     // sequence, timestamp, interval, capabilities
+  f.push_back(0); f.push_back((uint8_t)strlen(ssid)); f.insert(f.end(), ssid, ssid + strlen(ssid));
+  return f;
+}
+
+// A DJI Wi-Fi device with no Remote ID: an access point in DJI's address
+// block 0C:9A:E6 is reported as a dji_wifi line, spaced per address, and
+// makes no contact. Anything else, and a frame that carries Remote ID, is
+// not.
+static void test_dji_wifi(void) {
+  uint32_t millis_was = g_millis;
+  memset(s_dji_wifi_seen, 0, sizeof s_dji_wifi_seen);
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  const uint8_t A[6] = { 0x0C, 0x9A, 0xE6, 0x01, 0x02, 0x03 };
+  const uint8_t B[6] = { 0x0C, 0x9A, 0xE6, 0x0A, 0x0B, 0x0C };
+  const uint8_t OTHER[6] = { 0x8C, 0x1E, 0xD9, 0x01, 0x02, 0x03 };
+
+  feed_frame(plain_beacon(A, "DJI-MINI4PRO-A1B2"));
+  CHECK(count_in(Serial.out, "\"type\":\"dji_wifi\"") == 1 &&
+        json_has("{\"type\":\"dji_wifi\",\"mac\":\"0C:9A:E6:01:02:03\",\"rssi\":-40,\"ch\":6,\"ssid\":\"DJI-MINI4PRO-A1B2\"}\n"),
+        "dji_wifi: an access point in DJI's block is one line: address, level, channel, SSID");
+  CHECK(!by_mac(A) && !json_has("\"type\":\"rid\""), "dji_wifi: it makes no contact and no rid line");
+
+  // Ten beacons a second from one address are one line in DJI_WIFI_MIN_MS.
+  for (int i = 0; i < 5; i++) { g_millis += 100; feed_frame(plain_beacon(A, "DJI-MINI4PRO-A1B2")); }
+  CHECK(count_in(Serial.out, "\"type\":\"dji_wifi\"") == 1, "dji_wifi: a repeat inside the spacing is not reported");
+  feed_frame(plain_beacon(B, ""));
+  CHECK(count_in(Serial.out, "\"type\":\"dji_wifi\"") == 2 &&
+        json_has("{\"type\":\"dji_wifi\",\"mac\":\"0C:9A:E6:0A:0B:0C\",\"rssi\":-40,\"ch\":6}\n"),
+        "dji_wifi: another address is spaced on its own, and a hidden SSID is left out");
+  g_millis += DJI_WIFI_MIN_MS;
+  feed_frame(plain_beacon(A, "DJI-MINI4PRO-A1B2"));
+  CHECK(count_in(Serial.out, "\"mac\":\"0C:9A:E6:01:02:03\"") == 2, "dji_wifi: the same address is reported again once the spacing has passed");
+
+  // Another maker's access point with the same name is nothing.
+  Serial.out.clear();
+  feed_frame(plain_beacon(OTHER, "DJI-MINI4PRO-A1B2"));
+  CHECK(Serial.out.find("dji_wifi") == std::string::npos, "dji_wifi: an address outside the block is not reported");
+
+  // A frame from the block that carries Remote ID is Remote ID, once.
+  std::vector<uint8_t> rid;
+  unhex("80000000ffffffffffff8c1ed90309b28c1ed90309b20000e80c6b2200000000a000210400185249442d3135383146"
+        "384442573235423830304233343137dd53fa0bbc0d06f11903011231353831463844425732354238303042333431"
+        "370000001120ac1600a3d4ea11cbfe3c48e2089e0879082c04c6250a004109ffeeea1199b73d480100000000000002"
+        "0008d774da0d00", rid);
+  rid[10] = 0x0C; rid[11] = 0x9A; rid[12] = 0xE6;
+  g_millis += DJI_WIFI_MIN_MS;
+  feed_frame(rid);
+  CHECK(json_has("\"type\":\"rid\"") && Serial.out.find("dji_wifi") == std::string::npos && by_mac(rid.data() + 10),
+        "dji_wifi: a frame with Remote ID in it is reported as Remote ID alone");
+
+  // More addresses than the table holds: each new one is still reported
+  // (the one reported longest ago gives up its place).
+  Serial.out.clear();
+  g_millis += DJI_WIFI_MIN_MS;
+  for (int i = 0; i < DJI_WIFI_N + 2; i++) {
+    uint8_t m[6] = { 0x0C, 0x9A, 0xE6, 0x77, 0x00, (uint8_t)i };
+    g_millis += 10;
+    feed_frame(plain_beacon(m, "X"));
+  }
+  CHECK(count_in(Serial.out, "\"type\":\"dji_wifi\"") == DJI_WIFI_N + 2, "dji_wifi: a full table still reports a new address");
+
+  // It is live feed: dropped when a host is slow, and kept from a phone that
+  // turned its feed off, like a rid line.
+  const char* line = "{\"type\":\"dji_wifi\",\"mac\":\"0C:9A:E6:01:02:03\",\"rssi\":-40}\n";
+  CHECK(host_is_feed_line((const uint8_t*)line, strlen(line)), "dji_wifi: the line is classed as live feed");
+  CHECK(strstr(RX_CAPS, "\"dji_wifi\"") != nullptr, "dji_wifi: the build says it listens for them");
+
+  memset(g_tracks, 0, sizeof g_tracks); Serial.out.clear();
+  g_millis = millis_was;
+}
+
 // The fixed-point JSON writer against printf, the duplicate filter, and the
 // match log: contacts that end are recorded, survive a save and reload, and
 // come back over log_get.
@@ -1436,6 +1513,7 @@ int main(void) {
   test_tx();
   test_rx();
   test_sniffer();
+  test_dji_wifi();
   test_json_and_log();
   test_host_link_and_ble();
   test_usb_backpressure();

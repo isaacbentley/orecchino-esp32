@@ -201,10 +201,11 @@ static inline bool host_get_feed(HostSrc src) {
   return true; // serial feed is always on
 }
 
-/// rid frames and heartbeats: the live feed, recognised by the line's own
-/// type so every producer is classified the same way.
+/// rid frames, dji_wifi sightings and heartbeats: the live feed, recognised
+/// by the line's own type so every producer is classified the same way.
 static inline bool host_is_feed_line(const uint8_t* line, size_t n) {
   return (n >= 13 && memcmp(line, "{\"type\":\"rid\"", 13) == 0) ||
+         (n >= 18 && memcmp(line, "{\"type\":\"dji_wifi\"", 18) == 0) ||
          (n >= 12 && memcmp(line, "{\"type\":\"hb\"", 12) == 0);
 }
 

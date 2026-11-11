@@ -47,7 +47,9 @@ Drones broadcast Remote ID over Wi-Fi and Bluetooth. The receiver listens
 on every path at once: Wi-Fi beacons, Wi-Fi Aware (NAN), and Bluetooth LE —
 including the long-range mode added in Bluetooth 5. Each decoded broadcast
 is sent over USB, and to a paired phone that asked for the live feed, as
-one line of JSON. The apps read that stream and draw it.
+one line of JSON. The apps read that stream and draw it. A DJI Wi-Fi
+device that sends no Remote ID is reported as well, as presence and
+nothing more (the `dji_wifi` line, under "Data format").
 
 The radio core lives in one place, `firmware/common/rx_core.h`: Wi-Fi and
 BLE capture, the ASTM F3411 decoder (plus GB 46750-2025, China's 2025
@@ -103,8 +105,9 @@ notifies output lines in MTU-sized slices. A second, readable service
 (`0A1B0001-5E1D-4F0E-9C7B-4F52454343A1`, characteristic `0A1B0002-…`)
 answers before pairing with `{"fw":"orecchino","ver":…,"board":…,"caps":[…],"proto":1}`,
 so a phone can tell an Orecchino from any other NUS device. `caps` is what
-that board handles: `log`, `log_since` and `tfr` on every receiver, plus
-`tiles` on the SenseCAP and `tiles`, `wifi` and `traffic` on the T5.
+that board handles: `log`, `log_since`, `tfr` and `dji_wifi` on every
+receiver, plus `tiles` on the SenseCAP and `tiles`, `wifi` and `traffic` on
+the T5.
 
 One phone at a time. Everything needs an authenticated (passkey) link:
 the passkey is the **fixed, published 123456** on every Orecchino, and a
@@ -113,7 +116,7 @@ otherwise get by claiming no keyboard and no display — is refused and its
 bond deleted. That is deliberate — it keeps passers-by out, not a
 determined attacker; the T5 shows the code while pairing and says so on
 screen. A peer that has not paired within 10 seconds is dropped, so it
-cannot sit on the only connection. The live feed (`rid` and `hb` lines) goes to the phone
+cannot sit on the only connection. The live feed (`rid`, `dji_wifi` and `hb` lines) goes to the phone
 only after it sends `{"cmd":"feed","on":true}`; replies go only to the
 transport a command came in on. On the SenseCAP and T5, `fs_*` tile
 commands work over BLE as over USB; the T5's Wi-Fi setup commands need the
@@ -771,13 +774,35 @@ make one, so it is its own state, shown as `TEST KEY`, never as a verified
 ID. A build that wants the bench beacon to read `id_valid` (to exercise
 that path of a UI) defines `ORECCHINO_TRUST_TEST_KEY`.
 
+### A DJI Wi-Fi device without Remote ID
+
+```json
+{"type":"dji_wifi","mac":"0C:9A:E6:01:02:03","rssi":-58,"ch":6,"ssid":"DJI-MINI4PRO-A1B2"}
+```
+
+A Wi-Fi beacon or probe response whose sender's address is in DJI's block
+`0C:9A:E6`, with no Remote ID in the frame. A DJI aircraft in QuickTransfer
+(sending its footage to a phone) puts up such an access point, usually on
+the ground. The line says a DJI device is near and how strongly it was
+heard. It does not say which device, that it is an aircraft, or where it
+is: DJI has other address blocks, and other DJI products may use this one.
+It makes no contact on a board's screen and no match-log record.
+
+`ch` is the channel it was heard on; `ssid` is left out when the network
+hides its name. One address is reported at most once every 2 seconds (the
+last 8 addresses are remembered; with more than that around, a ninth is
+still reported). A frame from this block that does carry Remote ID is a
+`rid` line and nothing else. A build that listens for these says so with
+`dji_wifi` in `caps`, so a host can tell "none heard" from "never listened
+for". The Mac and phone apps ignore the line.
+
 ### Board lines
 
 Once at boot, and a heartbeat every 2 seconds:
 
 ```json
 {"type":"boot","fw":"orecchino","ver":"0.7.0","board":"lilygo-t5-epaper-s3-pro","wifi":true,
- "ble":true,"ble_ext":true,"caps":["log","log_since","tfr","tiles","wifi","traffic"],
+ "ble":true,"ble_ext":true,"caps":["log","log_since","tfr","tiles","wifi","traffic","dji_wifi"],
  "display":true,"vcom":1560,"mode":"rx"}
 {"type":"hb","up":123456,"wifi_frames":8812,"ble_advs":20431,"rid":312,"dropped":0,
  "ch":6,"ble":true,"ble_ext":true,"caps":[...],"ble_drop":3,"ble_rx_drop":1,"usb_drop":12,"rx_stack":2140}
@@ -794,7 +819,7 @@ for an app that attaches after boot. Boards add their own boot fields
 only when its host stops reading: every board writes USB and BLE from a
 task of its own, so a Mac that closes the port with the cable in (the USB
 CDC driver then blocks each write for up to 2 s) costs detections nothing.
-The live feed (`rid`, `hb`) goes first; a reply waits up to 250 ms for
+The live feed (`rid`, `dji_wifi`, `hb`) goes first; a reply waits up to 250 ms for
 room, and a reply that was cut says so (`log_done` below).
 
 ### Commands

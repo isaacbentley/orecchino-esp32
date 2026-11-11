@@ -16,11 +16,16 @@
 //                           both 1M and coded (long-range) PHY, via
 //                           NimBLE-Arduino with CONFIG_BT_NIMBLE_EXT_ADV=1
 //                           (see each sketch's build_opt.h)
+// and, with no Remote ID in the frame, hears a DJI Wi-Fi device:
+//   * WiFi beacons and probe responses from an address in DJI's block
+//     0C:9A:E6 (an aircraft in QuickTransfer puts up such an access point)
 //
 // Output: one JSON object per line on the serial port and the BLE link.
 //   {"type":"boot", ...}   once at startup
 //   {"type":"rid",  ...}   per decoded Remote ID frame; a frame repeated
 //                          unchanged is reported at most once a second
+//   {"type":"dji_wifi", ...}  a DJI Wi-Fi device heard without Remote ID,
+//                          at most once every 2 s for one address
 //   {"type":"hb",   ...}   heartbeat with counters every 2 s
 //   {"type":"log",  ...}   match log records, on {"cmd":"log_get"}
 // A reply goes only to the host that asked (USB or BLE); the rest is
@@ -77,7 +82,9 @@
 
 // ---------------------------------------------------------------- event queue
 
-enum RidSrc : uint8_t { SRC_WIFI_BEACON = 0, SRC_WIFI_NAN = 1, SRC_BLE = 2 };
+// SRC_WIFI_DJI is not Remote ID: a queued event with no ODID bytes, reported
+// as a dji_wifi line and never decoded or tracked (so it has no SRC_NAMES entry).
+enum RidSrc : uint8_t { SRC_WIFI_BEACON = 0, SRC_WIFI_NAN = 1, SRC_BLE = 2, SRC_WIFI_DJI = 3 };
 static const char* SRC_NAMES[] = { "wifi", "nan", "ble" };
 
 // One ODID message is 25 B; a full message pack is 2 + 9*25 = 227 B.
@@ -186,6 +193,46 @@ static void enqueue_rid(uint8_t src, const uint8_t* mac, int8_t rssi,
   if (xQueueSend(s_q, &e, 0) != pdTRUE) s_cnt_dropped += 1;
 }
 
+// A DJI Wi-Fi device heard without Remote ID: an access point whose address
+// is in DJI's block 0C:9A:E6 (IEEE MA-L registry), which is what an aircraft
+// in QuickTransfer puts up. It says a DJI device is near; it does not say
+// which one, that it is an aircraft, or where. A beacon comes ten times a
+// second, so one address is queued at most once in DJI_WIFI_MIN_MS.
+#define DJI_WIFI_N 8
+#define DJI_WIFI_MIN_MS 2000
+typedef struct { bool used; uint8_t mac[6]; uint32_t ms; } DjiWifiSeen;
+static DjiWifiSeen s_dji_wifi_seen[DJI_WIFI_N];   // the WiFi task's alone
+
+static void enqueue_dji_wifi(const uint8_t* mac, int8_t rssi, uint8_t chan, const char* ssid) {
+  if (!s_q || rx_hook_paused()) return;
+  uint32_t now = millis();
+  // This address's slot, else a free one, else the one reported longest ago.
+  DjiWifiSeen* slot = &s_dji_wifi_seen[0];
+  for (size_t i = 0; i < DJI_WIFI_N; i++) {
+    DjiWifiSeen* s = &s_dji_wifi_seen[i];
+    if (s->used && memcmp(s->mac, mac, 6) == 0) {
+      if (now - s->ms < DJI_WIFI_MIN_MS) return;
+      slot = s;
+      break;
+    }
+    if (!slot->used) continue;
+    if (!s->used || now - s->ms > now - slot->ms) slot = s;
+  }
+  RidEvt e;
+  e.src  = SRC_WIFI_DJI;
+  memcpy(e.mac, mac, 6);
+  e.rssi = rssi;
+  e.chan = chan;
+  e.phy  = 0;
+  e.ssid[0] = 0;
+  if (ssid) { strncpy(e.ssid, ssid, sizeof(e.ssid) - 1); e.ssid[sizeof(e.ssid) - 1] = 0; }
+  e.len  = 0;
+  if (xQueueSend(s_q, &e, 0) != pdTRUE) { s_cnt_dropped += 1; return; }
+  slot->used = true;
+  memcpy(slot->mac, mac, 6);
+  slot->ms = now;
+}
+
 // ------------------------------------------------------------- WiFi sniffing
 
 // NAN is spec-locked to the channel 6 social channel, so park there 75% of
@@ -214,6 +261,7 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
     int off = 36;
     char ssid[33];         // the SSID element comes first, so it is known by the vendor element
     ssid[0] = 0;
+    bool rid = false;      // this frame carried Remote ID
     while (off + 2 <= len) {
       uint8_t id = d[off], l = d[off + 1];
       if (off + 2 + l > len) break;
@@ -226,9 +274,14 @@ static void wifi_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
            (ie[0] == 0x90 && ie[1] == 0x3A && ie[2] == 0xE6))) {
         enqueue_rid(SRC_WIFI_BEACON, sa, p->rx_ctrl.rssi, p->rx_ctrl.channel,
                     0, ie + 5, l - 5, ssid);
+        rid = true;
       }
       off += 2 + l;
     }
+    // An access point in DJI's own address block, saying nothing else about
+    // itself. A frame that carries Remote ID is reported as that alone.
+    if (!rid && sa[0] == 0x0C && sa[1] == 0x9A && sa[2] == 0xE6)
+      enqueue_dji_wifi(sa, p->rx_ctrl.rssi, p->rx_ctrl.channel, ssid);
   } else if (stype == 0xD0) {
     // Action frame — look for a NAN service discovery frame.
     const uint8_t* b = d + 24;
@@ -654,7 +707,8 @@ static size_t format_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
 // and every fifth heartbeat (the app may attach after boot): what this
 // build really handles. A sketch adds its own with RX_CAPS_BOARD (the T5:
 // ",\"tiles\",\"wifi\"") before including this header; "traffic" comes with
-// ORECCHINO_TRAFFIC.
+// ORECCHINO_TRAFFIC. "dji_wifi" says this build reports dji_wifi lines, so a
+// host can tell "none heard" from "never listened for".
 #ifndef RX_CAPS_BOARD
 #define RX_CAPS_BOARD ""
 #endif
@@ -663,7 +717,7 @@ static size_t format_rid(const RidEvt* e, const OdidUas* u, const Track* t) {
 #else
 #define RX_CAPS_TRAFFIC ""
 #endif
-#define RX_CAPS "[\"log\",\"log_since\",\"tfr\"" RX_CAPS_BOARD RX_CAPS_TRAFFIC "]"
+#define RX_CAPS "[\"log\",\"log_since\",\"tfr\"" RX_CAPS_BOARD RX_CAPS_TRAFFIC ",\"dji_wifi\"]"
 
 #if RX_ASYNC
 static TaskHandle_t s_rx_task = nullptr;
@@ -1434,10 +1488,31 @@ static void rx_set_wide_filter(bool wide) {
   esp_wifi_set_promiscuous_filter(&filt);
 }
 
+/// The line for a DJI Wi-Fi device heard without Remote ID. It makes no
+/// contact: there is no identity or position to track or to log, only an
+/// address in DJI's block, how strongly it was heard, and its SSID if it
+/// gave one. enqueue_dji_wifi has already spaced one address's lines.
+static void rx_report_dji_wifi(const RidEvt* e) {
+  RX_LOCK();   // the line cursor is shared
+  jbegin(s_rid_line, JLINE_MAX);
+  jraw("{\"type\":\"dji_wifi\",\"mac\":\""); jmac(e->mac); jchar('"');
+  jkey("rssi"); jint(e->rssi);
+  if (e->chan) { jkey("ch"); juint(e->chan); }
+  if (e->ssid[0]) {
+    char s[33]; odid_copy_text(s, sizeof(s), (const uint8_t*)e->ssid, strlen(e->ssid));
+    jkey("ssid"); jstrv(s);
+  }
+  size_t n = jfinish();
+  RX_UNLOCK();
+  // s_rid_line belongs to this task alone, so it is safe to send unlocked.
+  host_write((const uint8_t*)s_rid_line, n);
+}
+
 /// Everything that happens to one queued frame: decode, update the
 /// contact, and report it unless it repeats the last report of the same
 /// frame from the same source within a second.
 static void rx_process(const RidEvt* e, uint32_t now) {
+  if (e->src == SRC_WIFI_DJI) { rx_report_dji_wifi(e); return; }
   OdidUas u;
   if (!odid_decode_payload(e->data, e->len, &u)) { s_cnt_pfail += 1; return; }
   s_cnt_rid += 1;

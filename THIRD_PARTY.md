@@ -254,3 +254,9 @@ beacon and a DJI Mini 5 Pro's GB 46750 packet), mirrored in
 that project's captures. The 5-degree no-fix
 band around 0,0 and the "RID-" SSID convention are observations from the
 same project.
+
+That a DJI aircraft in QuickTransfer is an access point in the address
+block `0C:9A:E6` (the `dji_wifi` line in `firmware/common/rx_core.h`) is
+also that project's observation, its "Wi-Fi fast" scan; no code was taken.
+The block's registration to SZ DJI Technology is the IEEE MA-L registry's.
+No capture of ours stands behind it yet.
