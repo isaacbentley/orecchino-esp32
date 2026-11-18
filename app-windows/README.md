@@ -1,0 +1,41 @@
+# Orecchino voor Windows
+
+Deze Windows-port is gebaseerd op de macOS-app van Isaac Bentley. De app toont Remote ID-meldingen die een Orecchino-ontvanger via USB doorstuurt. Je kunt de interface ook uitproberen zonder ontvanger met **Simulatie**.
+
+## Starten
+
+1. Pak `Orecchino-volledig-project-Windows-x64.zip` uit op een Windows 10- of Windows 11-pc met een 64-bits Intel- of AMD-processor. Bouw de app via **Zelf bouwen** als je een GitHub-checkout gebruikt.
+2. Open `app-windows/Orecchino.exe`. Installeer de **Evergreen Runtime** als de app om Microsoft Edge WebView2 vraagt. [WebView2 downloaden bij Microsoft](https://developer.microsoft.com/microsoft-edge/webview2/)
+3. Sluit de ESP32-ontvanger aan met een USB-datakabel. De verbindingsstatus geeft aan wanneer gegevens binnenkomen.
+
+Gebruik **Instellingen → USB-ontvanger** om zo nodig zelf een COM-poort te kiezen. Je vindt het COM-nummer in Windows Apparaatbeheer onder **Poorten (COM & LPT)**. Sluit een eventuele seriële monitor voordat je de poort opent. Als Windows geen COM-poort toont, controleer de USB-datakabel en de eventuele USB-seriële driver van je bord.
+
+## Functies
+
+- **Live** toont droneposities, bewegingssporen, opgegeven operatorposities en technische gegevens. De app herkent de ontvanger op een COM-poort, probeert bij onderbrekingen opnieuw verbinding te maken en zet de klok van de ontvanger.
+- Stel bij **Ontvangerlocatie** de coördinaten handmatig in of neem het kaartmidden over. De app geeft die positie aan de ontvanger door en gebruikt ze voor afstanden en luchtverkeersbewaking.
+- **Logboek** leest het detectielogboek van de ontvanger. Je kunt het als CSV exporteren of na bevestiging op de ontvanger wissen.
+- **Offline kaarten** plant de kaarttegels voor compatibele ontvangers zoals de SenseCAP en de T5. Kies een locatie en straal, controleer het plan en klik op **Versturen** om de tegels te downloaden en naar de ontvanger te sturen. De planner houdt 1 MiB opslag vrij.
+- **ADS-B** toont waarschuwingen voor mogelijke conflicten tussen ontvangen drones en bemand luchtverkeer. De standaardbron is adsb.lol. Het Windows-systeemvak toont het aantal actuele contacten en geeft bij conflicten een Windows-melding als je meldingsinstellingen dat toelaten.
+- De **FAA-laag** toont tijdelijke beperkingen uit de Verenigde Staten. De kaartachtergrond, ADS-B, de FAA-laag en het downloaden van offline kaarttegels hebben internet nodig.
+
+## Zelf bouwen
+
+Open PowerShell in de map `app-windows` en gebruik Go 1.25 of hoger. De Go-afhankelijkheden voor de build zijn meegeleverd in `vendor`.
+
+```powershell
+go test -mod=vendor ./...
+go build -mod=vendor -trimpath -ldflags '-H windowsgui' -o Orecchino.exe .
+```
+
+Voer `go run -mod=vendor . -preview -demo` uit om de interface met simulatiegegevens in een browser te openen. Open het lokale adres dat in de terminal verschijnt. De Windows-versie bewaart instellingen en appgegevens onder `%LOCALAPPDATA%\Orecchino`.
+
+De Windows-build is vanuit Linux gecompileerd. De controle van het Windows-venster met WebView2 en de USB-verbinding met een fysieke ontvanger vereist een Windows-pc en de hardware.
+
+Het Windows-pictogram en manifest in `resources` zijn al opgenomen in `resources_windows_amd64.syso`. Als je die bestanden aanpast, maak je het resourcebestand opnieuw met `rsrc` v0.10.2 en `rsrc -arch amd64 -ico resources/Orecchino.ico -manifest resources/orecchino.manifest -o resources_windows_amd64.syso`.
+
+## Licentie en bron
+
+Orecchino is vrije software onder de GNU General Public License, versie 3 of later. `LICENSE` bevat de volledige licentie. De map `app-windows` bevat de broncode van deze Windows-port en de licentiegegevens voor de meegeleverde afhankelijkheden. [Componenten van derden](licenties/THIRD_PARTY.md)
+
+De Windows-port van 18 november 2026 vervangt de macOS-interface en seriële integratie door een Windows-desktopvenster met WebView2 en ondersteuning voor COM-poorten. [Originele macOS-broncode op de gebruikte commit `a3d0620`](https://github.com/isaacbentley/orecchino-esp32/tree/a3d06206010e66d5295ad36e167e100d2c0670c6/app)

@@ -1,0 +1,650 @@
+{
+ "name": "hysteresis",
+ "description": "Wall-clock hysteresis: raised within 1 km, held within 1.3 km and 200 m, cleared only after 20 s continuously beyond (many evaluations in between do not shorten it); an aircraft that leaves the set is held 20 s with its last numbers.",
+ "worked_example": [
+  "t=0 800 m N, vert +50 -> raised. t=5 1200 m (<= 1300, |50| <= 200) -> held. t=6 1200 m but 400 m alt -> vert +250 > 200 -> out since t=6.",
+  "t=15 1250 m, vert +50 -> back in hold, the 20 s restarts. t=20 1400 m -> out since t=20; t=21, 22, 23 and 39 (19 s) still held; t=40 (20 s) cleared.",
+  "t=41 900 m -> raised again. t=42 the aircraft is missing from the set -> out since t=42, shown with the last numbers; t=61 (19 s) held; t=62 cleared.",
+  "Also LOW (UAS airspace: airborne, within 3 km of the observer or a live drone, below 460 m above ground; ground = the observer's elevation 20 m): a1b2c3 at t=40 'LOW TRAFFIC N 1.4 KM' ('BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.4 KM N'). A warning for the same aircraft supersedes its LOW, which shows again once the warning clears."
+ ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 800.0,
+   "vert_m": 50.0,
+   "bearing_deg": 0.0
+  },
+  {
+   "t_s": 5,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "horiz_m": 1200.0
+  },
+  {
+   "t_s": 6,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "vert_m": 250.0
+  },
+  {
+   "t_s": 15,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "horiz_m": 1250.0
+  },
+  {
+   "t_s": 20,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "horiz_m": 1400.0
+  }
+ ],
+ "observer": {
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "elev_m": 20
+ },
+ "drones": [
+  {
+   "id": "1581F20000D9A03",
+   "lat": 37.810873,
+   "lon": -122.4194,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.818068,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 800 M N",
+      "horiz_m": 800.0474972071379,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 5,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.821665,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 1.2 KM N",
+      "horiz_m": 1200.0156483483152,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 6,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.821665,
+     "lon": -122.4194,
+     "altg_m": 400,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 250 M ABOVE, 1.2 KM N",
+      "horiz_m": 1200.0156483483152,
+      "vert_m": 250.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 15,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.822115,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 1.3 KM N",
+      "horiz_m": 1250.0533653376574,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 20,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.823464,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 1.4 KM N",
+      "horiz_m": 1400.0553213816906,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 21,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.823464,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 1.4 KM N",
+      "horiz_m": 1400.0553213816906,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 22,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.823464,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 1.4 KM N",
+      "horiz_m": 1400.0553213816906,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 23,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.823464,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 1.4 KM N",
+      "horiz_m": 1400.0553213816906,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 39,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.823464,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 1.4 KM N",
+      "horiz_m": 1400.0553213816906,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 40,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.823464,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "caution",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, low traffic, data 2 s old",
+    "alerts": [
+     {
+      "level": "caution",
+      "kind": "low",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "LOW TRAFFIC N 1.4 KM",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "BE READY TO LAND DRONES",
+      "resolution": "BE READY TO LAND DRONES; AIRCRAFT 180 M ABOVE GROUND, 1.4 KM N",
+      "horiz_m": 1400.0553213816906,
+      "vert_m": 180.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 41,
+   "data_age_s": 2,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 37.818967,
+     "lon": -122.4194,
+     "altg_m": 200,
+     "gs_kt": 100,
+     "trk": 0,
+     "age_s": 2
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 1,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 900 M N",
+      "horiz_m": 900.0117362610388,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 2.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 42,
+   "data_age_s": 2,
+   "aircraft": [],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 0,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 900 M N",
+      "horiz_m": 900.0117362610388,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 3.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 61,
+   "data_age_s": 2,
+   "aircraft": [],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 0,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 2 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": true,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 50 M ABOVE, 900 M N",
+      "horiz_m": 900.0117362610388,
+      "vert_m": 50.0,
+      "bearing_deg": 0.0,
+      "cpa_s": null,
+      "age_s": 22.0
+     }
+    ]
+   }
+  },
+  {
+   "t_s": 62,
+   "data_age_s": 2,
+   "aircraft": [],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "none",
+    "aircraft_count": 0,
+    "summary": "conflict watch on, no ADS-B conflicts, data 2 s old",
+    "alerts": []
+   }
+  }
+ ]
+}

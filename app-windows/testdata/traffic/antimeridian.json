@@ -1,0 +1,96 @@
+{
+ "name": "antimeridian",
+ "description": "Longitudes wrap at +-180: 52N 179.995E to 52N 179.995W is 685 m, not 24,600 km.",
+ "worked_example": [
+  "D9A03 at 52N 179.995E, UAL123 at 52N 179.995W: dlon = -359.99 wraps to +0.01 deg.",
+  "dx = 0.01 * pi/180 * cos(52 deg) * 6371000 = 684.58 m, dy = 0 -> horiz 684.58 m, bearing 90.0 -> TRAFFIC NEAR DRONE D9A03 (vert +100): 'GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 100 M ABOVE, 680 M E'.",
+  "FAR2 at 179W is 1.0 deg (68.7 km) away -> nothing. Without the wrap: 359.99 deg of longitude = 24,640 km."
+ ],
+ "hand_checks": [
+  {
+   "t_s": 0,
+   "hex": "a1b2c3",
+   "drone": "1581F20000D9A03",
+   "kind": "near",
+   "horiz_m": 684.58,
+   "vert_m": 100.0,
+   "bearing_deg": 90.0,
+   "why": "0.01 deg * pi/180 * cos(52 deg) * 6371000 = 684.58 m due E"
+  }
+ ],
+ "observer": {
+  "lat": 52.0,
+  "lon": 179.99,
+  "elev_m": 10
+ },
+ "drones": [
+  {
+   "id": "1581F20000D9A03",
+   "lat": 52.0,
+   "lon": 179.995,
+   "alt_geo_m": 150,
+   "speed_mps": 0,
+   "heading_deg": 0,
+   "live": true
+  }
+ ],
+ "steps": [
+  {
+   "t_s": 0,
+   "data_age_s": 3,
+   "aircraft": [
+    {
+     "hex": "a1b2c3",
+     "cs": "UAL123",
+     "ty": "B738",
+     "lat": 52.0,
+     "lon": -179.995,
+     "altg_m": 250,
+     "gs_kt": 100,
+     "trk": 90,
+     "age_s": 3
+    },
+    {
+     "hex": "b2c3d4",
+     "cs": "FAR2",
+     "ty": "B738",
+     "lat": 52.0,
+     "lon": -179.0,
+     "altg_m": 250,
+     "gs_kt": 100,
+     "trk": 90,
+     "age_s": 3
+    }
+   ],
+   "expect": {
+    "have_data": true,
+    "stale": false,
+    "highest": "warning",
+    "aircraft_count": 2,
+    "summary": "conflict watch on, 1 ADS-B conflict, data 3 s old",
+    "alerts": [
+     {
+      "level": "warning",
+      "kind": "near",
+      "drone": "1581F20000D9A03",
+      "hex": "a1b2c3",
+      "text": "TRAFFIC NEAR DRONE D9A03",
+      "held": false,
+      "height_unknown": false,
+      "on_ground": false,
+      "approx": false,
+      "from_observer": false,
+      "vert_rel": "above",
+      "action": "GIVE WAY: DESCEND AND LAND D9A03",
+      "resolution": "GIVE WAY: DESCEND AND LAND D9A03; AIRCRAFT 100 M ABOVE, 680 M E",
+      "horiz_m": 684.5843258665512,
+      "vert_m": 100.0,
+      "bearing_deg": 90.0,
+      "cpa_s": null,
+      "age_s": 3.0
+     }
+    ]
+   }
+  }
+ ]
+}

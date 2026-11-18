@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="nl-BE">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Orecchino</title>
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="app.css">
+  <script src="vendor/leaflet/leaflet.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-icon" aria-hidden="true"><span></span></div>
+      <strong>Orecchino</strong>
+    </div>
+    <div class="topbar-actions">
+      <button id="receiver-control" class="button receiver-status" type="button" title="Ontvanger beheren"><span class="status-dot"></span><span id="receiver-label">Ontvanger zoeken</span></button>
+      <button id="demo-button" class="button toggle" type="button" aria-pressed="false"><span class="play" aria-hidden="true"></span>Simulatie</button>
+      <button class="button icon" id="settings-button" type="button" aria-label="Instellingen" title="Instellingen">⚙</button>
+    </div>
+  </header>
+  <div id="simulation-banner" class="simulation-banner" role="status" hidden>SIMULATIE ACTIEF <span>Gesimuleerde contacten worden gemarkeerd.</span></div>
+  <div id="app-error" class="app-error" role="alert" hidden></div>
+  <main class="workspace">
+    <section class="map-section" aria-label="Kaart van waargenomen drones en hun operators">
+      <div id="map"></div>
+      <div class="map-head">
+        <div class="map-heading">
+          <span class="eyebrow">REMOTE ID</span>
+          <h1>Luchtbeeld</h1>
+        </div>
+        <div class="map-legend" aria-label="Kaartlegenda">
+          <span><i class="legend-drone"></i>Drone</span>
+          <span><i class="legend-operator"></i>Operator</span>
+          <span><i class="legend-airspace"></i>FAA-beperking</span>
+        </div>
+      </div>
+      <div class="map-actions">
+        <button id="fit-button" class="button icon" type="button" aria-label="Toon alle contacten" title="Toon alle contacten"><span class="fit-icon" aria-hidden="true"></span></button>
+        <button id="home-button" class="button icon" type="button" aria-label="Toon ontvangerlocatie" title="Toon ontvangerlocatie"><span class="home-icon" aria-hidden="true"></span></button>
+      </div>
+      <div class="map-status">
+        <button id="traffic-toggle" class="button toggle" type="button" aria-pressed="true" title="Verkeersbewaking in- of uitschakelen"><span class="status-dot"></span>ADS-B</button>
+        <span id="traffic-status" role="status">Verkeersbewaking laden…</span>
+      </div>
+    </section>
+    <aside class="sidebar" aria-label="Ontvangerinformatie en bediening">
+      <div class="tabs" role="tablist" aria-label="Weergave">
+        <button id="live-tab" role="tab" type="button" aria-selected="true" aria-controls="live-panel">Live <span id="live-tab-count">0</span></button>
+        <button id="log-tab" role="tab" type="button" aria-selected="false" aria-controls="log-panel" tabindex="-1">Logboek</button>
+        <button id="tiles-tab" role="tab" type="button" aria-selected="false" aria-controls="tiles-panel" tabindex="-1">Offline kaarten</button>
+      </div>
+      <section id="live-panel" class="tabpanel" role="tabpanel" aria-labelledby="live-tab">
+        <div id="alerts-section" class="sidebar-section alerts-section" hidden>
+          <div class="section-heading"><h2>Verkeerswaarschuwingen</h2><span id="alert-count" class="count"></span></div>
+          <div id="alert-list" class="card-list"></div>
+        </div>
+        <div class="sidebar-section contacts-section">
+          <div class="section-heading"><h2>Contacten</h2><span id="contact-count" class="count">0 actief</span></div>
+          <div id="contact-list" class="card-list"></div>
+          <div id="empty-contacts" class="empty-card">
+            <div class="empty-icon" aria-hidden="true"><span></span></div>
+            <h3 id="empty-heading">Ontvanger zoeken</h3>
+            <p id="empty-description">Sluit een Orecchino-ontvanger aan via USB of start de simulatie.</p>
+            <button id="empty-connect" class="button" type="button">Verbinding beheren</button>
+          </div>
+        </div>
+        <div id="detail-section" class="sidebar-section detail-section" hidden></div>
+      </section>
+      <section id="log-panel" class="tabpanel" role="tabpanel" aria-labelledby="log-tab" hidden>
+        <div class="sidebar-section">
+          <div class="section-heading"><h2>Detectielogboek</h2><span id="log-count" class="count"></span></div>
+          <div class="button-row">
+            <button id="log-read" class="button primary" type="button">Ontvanger uitlezen</button>
+            <a id="log-export" class="button" href="/api/device/log.csv" download="orecchino-logboek.csv">CSV exporteren</a>
+            <button id="log-clear" class="button danger" type="button">Wissen</button>
+          </div>
+          <p id="log-message" class="notice" role="status" hidden></p>
+          <div id="log-list" class="card-list log-list"></div>
+        </div>
+      </section>
+      <section id="tiles-panel" class="tabpanel" role="tabpanel" aria-labelledby="tiles-tab" hidden>
+        <div class="sidebar-section">
+          <div class="section-heading"><h2>Kaart voor ontvanger</h2></div>
+          <form id="tiles-form" class="stack">
+            <div class="field-grid">
+              <label>Breedtegraad <input id="tiles-lat" name="lat" type="number" step="any" min="-85" max="85" required></label>
+              <label>Lengtegraad <input id="tiles-lon" name="lon" type="number" step="any" min="-180" max="180" required></label>
+            </div>
+            <label>Kaartstraal in km <input id="tiles-radius" name="radius" type="number" min="1" max="30" step="0.1" value="3" required></label>
+            <button id="tiles-use-map" class="button subtle" type="button">Gebruik het kaartmidden</button>
+            <div class="button-row">
+              <button id="tiles-plan" class="button primary" type="submit">Kaart plannen</button>
+              <button id="tiles-send" class="button" type="button" disabled>Versturen</button>
+            </div>
+          </form>
+          <p id="tile-availability" class="notice"></p>
+          <p id="tiles-message" class="notice" role="status" hidden></p>
+          <div id="tiles-output" aria-live="polite"></div>
+        </div>
+      </section>
+      <div class="receiver-footer">
+        <span id="footer-device"><span class="status-dot"></span><span id="footer-board">USB-ontvanger</span></span>
+        <span id="footer-stat"></span>
+      </div>
+    </aside>
+  </main>
+  <dialog id="settings-dialog" aria-labelledby="settings-heading">
+    <div class="dialog-head"><h2 id="settings-heading">Instellingen</h2><button id="settings-close" class="button icon" type="button" aria-label="Sluiten">×</button></div>
+    <div class="dialog-body">
+      <section id="receiver-settings">
+        <h3>USB-ontvanger</h3>
+        <form id="receiver-form" class="stack">
+          <label>Seriële poort <select id="port-select"><option value="auto">Automatisch zoeken</option></select></label>
+          <div class="button-row">
+            <button id="connect-button" class="button primary" type="submit">Verbinden</button>
+            <button id="disconnect-button" class="button" type="button">Verbinding verbreken</button>
+            <button id="refresh-ports" class="button subtle" type="button">Poorten vernieuwen</button>
+          </div>
+        </form>
+        <p id="port-message" class="notice" role="status" hidden></p>
+      </section>
+      <section>
+        <h3>Ontvangerlocatie</h3>
+        <form id="location-form" class="stack">
+          <div class="field-grid">
+            <label>Breedtegraad <input id="location-lat" type="number" step="any" min="-90" max="90" required></label>
+            <label>Lengtegraad <input id="location-lon" type="number" step="any" min="-180" max="180" required></label>
+          </div>
+          <div class="button-row">
+            <button class="button primary" type="submit">Locatie opslaan</button>
+            <button id="location-map" class="button" type="button">Gebruik kaartmidden</button>
+            <button id="location-clear" class="button subtle" type="button">Verwijderen</button>
+          </div>
+        </form>
+        <p id="location-message" class="notice" role="status" hidden></p>
+      </section>
+      <section>
+        <h3>Luchtverkeer en luchtbeperkingen</h3>
+        <form id="airspace-form" class="stack">
+          <label class="checkbox"><input id="traffic-enabled" type="checkbox" checked> Verkeersbewaking inschakelen</label>
+          <div class="field-grid airspace-fields">
+            <label>Straal in km <input id="traffic-radius" type="number" step="1" min="5" max="30" value="10" required></label>
+            <label>ADS-B-bron <input id="traffic-source" type="text" spellcheck="false" placeholder="Standaard: adsb.lol"></label>
+          </div>
+          <div class="button-row">
+            <button class="button primary" type="submit">Verkeersinstellingen opslaan</button>
+            <button id="tfr-refresh" class="button" type="button">FAA-zones vernieuwen</button>
+          </div>
+        </form>
+        <p id="tfr-status" class="notice"></p>
+        <p id="airspace-message" class="notice" role="status" hidden></p>
+      </section>
+      <section class="about">
+        <h3>Over Orecchino</h3>
+        <p>Windows-versie gebaseerd op Orecchino van Isaac Bentley. Vrije software onder de GNU GPL versie 3, zonder garantie.</p>
+        <button id="license-open" class="button subtle" type="button">Licentie lezen</button>
+      </section>
+    </div>
+  </dialog>
+  <dialog id="license-dialog" aria-labelledby="license-heading">
+    <div class="dialog-head"><h2 id="license-heading">GNU General Public License</h2><button id="license-close" class="button icon" type="button" aria-label="Sluiten">×</button></div>
+    <pre id="license-text"></pre>
+  </dialog>
+  <dialog id="clear-dialog" aria-labelledby="clear-heading">
+    <div class="dialog-head"><h2 id="clear-heading">Detectielogboek wissen?</h2><button id="clear-close" class="button icon" type="button" aria-label="Sluiten">×</button></div>
+    <div class="dialog-body">
+      <p>Hiermee verwijder je de opgeslagen detecties van de USB-ontvanger.</p>
+      <div class="button-row">
+        <a class="button" href="/api/device/log.csv" download="orecchino-logboek.csv">Eerst CSV exporteren</a>
+        <button id="clear-confirm" class="button danger" type="button">Wissen op ontvanger</button>
+      </div>
+      <p id="clear-message" class="notice" role="alert" hidden></p>
+    </div>
+  </dialog>
+</body>
+</html>

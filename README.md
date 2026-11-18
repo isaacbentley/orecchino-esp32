@@ -1,5 +1,7 @@
 # Orecchino
 
+[Windows 10/11 x64 app and build instructions](app-windows/README.md).
+
 Orecchino is a small ear for drone Remote ID. Most drones must broadcast
 their identity and position using a standard called Remote ID (ASTM F3411 /
 Open Drone ID). Orecchino listens for those broadcasts and puts them on a
