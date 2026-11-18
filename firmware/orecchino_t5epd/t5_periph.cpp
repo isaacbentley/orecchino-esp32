@@ -1,0 +1,894 @@
+#include "t5_periph.h"
+#include "board_t5.h"
+#include "ui_epd.h"
+#include "driver/i2c_master.h"
+#include "../common/ui_common.h"   // g_home_*
+#include "../common/solar.h"
+#include "../common/bq27220.h"
+#include "../common/bq27220_profiles.h"
+#include "../common/bq25896.h"
+#include "../common/power_report.h"
+#include "t5_nmea.h"
+#include <Preferences.h>
+#include <esp_sleep.h>
+#include <sys/time.h>
+#include <time.h>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+
+static i2c_master_bus_handle_t s_bus = nullptr;
+static i2c_master_dev_handle_t s_pca = nullptr, s_tp = nullptr, s_gauge = nullptr, s_charger = nullptr;
+static SemaphoreHandle_t s_i2c_mutex = nullptr;
+static QueueHandle_t s_touch_queue = nullptr;
+static TaskHandle_t s_input_task_handle = nullptr;
+
+static bool s_have_gauge = false;
+static bool s_have_charger = false;
+enum TpKind : uint8_t { TP_NONE, TP_GT911, TP_GT6972P };
+static TpKind s_tp_kind = TP_NONE;
+static uint32_t s_tp_data_addr = 0;   // GT6972P: from its IC-info block
+static int s_tp_max_x = 0, s_tp_max_y = 0;
+static bool s_gps_fix = false;
+static int  s_gps_sats = 0;
+static uint32_t s_gps_fix_ms = 0;
+// GGA height above the WGS-84 ellipsoid (MSL altitude + geoid separation),
+// the reference the ADS-B traffic rules compare with; NAN until reported.
+// Written on the input task, read by the UI: one aligned float.
+static volatile float s_gps_elev_m = NAN;
+
+// The GPS is read on the input task (core 0) but the home position belongs
+// to the receiver core, which the loop and host commands also write: a fix
+// is parked here under a spinlock and handed over from periph_tick, so the
+// doubles are never written from two tasks or read half-written.
+static portMUX_TYPE s_fix_mux = portMUX_INITIALIZER_UNLOCKED;
+static double s_fix_lat = 0, s_fix_lon = 0;
+static bool   s_fix_new = false;
+static void gps_post_fix(double lat, double lon) {
+  portENTER_CRITICAL(&s_fix_mux);
+  s_fix_lat = lat; s_fix_lon = lon; s_fix_new = true;
+  portEXIT_CRITICAL(&s_fix_mux);
+}
+// From the receiver core (rx_core.h, in the sketch's translation unit).
+void rx_set_home(double lat, double lon, const char* src);
+void rx_log_flush();
+
+static const uint8_t BQ25896_ADDR = bq25896::kAddr;
+
+// ---- bus helpers (thread-safe across Core 0 and Core 1 via s_i2c_mutex)
+static i2c_master_dev_handle_t dev_add(uint8_t addr) {
+  i2c_device_config_t cfg = {};
+  cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  cfg.device_address = addr;
+  cfg.scl_speed_hz = 400000;
+  i2c_master_dev_handle_t d = nullptr;
+  if (i2c_master_bus_add_device(s_bus, &cfg, &d) != ESP_OK) return nullptr;
+  return d;
+}
+static bool wr(i2c_master_dev_handle_t d, const uint8_t* w, size_t wl) {
+  if (!d) return false;
+  if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  esp_err_t err = i2c_master_transmit(d, w, wl, 50);
+  if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+  return err == ESP_OK;
+}
+static bool wrrd(i2c_master_dev_handle_t d, const uint8_t* w, size_t wl, uint8_t* r, size_t rl) {
+  if (!d) return false;
+  if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  esp_err_t err = i2c_master_transmit_receive(d, w, wl, r, rl, 50);
+  if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+  return err == ESP_OK;
+}
+static bool present(uint8_t addr) {
+  if (!s_bus) return false;
+  if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  esp_err_t err = i2c_master_probe(s_bus, addr, 30);
+  if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+  return err == ESP_OK;
+}
+
+// ---- BQ25896 Battery Charger
+static bool bq25896_read(uint8_t reg, uint8_t* val) {
+  if (!s_charger) return false;
+  return wrrd(s_charger, &reg, 1, val, 1);
+}
+static bool bq25896_write(uint8_t reg, uint8_t val) {
+  if (!s_charger) return false;
+  uint8_t w[2] = { reg, val };
+  return wr(s_charger, w, 2);
+}
+static const bq25896::Io kChargerIo = { bq25896_read, bq25896_write };
+// The fast-charge current for the T5's 1500 mAh cell (bq25896::kT5ChargeMa,
+// 960 mA) instead of the chip's 2048 mA power-on value. Set at boot and
+// checked every minute after (only reads while it holds): the chip keeps
+// its registers across an ESP reset but not across a battery disconnect.
+static void charger_apply() {
+  if (s_have_charger && !bq25896::set_charge_current(kChargerIo, bq27220::kT5ChargeMa))
+    Serial.println("[T5] charger: could not set the charge current");
+}
+
+// ---- PCA9555: read-modify-write on port 0 only; port 1 belongs to epdiy
+static bool pca_rmw(uint8_t reg, uint8_t clear, uint8_t set) {
+  uint8_t v = 0;
+  if (!wrrd(s_pca, &reg, 1, &v, 1)) return false;
+  v = (v & ~clear) | set;
+  uint8_t w[2] = { reg, v };
+  return wr(s_pca, w, 2);
+}
+static void rail_on() {
+  s_pca = dev_add(0x20);
+  if (!s_pca) {
+    Serial.println("[T5] ERROR: dev_add(0x20) PCA9535 failed!");
+    return;
+  }
+  // LoRa and SD share the SPI bus: pull both CS high before powering rail on
+  pinMode(PIN_LORA_CS, OUTPUT); digitalWrite(PIN_LORA_CS, HIGH);
+  pinMode(PIN_SD_CS, OUTPUT);   digitalWrite(PIN_SD_CS, HIGH);
+
+  pca_rmw(0x06, 0x01, 0x00);   // config port 0: bit 0 output
+  pca_rmw(0x02, 0x00, 0x01);   // output port 0: LORA_EN high -> LoRa + GPS 3V3
+  pca_rmw(0x07, 0x00, 0x04);   // config port 1: bit 2 input (PCA_PIN_PC12 = S3 button)
+  delay(150);
+}
+
+
+// ---- Goodix GT911 (16-bit registers, big-endian)
+static bool s_home_key = false;
+bool periph_home_key() {
+  if (s_home_key) {
+    s_home_key = false;
+    return true;
+  }
+  return false;
+}
+
+void periph_touch_reset() {
+  pinMode(TOUCH_RST_PIN, OUTPUT);
+  pinMode(PIN_TOUCH_INT, OUTPUT);
+  digitalWrite(PIN_TOUCH_INT, LOW);  // INT low -> GT911 latches address 0x5D
+  digitalWrite(TOUCH_RST_PIN, LOW);  // assert RST
+  delay(15);
+  digitalWrite(TOUCH_RST_PIN, HIGH); // release RST while INT is still LOW
+  delay(10);
+  pinMode(PIN_TOUCH_INT, INPUT);     // release INT to high-Z (GT911 drives it now)
+  pinMode(TOUCH_RST_PIN, OUTPUT);    // GPIO 9 is dedicated touch reset (NOT epdiy LCD)
+  digitalWrite(TOUCH_RST_PIN, HIGH); // Keep GT911 reset firmly HIGH to prevent floating resets
+  delay(60);                         // wait out GT911 firmware boot
+}
+
+static bool gt911_rd(uint16_t reg, uint8_t* r, size_t n) {
+  uint8_t a[2] = { (uint8_t)(reg >> 8), (uint8_t)reg };
+  return wrrd(s_tp, a, 2, r, n);
+}
+static bool gt911_wr8(uint16_t reg, uint8_t v) {
+  uint8_t w[3] = { (uint8_t)(reg >> 8), (uint8_t)reg, v };
+  return wr(s_tp, w, 3);
+}
+static bool gt911_probe() {
+  uint8_t id[5] = {0};
+  if (!gt911_rd(0x8140, id, 4)) return false;
+  if (memcmp(id, "911", 3) != 0 && memcmp(id, "927", 3) != 0 && memcmp(id, "928", 3) != 0) return false;
+  uint8_t r[4] = {0};
+  if (gt911_rd(0x8048, r, 4)) {
+    int rx = r[0] | (r[1] << 8);
+    int ry = r[2] | (r[3] << 8);
+    if (rx > 0 && ry > 0) {
+      s_tp_max_x = rx;
+      s_tp_max_y = ry;
+    }
+  }
+  if (s_tp_max_x <= 0 || s_tp_max_y <= 0) {
+    s_tp_max_x = 540;
+    s_tp_max_y = 960;
+  }
+  return true;
+}
+static int gt911_read_point(int* x, int* y) {
+  uint8_t st = 0;
+  if (!gt911_rd(0x814E, &st, 1)) return 0;
+  if (!(st & 0x80)) return 0;
+
+  // The round capacitive home button below the screen sets bit 4 (HaveKey)
+  if (st & 0x10) {
+    static uint32_t s_last_home = 0;
+    uint32_t now = millis();
+    if (now - s_last_home >= 500) {
+      s_last_home = now;
+      s_home_key = true;
+    }
+  }
+
+  int n = st & 0x0F;
+  int res = 0;
+  if (n > 0) {
+    uint8_t p[8];
+    if (gt911_rd(0x814F, p, 8)) {
+      *x = p[1] | (p[2] << 8);
+      *y = p[3] | (p[4] << 8);
+      res = 1;
+    }
+  } else {
+    res = -1; // 0 points reported = explicit finger release
+  }
+  gt911_wr8(0x814E, 0);
+  return res;
+}
+
+// ---- Goodix GT6972P ("Berlin": 32-bit registers, big-endian, 64 B chunks)
+static bool gt6_rd(uint32_t reg, uint8_t* r, size_t n) {
+  for (size_t pos = 0; pos < n; pos += 64) {
+    uint32_t a = reg + pos;
+    uint8_t ab[4] = { (uint8_t)(a >> 24), (uint8_t)(a >> 16), (uint8_t)(a >> 8), (uint8_t)a };
+    size_t chunk = n - pos < 64 ? n - pos : 64;
+    if (!wrrd(s_tp, ab, 4, r + pos, chunk)) return false;
+  }
+  return true;
+}
+static bool gt6_wr(uint32_t reg, const uint8_t* d, size_t n) {
+  uint8_t buf[4 + 64];
+  buf[0] = reg >> 24; buf[1] = reg >> 16; buf[2] = reg >> 8; buf[3] = reg;
+  memcpy(buf + 4, d, n);
+  return wr(s_tp, buf, 4 + n);
+}
+static uint16_t le16(const uint8_t* p) { return p[0] | (p[1] << 8); }
+static uint32_t le32(const uint8_t* p) { return le16(p) | ((uint32_t)le16(p + 2) << 16); }
+static bool sum_ok(const uint8_t* d, size_t n) {   // 16-bit sum, LE trailer
+  uint32_t s = 0;
+  for (size_t i = 0; i + 2 < n + 0 && i < n - 2; i++) s += d[i];
+  return (uint16_t)s == le16(d + n - 2);
+}
+static bool gt6_probe() {
+  static const uint8_t pat[8] = { 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
+  uint8_t back[8] = {0};
+  if (!gt6_wr(0x10000, pat, 8) || !gt6_rd(0x10000, back, 8) || memcmp(pat, back, 8) != 0) return false;
+  // IC info block (version 2 layout): length-prefixed, checksummed. Walk the
+  // packages to the address package, where the touch-data address lives.
+  uint8_t hdr[4], info[256];
+  if (!gt6_rd(0x10070, hdr, 4)) return false;
+  size_t len = le16(hdr);
+  if (len < 8 || len >= sizeof(info) || !gt6_rd(0x10070, info, len) || !sum_ok(info, len)) return false;
+  if (info[3] != 0x02) return false;
+  size_t off = 2 + 10 + 16 + 8 + 4;             // head, version, bsp, param header
+  for (int i = 0; i < 5; i++) {                 // five frequency lists: count + 2 B each
+    if (off >= len - 2) return false;
+    uint8_t c = info[off++];
+    if (c > 8) return false;
+    off += (size_t)c * 2;
+  }
+  if (off + 28 + 24 > len - 2) return false;
+  off += 28;
+  s_tp_data_addr = le32(info + off + 11);
+  s_tp_max_x = le16(info + off + 19);
+  s_tp_max_y = le16(info + off + 21);
+  return s_tp_data_addr != 0;
+}
+static bool gt6_read(int* x, int* y) {
+  uint8_t b[16];
+  if (!gt6_rd(s_tp_data_addr, b, 16)) return false;
+  if (b[0] == 0) return false;
+  bool down = false;
+  if ((b[0] & 0x80) && sum_ok(b, 8)) {
+    int n = b[2] & 0x0F;
+    uint8_t type = b[8] & 0x0F;
+    if (n > 0 && (type == 2 || type == 4)) { *x = le16(b + 10); *y = le16(b + 12); down = true; }
+  }
+  uint8_t zero = 0;
+  gt6_wr(s_tp_data_addr, &zero, 1);
+  return down;
+}
+
+static void touch_begin() {
+  for (int retry = 0; retry < 2 && s_tp_kind == TP_NONE; retry++) {
+    if (retry > 0) periph_touch_reset();
+    for (uint8_t addr : { (uint8_t)0x5D, (uint8_t)0x14 }) {
+      if (!present(addr)) continue;
+      s_tp = dev_add(addr);
+      if (!s_tp) continue;
+      if (gt911_probe()) { s_tp_kind = TP_GT911; return; }
+      if (gt6_probe())   { s_tp_kind = TP_GT6972P; return; }
+      i2c_master_bus_rm_device(s_tp);
+      s_tp = nullptr;
+    }
+  }
+}
+
+bool periph_touch(int* x, int* y) {
+  if (s_tp_kind == TP_NONE) return false;
+  static bool down = false;
+  static int lx = 0, ly = 0;
+  static uint32_t last_touch_ms = 0;
+  uint32_t now = millis();
+
+  if (s_tp_kind == TP_GT911) {
+    int tx = 0, ty = 0;
+    int res = gt911_read_point(&tx, &ty);
+    if (res == 1) {
+      lx = tx; ly = ty;
+      down = true;
+      last_touch_ms = now;
+      *x = tx; *y = ty;
+      return true;
+    } else if (res == -1) {
+      down = false;
+      return false;
+    } else {
+      if (down && now - last_touch_ms > 60) down = false;
+      if (down) { *x = lx; *y = ly; return true; }
+      return false;
+    }
+  } else {
+    int tx = 0, ty = 0;
+    bool d = gt6_read(&tx, &ty);
+    if (d) { lx = tx; ly = ty; down = true; last_touch_ms = now; *x = tx; *y = ty; return true; }
+    if (down && now - last_touch_ms > 60) down = false;
+    if (down) { *x = lx; *y = ly; return true; }
+    return false;
+  }
+}
+void periph_touch_range(int* mx, int* my) { *mx = s_tp_max_x; *my = s_tp_max_y; }
+
+// ---- BQ27220 fuel gauge (firmware/common/bq27220.h)
+static bool gauge_write(uint8_t reg, const uint8_t* data, size_t n) {
+  uint8_t b[8];
+  if (n + 1 > sizeof(b)) return false;
+  b[0] = reg;
+  memcpy(b + 1, data, n);
+  return wr(s_gauge, b, n + 1);
+}
+static bool gauge_read(uint8_t reg, uint8_t* data, size_t n) { return wrrd(s_gauge, &reg, 1, data, n); }
+static void gauge_sleep(uint32_t ms) { delay(ms); }
+static const bq27220::Io kGaugeIo = { gauge_write, gauge_read, gauge_sleep };
+static bq27220::Result s_gauge_result = bq27220::Result::NotFound;
+
+// Check the gauge against the T5's 1500 mAh cell profile and rewrite it on
+// any difference (~60 ms when it matches, ~5 s the one time it does not).
+// Unconfigured, the gauge counts against TI's generic profile and its
+// percentage drifts away from the cell.
+static void gauge_begin() {
+  const size_t n = sizeof(bq27220::kT5EpdProfile) / sizeof(bq27220::kT5EpdProfile[0]);
+  bq27220::Report r = bq27220::provision(kGaugeIo, bq27220::kT5EpdProfile, n);
+  s_gauge_result = r.result;
+}
+
+int periph_batt_pct() { return s_have_gauge ? bq27220::soc_pct(kGaugeIo) : -1; }
+int periph_batt_mv() { return s_have_gauge ? bq27220::voltage_mv(kGaugeIo) : -1; }
+int periph_batt_full_mah() { return s_have_gauge ? bq27220::full_capacity_mah(kGaugeIo) : -1; }
+bool periph_gauge_configured() {
+  return s_have_gauge && (s_gauge_result == bq27220::Result::Ok ||
+                          s_gauge_result == bq27220::Result::Provisioned);
+}
+bool periph_gauge_json(char* out, size_t n) {
+  if (!s_have_gauge) return false;
+  bq25896::State c;
+  bool chg = s_have_charger && bq25896::state(kChargerIo, &c);
+  power_report_json(out, n, bq27220::result_name(s_gauge_result), bq27220::kT5CellMah,
+                    bq27220::state(kGaugeIo), chg ? &c : nullptr);
+  return true;
+}
+
+// ---- RTC (PCF8563 at 0x51) & System Time
+#define PCF8563_ADDR 0x51
+static i2c_master_dev_handle_t s_rtc = nullptr;
+static bool s_have_rtc = false;
+static bool s_have_utc_time = false;
+
+static uint8_t bcd2bin(uint8_t val) { return val - 6 * (val >> 4); }
+static uint8_t bin2bcd(uint8_t val) { return val + 6 * (val / 10); }
+
+static bool rtc_read_time(uint16_t* yr, uint8_t* mo, uint8_t* d, uint8_t* h, uint8_t* mi, uint8_t* s) {
+  if (!s_have_rtc) return false;
+  uint8_t reg = 0x02, r[7] = {0};
+  if (!wrrd(s_rtc, &reg, 1, r, 7)) return false;
+  if (r[0] & 0x80) return false; // VL bit set -> clock integrity lost
+  *s  = bcd2bin(r[0] & 0x7F);
+  *mi = bcd2bin(r[1] & 0x7F);
+  *h  = bcd2bin(r[2] & 0x3F);
+  *d  = bcd2bin(r[3] & 0x3F);
+  *mo = bcd2bin(r[5] & 0x1F);
+  *yr = 2000 + bcd2bin(r[6]);
+  return (*yr >= 2024 && *mo >= 1 && *mo <= 12 && *d >= 1 && *d <= 31);
+}
+
+static bool rtc_write_time(uint16_t yr, uint8_t mo, uint8_t d, uint8_t h, uint8_t mi, uint8_t s) {
+  if (!s_have_rtc) return false;
+  uint8_t w[8] = {
+    0x02,
+    (uint8_t)(bin2bcd(s) & 0x7F), // VL = 0 (valid)
+    (uint8_t)(bin2bcd(mi) & 0x7F),
+    (uint8_t)(bin2bcd(h) & 0x3F),
+    (uint8_t)(bin2bcd(d) & 0x3F),
+    0, // weekday
+    (uint8_t)(bin2bcd(mo) & 0x1F),
+    (uint8_t)bin2bcd(yr >= 2000 ? yr - 2000 : yr)
+  };
+  return wr(s_rtc, w, 8);
+}
+
+static bool parse_build_time(uint16_t* yr, uint8_t* mo, uint8_t* d, uint8_t* h, uint8_t* mi, uint8_t* s) {
+  const char* date = __DATE__;     // "Sep  5 2026"
+  const char* time_str = __TIME__; // "21:30:24"
+  char s_month[5] = {0};
+  int day = 0, year = 0, hour = 0, minute = 0, second = 0;
+  if (sscanf(date, "%3s %d %d", s_month, &day, &year) != 3) return false;
+  if (sscanf(time_str, "%d:%d:%d", &hour, &minute, &second) != 3) return false;
+
+  const char* months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+  *mo = 1;
+  for (uint8_t i = 0; i < 12; i++) {
+    if (strcmp(s_month, months[i]) == 0) { *mo = i + 1; break; }
+  }
+  *yr = (uint16_t)year;
+  *d  = (uint8_t)day;
+  *h  = (uint8_t)hour;
+  *mi = (uint8_t)minute;
+  *s  = (uint8_t)second;
+  return (*yr >= 2024 && *mo >= 1 && *mo <= 12 && *d >= 1 && *d <= 31);
+}
+
+static inline time_t utc_to_epoch(int y, int m, int d, int h, int min, int s) {
+  if (m <= 2) y--;
+  int era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = era * 146097 + (long)doe - 719468;
+  return (time_t)(days * 86400L + (long)h * 3600L + (long)min * 60L + s);
+}
+
+// Sets the system clock, and the RTC chip when `persist` is set or an hour
+// has passed. GPS calls this once a second, hence the hourly limit; a host
+// set must persist every time, because the boot restore in periph_begin
+// takes the hourly slot, so a set in the first hour after a reset would
+// otherwise never reach the chip and the next reset would undo it.
+static bool set_utc(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s, bool persist) {
+  // The year must be one this firmware could be running in: a receiver
+  // without a fix invents 1980 (read as 2080) or 2000, and neither may
+  // reach the clock or the RTC chip (nmea_year_plausible, t5_nmea.h).
+  if (!nmea_year_plausible(y, atoi(__DATE__ + 7))) return false;
+  if (m < 1 || m > 12 || d < 1 || d > 31 || h > 23 || min > 59 || s > 59) return false;
+  time_t epoch = utc_to_epoch((int)y, (int)m, (int)d, (int)h, (int)min, (int)s);
+  if (epoch <= 0) return false;
+  struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+  settimeofday(&tv, nullptr);
+  s_have_utc_time = true;
+  static uint32_t last_rtc_sync = 0;
+  uint32_t now = millis();
+  if (s_have_rtc && (persist || now - last_rtc_sync > 3600000UL || last_rtc_sync == 0)) {
+    last_rtc_sync = now;
+    rtc_write_time(y, m, d, h, min, s);
+  }
+  return true;
+}
+
+void periph_set_utc_time(uint16_t y, uint8_t m, uint8_t d, uint8_t h, uint8_t min, uint8_t s) {
+  set_utc(y, m, d, h, min, s, false);
+}
+
+bool periph_set_utc_time_host(time_t epoch) {
+  struct tm t;
+  gmtime_r(&epoch, &t);
+  return set_utc(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, true);
+}
+
+bool periph_rtc_iso(char* out, size_t n) {
+  uint16_t y; uint8_t mo, d, h, mi, s;
+  if (!rtc_read_time(&y, &mo, &d, &h, &mi, &s)) return false;
+  snprintf(out, n, "%04u-%02u-%02uT%02u:%02u:%02uZ", y, mo, d, h, mi, s);
+  return true;
+}
+
+bool periph_has_utc_time() { return s_have_utc_time; }
+
+void periph_get_utc_time(uint16_t* y, uint8_t* m, uint8_t* d, uint8_t* h, uint8_t* min, uint8_t* s) {
+  time_t now = time(nullptr);
+  struct tm t;
+  gmtime_r(&now, &t);
+  if (y)   *y   = t.tm_year + 1900;
+  if (m)   *m   = t.tm_mon + 1;
+  if (d)   *d   = t.tm_mday;
+  if (h)   *h   = t.tm_hour;
+  if (min) *min = t.tm_min;
+  if (s)   *s   = t.tm_sec;
+}
+
+// ---- Backlight Controller (PT4103B23F on PIN_BL_EN = GPIO 11)
+static BlMode s_bl_mode = BL_AUTO;
+static uint8_t s_bl_duty = 180; // 0..255 (default ~70% duty)
+static bool s_bl_active = false;
+static double s_sun_elev = 0.0;
+static bool s_after_sundown = false;
+static uint32_t s_last_bl_eval = 0;
+
+static void bl_eval(uint32_t now) {
+  s_last_bl_eval = now;
+  if (s_have_utc_time) {
+    uint16_t y; uint8_t mo, d, h, mi, s;
+    periph_get_utc_time(&y, &mo, &d, &h, &mi, &s);
+    double lat = 37.7749, lon = -122.4194;   // fallback coords if no fix
+    rx_get_home(&lat, &lon);                  // the board's position, under the receiver lock
+    s_sun_elev = solar_elevation_deg(lat, lon, y, mo, d, h, mi, s);
+    s_after_sundown = (s_sun_elev <= SOLAR_SUNDOWN_ELEVATION_DEG);
+  } else {
+    // If no time synced yet, assume daylight unless forced ON
+    s_after_sundown = false;
+    s_sun_elev = 0.0;
+  }
+
+  bool want_on = false;
+  if (s_bl_mode == BL_AUTO) {
+    want_on = s_after_sundown;
+  } else if (s_bl_mode == BL_ON) {
+    want_on = true;
+  } else {
+    want_on = false;
+  }
+
+  if (want_on != s_bl_active) {
+    s_bl_active = want_on;
+    ledcWrite(PIN_BL_EN, s_bl_active ? s_bl_duty : 0);
+  }
+}
+
+void periph_bl_init() {
+  Preferences p;
+  p.begin("orecchino", true);
+  s_bl_mode = (BlMode)p.getUChar("bl_mode", BL_AUTO);
+  s_bl_duty = p.getUChar("bl_duty", 180);
+  p.end();
+  if (s_bl_mode > BL_OFF) s_bl_mode = BL_AUTO;
+  if (s_bl_duty == 0) s_bl_duty = 180;
+
+  ledcAttach(PIN_BL_EN, 5000, 8);
+  ledcWrite(PIN_BL_EN, 0); // start dark until evaluated
+  bl_eval(millis());
+}
+
+void periph_bl_set_mode(BlMode mode) {
+  if (mode > BL_OFF) mode = BL_AUTO;
+  s_bl_mode = mode;
+  Preferences p; p.begin("orecchino", false);
+  p.putUChar("bl_mode", (uint8_t)s_bl_mode);
+  p.end();
+  s_last_bl_eval = 0;
+  bl_eval(millis());
+}
+
+BlMode periph_bl_get_mode() { return s_bl_mode; }
+
+void periph_bl_set_duty(uint8_t duty) {
+  s_bl_duty = duty;
+  Preferences p; p.begin("orecchino", false);
+  p.putUChar("bl_duty", s_bl_duty);
+  p.end();
+  if (s_bl_active) ledcWrite(PIN_BL_EN, s_bl_duty);
+}
+
+uint8_t periph_bl_get_duty() { return s_bl_duty; }
+
+// Pulses run on the input task (core 0), so they show while the loop is
+// busy with the very refresh they accompany. Half-cycles left; odd = lit.
+static volatile uint8_t s_bl_pulse_left = 0;
+static uint32_t s_bl_pulse_ms = 0;
+void periph_bl_pulse(uint8_t times) {
+  s_bl_pulse_ms = millis() - 1000;   // the first flash at once
+  s_bl_pulse_left = (uint8_t)(times * 2);
+}
+static void bl_pulse_tick(uint32_t now) {
+  if (!s_bl_pulse_left || now - s_bl_pulse_ms < 220) return;
+  s_bl_pulse_ms = now;
+  uint8_t left = (uint8_t)(s_bl_pulse_left - 1);
+  s_bl_pulse_left = left;
+  ledcWrite(PIN_BL_EN, (left & 1) ? 255 : (s_bl_active ? s_bl_duty : 0));
+}
+bool periph_bl_is_active() { return s_bl_active; }
+bool periph_is_after_sundown() { return s_after_sundown; }
+double periph_sun_elevation() { return s_sun_elev; }
+
+// ---- GPS: NMEA over UART1, baud found by listening
+static const uint32_t GPS_BAUDS[] = { 9600, 38400, 115200 };
+static int s_gps_baud_i = 0;
+static uint32_t s_gps_last_sentence = 0, s_gps_baud_since = 0;
+static char s_nmea[120];
+static int s_nmea_n = 0;
+static bool s_gps_detected = false;
+static bool s_gps_disabled = false;
+static uint8_t s_gps_hunt_attempts = 0;
+static const uint8_t GPS_MAX_HUNT_ATTEMPTS = 6; // 2 probe cycles across the 3 baud rates (~20s)
+
+// The sentences are parsed in t5_nmea.h (host-tested). Only a sentence
+// that carries a fix may set the clock: without one the module sends a
+// placeholder date that would read as the year 2080 and override SNTP.
+static void nmea_line(const char* s, uint32_t now) {
+  NmeaMsg m;
+  if (!nmea_parse(s, &m)) return;
+  s_gps_last_sentence = now;
+  s_gps_detected = true;
+  s_gps_hunt_attempts = 0;
+  if (!strcmp(m.kind, "GGA")) s_gps_sats = m.sats;
+  if (!m.fix) return;
+  gps_post_fix(m.lat, m.lon);
+  s_gps_fix = true; s_gps_fix_ms = now;
+  if (m.has_elev) s_gps_elev_m = m.elev_m;
+  if (m.has_time && m.has_date) {                      // RMC: the whole clock
+    periph_set_utc_time(m.yr, m.mo, m.d, m.h, m.mi, m.s);
+    bl_eval(now);
+  } else if (m.has_time && s_have_utc_time) {          // GGA: the time of day, on a date already known
+    uint16_t cy; uint8_t cm, cd, ch, cmi, cs;
+    periph_get_utc_time(&cy, &cm, &cd, &ch, &cmi, &cs);
+    periph_set_utc_time(cy, cm, cd, m.h, m.mi, m.s);
+  }
+}
+
+bool periph_gps_detected() { return !s_gps_disabled && s_gps_detected && (millis() - s_gps_last_sentence < 15000); }
+bool periph_gps_fix() { return s_gps_fix; }
+int  periph_gps_sats() { return s_gps_sats; }
+float periph_gps_elev_m() { return s_gps_fix ? s_gps_elev_m : NAN; }
+
+bool periph_poll_touch_event(TouchEvent* evt) {
+  if (!s_touch_queue || !evt) return false;
+  return xQueueReceive(s_touch_queue, evt, 0) == pdTRUE;
+}
+
+static void periph_input_task(void* arg) {
+  static bool s_touching = false;
+  static int s_x0 = 0, s_y0 = 0, s_xl = 0, s_yl = 0;
+
+  for (;;) {
+    uint32_t now = millis();
+
+    // 1. Drain GPS UART (Serial1) if not disabled
+    if (!s_gps_disabled) {
+      while (Serial1.available()) {
+        char c = (char)Serial1.read();
+        if (c == '\n' || c == '\r') {
+          if (s_nmea_n > 0) {
+            s_nmea[s_nmea_n] = 0;
+            nmea_line(s_nmea, now);
+            s_nmea_n = 0;
+          }
+        } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) {
+          s_nmea[s_nmea_n++] = c;
+        } else {
+          s_nmea_n = 0;
+        }
+      }
+
+      // Hunt baud rate if silent; if not found after 6 attempts, disable UART1
+      uint32_t hunt_interval = periph_gps_detected() ? 10000 : 3500;
+      if (now - s_gps_last_sentence > hunt_interval && now - s_gps_baud_since > hunt_interval) {
+        if (!s_gps_detected) {
+          s_gps_hunt_attempts++;
+          if (s_gps_hunt_attempts >= GPS_MAX_HUNT_ATTEMPTS) {
+            s_gps_disabled = true;
+            Serial1.end();
+          }
+        }
+        if (!s_gps_disabled) {
+          s_gps_baud_i = (s_gps_baud_i + 1) % 3;
+          Serial1.updateBaudRate(GPS_BAUDS[s_gps_baud_i]);
+          s_gps_baud_since = now;
+        }
+      }
+      if (s_gps_fix && now - s_gps_fix_ms > 30000) s_gps_fix = false;
+    }
+
+    // 2. Poll Touch Controller (GT911 / GT6972P)
+    int rx = 0, ry = 0;
+    bool down = periph_touch(&rx, &ry);
+
+    if (down) {
+      int mx = s_tp_max_x, my = s_tp_max_y;
+      int sx = 0, sy = 0;
+      if (mx && my && mx < my) {
+        sx = (int)((long)ry * 960 / my);
+        sy = (int)((long)(mx - rx) * 540 / mx);
+      } else if (mx && my) {
+        sx = (int)((long)rx * 960 / mx);
+        sy = (int)((long)ry * 540 / my);
+      } else {
+        sx = rx; sy = ry;
+      }
+      if (sx < 0) sx = 0; else if (sx >= 960) sx = 959;
+      if (sy < 0) sy = 0; else if (sy >= 540) sy = 539;
+
+      if (!s_touching) {
+        s_touching = true;
+        s_x0 = sx;
+        s_y0 = sy;
+      }
+      s_xl = sx;
+      s_yl = sy;
+    } else if (s_touching) {
+      // Finger released
+      s_touching = false;
+      int dx = s_xl - s_x0;
+      int dy = s_yl - s_y0;
+
+      TouchEvent evt;
+      evt.x = (int16_t)s_x0;
+      evt.y = (int16_t)s_y0;
+      evt.dx = (int16_t)dx;
+      evt.dy = (int16_t)dy;
+      evt.ms = now;
+
+      // Tap vs drag slop discrimination
+      if (abs(dx) < 50 && abs(dy) < 50) {
+        evt.type = TOUCH_EVT_TAP;
+      } else {
+        evt.type = TOUCH_EVT_DRAG;
+      }
+
+      if (s_touch_queue) {
+        if (xQueueSend(s_touch_queue, &evt, 0) != pdTRUE) {
+          TouchEvent drop;
+          xQueueReceive(s_touch_queue, &drop, 0);
+          xQueueSend(s_touch_queue, &evt, 0);
+        }
+      }
+    }
+
+    bl_pulse_tick(now);
+
+    // 15ms sampling period (~66 Hz)
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
+}
+
+void periph_begin() {
+  if (i2c_master_get_bus_handle(0, &s_bus) != ESP_OK || !s_bus) return;
+  if (!s_i2c_mutex) s_i2c_mutex = xSemaphoreCreateMutex();
+  if (!s_touch_queue) s_touch_queue = xQueueCreate(16, sizeof(TouchEvent));
+
+  rail_on();
+  touch_begin();
+  if (present(BQ27220_ADDR)) { s_gauge = dev_add(BQ27220_ADDR); s_have_gauge = s_gauge != nullptr; }
+  if (s_have_gauge) gauge_begin();   // before the input task shares the bus
+  if (present(BQ25896_ADDR)) { s_charger = dev_add(BQ25896_ADDR); s_have_charger = s_charger != nullptr; }
+  charger_apply();
+  if (present(PCF8563_ADDR)) {
+    s_rtc = dev_add(PCF8563_ADDR);
+    s_have_rtc = (s_rtc != nullptr);
+    if (s_have_rtc) {
+      uint16_t yr; uint8_t mo, d, h, mi, s;
+      // A chip holding an impossible year (a GPS placeholder date an
+      // earlier firmware wrote through) is treated like one with no time.
+      if (rtc_read_time(&yr, &mo, &d, &h, &mi, &s) && set_utc(yr, mo, d, h, mi, s, false)) {
+        Serial.printf("[RTC] Valid time restored: %04u-%02u-%02uT%02u:%02u:%02uZ\n", yr, mo, d, h, mi, s);
+      } else {
+        if (parse_build_time(&yr, &mo, &d, &h, &mi, &s)) {
+          periph_set_utc_time(yr, mo, d, h, mi, s);
+          Serial.printf("[RTC] Clock integrity lost / uninitialized; seeded from build time: %04u-%02u-%02uT%02u:%02u:%02uZ\n",
+                        yr, mo, d, h, mi, s);
+        }
+      }
+    }
+  }
+  periph_bl_init();
+  // The input task that drains this UART is starved for the length of every
+  // panel refresh (the core-0 feeder spins), and a full GC16 takes 1-1.5 s:
+  // at 9600 baud that is ~1.4 KB of NMEA, more than the default 256-byte
+  // buffer, so every refresh used to lose sentences. 2 KB holds it.
+  Serial1.setRxBufferSize(2048);
+  Serial1.begin(GPS_BAUDS[0], SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+  s_gps_baud_since = millis();
+
+  // Launch asynchronous input & touch task on Core 0 (PRO_CPU)
+  xTaskCreatePinnedToCore(
+    periph_input_task,
+    "t5_input_core0",
+    4096,
+    nullptr,
+    3,
+    &s_input_task_handle,
+    0   // Pin to Core 0 (PRO_CPU)
+  );
+}
+
+void periph_tick(uint32_t now) {
+  static uint32_t s_charger_ms = 0;
+  if (now - s_charger_ms >= 60000) { s_charger_ms = now; charger_apply(); }
+  // A fix parked by the GPS reader becomes the home position here, on the loop.
+  bool fix = false;
+  double lat = 0, lon = 0;
+  portENTER_CRITICAL(&s_fix_mux);
+  if (s_fix_new) { lat = s_fix_lat; lon = s_fix_lon; s_fix_new = false; fix = true; }
+  portEXIT_CRITICAL(&s_fix_mux);
+  if (fix) rx_set_home(lat, lon, "gps");
+
+  // If input task is not running for some reason, fallback to reading Serial1 here
+  if (!s_input_task_handle && !s_gps_disabled) {
+    while (Serial1.available()) {
+      char c = (char)Serial1.read();
+      if (c == '\n' || c == '\r') {
+        if (s_nmea_n > 0) { s_nmea[s_nmea_n] = 0; nmea_line(s_nmea, now); s_nmea_n = 0; }
+      } else if (s_nmea_n < (int)sizeof(s_nmea) - 1) s_nmea[s_nmea_n++] = c;
+      else s_nmea_n = 0;
+    }
+  }
+
+  // Evaluate backlight every 10 seconds
+  if (now - s_last_bl_eval >= 10000 || s_last_bl_eval == 0) {
+    bl_eval(now);
+  }
+}
+
+bool periph_io48_key_down() {
+  if (!s_pca) return false;
+  uint8_t reg = 0x01; // PCA9535 Input port 1
+  uint8_t val = 0xFF;
+  if (wrrd(s_pca, &reg, 1, &val, 1)) {
+    // IO1_2 is bit 2 (0x04), active low: the key labelled IO48.
+    return (val & 0x04) == 0;
+  }
+  return false;
+}
+
+bool periph_is_charging() {
+  if (!s_have_charger) return false;
+  uint8_t status = 0;
+  if (bq25896_read(0x0B, &status)) {
+    uint8_t chg = (status >> 3) & 0x03;
+    return (chg == 1 || chg == 2);
+  }
+  return false;
+}
+
+bool periph_on_vbus() {
+  if (!s_have_charger) return true; // Default to true if charger chip not detected
+  uint8_t status = 0;
+  if (bq25896_read(0x0B, &status)) {
+    return (status & 0x04) != 0; // Bit 2: PG_STAT (Power Good)
+  }
+  return false;
+}
+
+void periph_power_off() {
+  Serial.println("[ORECCHINO] Powering off device...");
+  rx_log_flush();   // records since the last timed save would be lost
+
+  // Stop background input task
+  if (s_input_task_handle) {
+    vTaskDelete(s_input_task_handle);
+    s_input_task_handle = nullptr;
+  }
+
+  // Decide once how the board comes back, before the ~1 s redraw: the
+  // screen's instruction and the action below must not disagree if USB is
+  // unplugged mid-draw. On battery it cuts its own power (ship mode) and
+  // only PWR restarts it; on USB it deep-sleeps and BOOT wakes it.
+  bool ship = s_have_charger && !periph_on_vbus();
+
+  // 1. Draw persistent power-off screen on E-paper display and power down TPS65185
+  ui_show_shutdown_screen(!ship);
+
+  // 2. Turn off backlight PT4103 boost converter. Drive the pin directly:
+  //    periph_bl_set_duty() persists to NVS and would zero the saved brightness.
+  if (s_bl_active) ledcWrite(PIN_BL_EN, 0);
+  digitalWrite(PIN_BL_EN, LOW);
+
+  // 3. Cut LoRa & GPS 3V3 power rail via PCA9535 (Port 0 Bit 0 = 0)
+  if (s_pca) {
+    pca_rmw(0x02, 0x01, 0x00);
+  }
+
+  // 4. If running on battery (not connected to USB), command BQ25896 to disconnect battery (Ship mode)
+  if (ship) {
+    Serial.println("[ORECCHINO] Disconnecting battery FET (Ship mode shutdown)...");
+    delay(50);
+    uint8_t reg9 = 0;
+    bq25896_read(0x09, &reg9);
+    reg9 |= (1 << 5);  // BATFET_DIS = 1
+    reg9 &= ~(1 << 3); // BATFET_DLY = 0 (immediate)
+    bq25896_write(0x09, reg9);
+    delay(200);
+  }
+
+  // 5. Fallback or if USB is connected: enter ESP32-S3 Deep Sleep
+  Serial.println("[ORECCHINO] Entering deep sleep (wake via BOOT button or USB)...");
+  delay(50);
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0); // Wake on side BOOT button (active low)
+  esp_deep_sleep_start();
+}
+
