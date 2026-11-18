@@ -44,7 +44,7 @@ func droneguideWFSURL(endpoint string, now time.Time) (*url.URL, error) {
 	query.Set("typeNames", "uaszone")
 	query.Set("srsName", "EPSG:4326")
 	query.Set("outputFormat", "application/json")
-	query.Set("cql_filter", "type_code <> 'TIME_ZONE'")
+	query.Set("cql_filter", droneguideAltitudeCQL)
 	query.Set("viewParams", "window_start:"+windowTime(now)+";window_end:"+windowTime(now.Add(droneguideWFSWindow))+";show_planned:true")
 	query.Set("count", strconv.Itoa(droneguideWFSPageSize))
 	query.Set("sortBy", "unique_identifier A")

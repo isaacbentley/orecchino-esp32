@@ -70,6 +70,8 @@ type droneguideZone struct {
 	Applicability    []droneguidePeriod    `json:"applicability,omitempty"`
 	Conditions       []string              `json:"conditions,omitempty"`
 	ActiveAtSnapshot *bool                 `json:"activeAtSnapshot,omitempty"`
+	lowerAGL         *float64
+	upperAGL         *float64
 }
 
 type droneguideProjection struct {
@@ -120,6 +122,8 @@ type droneguideGeoProps struct {
 	Description         json.RawMessage `json:"description"`
 	NativeLower         *float64        `json:"lower_limit_altitude"`
 	NativeUpper         *float64        `json:"upper_limit_altitude"`
+	NativeLowerAGL      *float64        `json:"lower_limit_altitude_meter_agl"`
+	NativeUpperAGL      *float64        `json:"upper_limit_altitude_meter_agl"`
 	NativeLowerRef      string          `json:"lower_limit_reference"`
 	NativeUpperRef      string          `json:"upper_limit_reference"`
 	NativeLowerUnit     string          `json:"lower_limit_unit"`
@@ -399,6 +403,8 @@ func (z *droneguideZone) altitude(alt droneguideAltitude, lowUnit, highUnit stri
 	if z.LowerUnit == z.UpperUnit {
 		z.Unit = z.LowerUnit
 	}
+	z.lowerAGL = droneguideDirectAGL(z.Lower, z.LowerReference, z.LowerUnit)
+	z.upperAGL = droneguideDirectAGL(z.Upper, z.UpperReference, z.UpperUnit)
 }
 
 func droneguideFromED(raw json.RawMessage) ([]droneguideZone, error) {
@@ -479,6 +485,12 @@ func droneguideFromGeo(raw json.RawMessage, live bool) ([]droneguideZone, error)
 	alt.UpperRef = droneguideFirst(alt.UpperRef, p.NativeUpperRef, p.UpperRef)
 	alt.Unit = droneguideFirst(alt.Unit, p.Unit)
 	z.altitude(alt, droneguideFirst(p.NativeLowerUnit, p.LowerUnit), droneguideFirst(p.NativeUpperUnit, p.UpperUnit))
+	if z.lowerAGL == nil {
+		z.lowerAGL = p.NativeLowerAGL
+	}
+	if z.upperAGL == nil {
+		z.upperAGL = p.NativeUpperAGL
+	}
 	// The WFS window fields use 0 for active and 1 for inactive. Never
 	// interpret unbound defaults in an imported file as live timings.
 	if live && p.ActiveAtWindowStart != nil {

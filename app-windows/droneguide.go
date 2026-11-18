@@ -23,26 +23,28 @@ const (
 )
 
 type droneguideView struct {
-	State        string            `json:"state"`
-	Count        int               `json:"count"`
-	Revision     uint64            `json:"revision"`
-	Source       string            `json:"source"`
-	SourceType   string            `json:"sourceType"`
-	LiveEnabled  bool              `json:"liveEnabled"`
-	OmittedCount int               `json:"omittedCount"`
-	Stale        bool              `json:"stale"`
-	UpdatedAt    *time.Time        `json:"updatedAt,omitempty"`
-	SnapshotAt   *time.Time        `json:"snapshotAt,omitempty"`
-	Error        string            `json:"error,omitempty"`
-	Zones        *[]droneguideZone `json:"zones,omitempty"`
+	State                string            `json:"state"`
+	Count                int               `json:"count"`
+	Revision             uint64            `json:"revision"`
+	Source               string            `json:"source"`
+	SourceType           string            `json:"sourceType"`
+	LiveEnabled          bool              `json:"liveEnabled"`
+	UnknownAltitudeCount int               `json:"unknownAltitudeCount"`
+	OmittedCount         int               `json:"omittedCount"`
+	Stale                bool              `json:"stale"`
+	UpdatedAt            *time.Time        `json:"updatedAt,omitempty"`
+	SnapshotAt           *time.Time        `json:"snapshotAt,omitempty"`
+	Error                string            `json:"error,omitempty"`
+	Zones                *[]droneguideZone `json:"zones,omitempty"`
 }
 
 type droneguideSnapshot struct {
-	Raw        json.RawMessage  `json:"data"`
-	UpdatedAt  time.Time        `json:"updatedAt"`
-	SnapshotAt *time.Time       `json:"snapshotAt,omitempty"`
-	Zones      []droneguideZone `json:"-"`
-	Omitted    int              `json:"-"`
+	Raw                  json.RawMessage  `json:"data"`
+	UpdatedAt            time.Time        `json:"updatedAt"`
+	SnapshotAt           *time.Time       `json:"snapshotAt,omitempty"`
+	Zones                []droneguideZone `json:"-"`
+	Omitted              int              `json:"-"`
+	UnknownAltitudeCount int              `json:"-"`
 }
 
 type droneguideDiskState struct {
@@ -154,8 +156,7 @@ func (service *droneguideService) load(legacy string) error {
 				*entry.dataset = nil
 				continue
 			}
-			snapshot.Zones = zones
-			snapshot.Omitted = omitted
+			snapshot.selectAltitudeBand(zones, omitted)
 		}
 		service.config = config
 		return parseError
@@ -177,7 +178,8 @@ func (service *droneguideService) load(legacy string) error {
 	if err != nil {
 		return err
 	}
-	service.config.Manual = &droneguideSnapshot{Raw: raw, UpdatedAt: updatedAt, Zones: zones}
+	service.config.Manual = &droneguideSnapshot{Raw: raw, UpdatedAt: updatedAt}
+	service.config.Manual.selectAltitudeBand(zones, 0)
 	return nil
 }
 
@@ -219,6 +221,7 @@ func (service *droneguideService) snapshot(includeZones bool, now time.Time) dro
 	if service.shown != nil {
 		zones = service.shown.Zones
 		view.OmittedCount = service.shown.Omitted
+		view.UnknownAltitudeCount = service.shown.UnknownAltitudeCount
 		view.UpdatedAt = &service.shown.UpdatedAt
 		view.SnapshotAt = service.shown.SnapshotAt
 		view.Stale = view.LiveEnabled && view.State == "error"
@@ -264,7 +267,8 @@ func (service *droneguideService) importFile(w http.ResponseWriter, r *http.Requ
 	service.mu.Lock()
 	config := service.config
 	config.LiveEnabled = false
-	config.Manual = &droneguideSnapshot{Raw: data, UpdatedAt: time.Now().UTC(), Zones: zones}
+	config.Manual = &droneguideSnapshot{Raw: data, UpdatedAt: time.Now().UTC()}
+	config.Manual.selectAltitudeBand(zones, 0)
 	if err := service.persist(config); err != nil {
 		service.mu.Unlock()
 		replyError(w, http.StatusInternalServerError, errors.New("de Droneguide-import kan niet worden opgeslagen"))
@@ -353,7 +357,8 @@ func (service *droneguideService) startRefresh() {
 			return
 		}
 		config := service.config
-		config.Live = &droneguideSnapshot{Raw: raw, UpdatedAt: time.Now().UTC(), SnapshotAt: &start, Zones: zones, Omitted: omitted}
+		config.Live = &droneguideSnapshot{Raw: raw, UpdatedAt: time.Now().UTC(), SnapshotAt: &start}
+		config.Live.selectAltitudeBand(zones, omitted)
 		if err := service.persist(config); err != nil {
 			service.state, service.lastError = "error", "De online Droneguide-gegevens kunnen niet worden opgeslagen."
 			return

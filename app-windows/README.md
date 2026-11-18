@@ -18,11 +18,13 @@ Gebruik **Instellingen → USB-ontvanger** om zo nodig zelf een COM-poort te kie
 - **Offline kaarten** plant de kaarttegels voor compatibele ontvangers zoals de SenseCAP en de T5. Kies een locatie en straal, controleer het plan en klik op **Versturen** om de tegels te downloaden en naar de ontvanger te sturen. De planner houdt 1 MiB opslag vrij.
 - **ADS-B** toont waarschuwingen voor mogelijke conflicten tussen ontvangen drones en bemand luchtverkeer. De standaardbron is adsb.lol. Het Windows-systeemvak toont het aantal actuele contacten en geeft bij conflicten een Windows-melding als je meldingsinstellingen dat toelaten.
 - De **FAA-laag** toont tijdelijke beperkingen uit de Verenigde Staten. De kaartachtergrond, ADS-B, de FAA-laag en het downloaden van offline kaarttegels hebben internet nodig.
-- De **Droneguide-laag** toont Belgische geozones naast de FAA-laag. Je kunt de laag op de kaart afzonderlijk aan- en uitzetten. Open een zone om de beschikbare hoogte-, beperkings- en tijdgegevens te bekijken.
+- De **Droneguide-laag** toont Belgische geozones die het luchtruim tot en met **500 ft boven de grond** (AGL, 152,4 m) raken. Je kunt de laag naast de FAA-laag aan- en uitzetten. Open een zone om de beschikbare hoogte-, beperkings- en tijdgegevens te bekijken.
 
 ## Belgische geozones laden
 
 Ga naar **Instellingen → Belgische geozones**. Schakel **Automatisch ophalen** in als je toestemming hebt voor toegang tot de Droneguide-API. Orecchino haalt dan de Belgische geozones op bij skeyes en ververst de laag elke 15 minuten. Met **Nu vernieuwen** start je zelf een nieuwe aanvraag. **Zoom naar geozones** brengt de geladen laag in beeld. [Droneguide WFS](https://map.droneguide.be/ows?service=WFS&version=2.0.0&request=GetCapabilities) · [Droneguide-gebruiksvoorwaarden](https://map.droneguide.be/api/licenseagreements/current)
+
+Een zone telt mee zodra haar hoogtebereik het luchtruim tussen de grond en 500 ft AGL overlapt. Voor de selectie gebruikt de app grenzen in AGL en de AGL-omrekening die skeyes aanlevert. De instellingen vermelden hoeveel zones door een onbepaalde AGL-hoogte buiten de selectie vallen. Dit geldt ook voor geïmporteerde gegevens.
 
 Bij een mislukte vernieuwing toont de app de laatst ingelezen gegevens en vermeldt ze de fout. Activiteit uit de API geldt voor het weergegeven tijdstip van opname. Raadpleeg Droneguide en de actuele NOTAM voor de actuele activiteit en toegangsvoorwaarden. [Droneguide (skeyes)](https://map.droneguide.be/) · [AIM-Meteo Briefing](https://ops.skeyes.be/)
 

@@ -18,7 +18,8 @@ func droneguideWFSFixture(id string, active int) string {
 	return fmt.Sprintf(`{
 		"type":"Feature","id":"uaszone.%s","properties":{
 			"unique_identifier":%q,"name":"{\"en\":\"Example\",\"nl\":\"Proef\"}","restriction":"PROHIBITED",
-			"type_code":"TEMPORARY-NO-FLY-ZONE","active_at_window_start":%d
+			"type_code":"TEMPORARY-NO-FLY-ZONE","active_at_window_start":%d,
+			"lower_limit_altitude_meter_agl":0,"upper_limit_altitude_meter_agl":152.4
 		},"geometry":{"type":"Polygon","coordinates":[[[4.30,50.80],[4.40,50.80],[4.35,50.86],[4.30,50.80]]]}
 	}`, id, id, active)
 }
@@ -30,7 +31,7 @@ func TestDroneguideWFSFetchCompletesPagesAndBindsActivity(t *testing.T) {
 		page := int(requests.Add(1)) - 1
 		query := r.URL.Query()
 		if query.Get("typeNames") != "uaszone" || query.Get("startIndex") != strconv.Itoa(page) ||
-			query.Get("sortBy") != "unique_identifier A" || query.Get("cql_filter") != "type_code <> 'TIME_ZONE'" ||
+			query.Get("sortBy") != "unique_identifier A" || query.Get("cql_filter") != droneguideAltitudeCQL ||
 			query.Get("viewParams") != `window_start:2026-10-01T13\:45\:16.220Z;window_end:2026-10-02T13\:45\:16.220Z;show_planned:true` {
 			t.Errorf("unexpected WFS query %v", query)
 		}

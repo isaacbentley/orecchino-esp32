@@ -454,6 +454,7 @@
 
   function renderDroneguideStatus() {
     const hasZones = (droneguide.zones || []).length > 0;
+    const hasSnapshot = Boolean(droneguide.updatedAt);
     const live = Boolean(droneguide.liveEnabled);
     const fromAPI = droneguide.sourceType === "live";
     const shown = hasZones && droneguideVisible;
@@ -474,13 +475,18 @@
     let summary = live ? "Bezig met ophalen…" : "Belgische geozones instellen";
     if (hasZones) summary = shown ? `${zones} · ${source}` : "Belgische geozones verborgen";
     else if (droneguide.state === "loading") summary = "Belgische geozones laden…";
+    else if (hasSnapshot) summary = "0 zones tot 500 ft AGL";
     if (live && droneguide.state === "error") summary = hasZones ? `${summary} · vernieuwen mislukt` : "Droneguide-verzoek mislukt";
     else if (shown && fromAPI && droneguide.stale) summary = `${zones} · opgeslagen API-opname`;
-    let status = hasZones ? `${zones} ${source}${loaded ? ` ingelezen op ${loaded}` : ""}.` : "Er zijn nog geen geozones ingelezen.";
+    let status = hasSnapshot ? `${zones} tot 500 ft AGL · ${source}${loaded ? ` · ${loaded}` : ""}.` : "Er zijn nog geen geozones ingelezen.";
     if (droneguide.omittedCount > 0) status += ` Zones zonder tekenbare geometrie: ${integer.format(droneguide.omittedCount)}.`;
-    if (live && droneguide.state === "loading") status = `Droneguide ophalen… ${hasZones ? status : ""}`;
-    if (fromAPI && !live && hasZones) status += " Automatisch ophalen staat uit.";
-    if (droneguide.error) status = `${droneguide.error}${hasZones ? ` Laatste gegevens: ${status}` : ""}`;
+    if (droneguide.unknownAltitudeCount > 0) {
+      const amount = integer.format(droneguide.unknownAltitudeCount);
+      status += ` Onbepaalde AGL-hoogte bij ${amount} ${droneguide.unknownAltitudeCount === 1 ? "zone" : "zones"} buiten de selectie.`;
+    }
+    if (live && droneguide.state === "loading") status = `Droneguide ophalen… ${hasSnapshot ? status : ""}`;
+    if (fromAPI && !live && hasSnapshot) status += " Automatisch ophalen staat uit.";
+    if (droneguide.error) status = `${droneguide.error}${hasSnapshot ? ` Laatste gegevens: ${status}` : ""}`;
     $("droneguide-summary").textContent = summary;
     $("droneguide-status").textContent = status;
     $("droneguide-status").classList.toggle("error", droneguide.state === "error");
@@ -995,7 +1001,7 @@
       droneguideVisible = true;
       await loadDroneguide();
       $("droneguide-form").reset();
-      message($("droneguide-message"), "Belgische geozones ingelezen. De app gebruikt nu het geïmporteerde bestand.");
+      message($("droneguide-message"), "Bestand ingelezen. De app gebruikt nu de geïmporteerde gegevens.");
     });
   });
   $("droneguide-toggle").addEventListener("click", () => {
