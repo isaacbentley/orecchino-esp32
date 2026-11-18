@@ -29,6 +29,7 @@
   }).addTo(map);
   L.tileLayer(esriCanvas + "World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", {zIndex: 2}).addTo(map);
   const zoneLayer = L.layerGroup().addTo(map);
+  const droneguideLayer = L.featureGroup().addTo(map);
   const trackLayer = L.layerGroup().addTo(map);
   let selectedId = null;
   let activeTab = "live";
@@ -41,6 +42,10 @@
   let scrollToDetail = false;
   let state = {receiver: {status: "searching", tracks: []}, settings: {}};
   let airspace = {alerts: [], zones: [], trafficEnabled: true, radiusKm: 10};
+  let droneguide = {state: "loading", zones: []};
+  let droneguideVisible = true;
+  let droneguideDrawn = "";
+  let droneguideRequest = 0;
   let tilePlanInput = null;
   let tileState = {phase: "idle"};
   let tilesUpdating = false;
@@ -52,7 +57,7 @@
     if (body !== undefined) {
       options.method = "POST";
       options.headers = {"Content-Type": "application/json"};
-      options.body = JSON.stringify(body);
+      options.body = body instanceof Blob ? body : JSON.stringify(body);
     }
     const response = await fetch(path, options);
     if (response.status === 204) return {};
@@ -379,6 +384,123 @@
     for (const zone of airspace.zones || []) zoneShape(zone);
   }
 
+  function droneguideDate(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? datetime.format(date) : value;
+  }
+
+  function droneguideAltitude(value, unit, reference) {
+    if (!Number.isFinite(value)) return "";
+    const units = {F: "ft", FT: "ft", M: "m"};
+    return [decimal.format(value), units[unit] || unit, reference].filter(Boolean).join(" ");
+  }
+
+  function droneguidePopup(zone) {
+    const content = make("div", "droneguide-popup");
+    content.append(make("strong", "", zone.name || zone.id));
+    const list = make("dl");
+    const row = (label, value) => {
+      if (value) list.append(make("dt", "", label), make("dd", "", value));
+    };
+    const restrictions = {PROHIBITED: "Verboden", REQ_AUTHORISATION: "Toestemming vereist", CONDITIONAL: "Voorwaardelijk"};
+    row("Zonecode", zone.id);
+    row("Beperking volgens bron", restrictions[zone.restriction] || zone.restriction);
+    row("Ondergrens", droneguideAltitude(zone.lower, zone.lowerUnit || zone.unit, zone.lowerReference));
+    row("Bovengrens", droneguideAltitude(zone.upper, zone.upperUnit || zone.unit, zone.upperReference));
+    row("Geldig vanaf", droneguideDate(zone.validFrom));
+    row("Geldig tot", droneguideDate(zone.validUntil));
+    row("Tijdschema volgens export", zone.schedule);
+    if (typeof zone.activeAtSnapshot === "boolean" && droneguide.snapshotAt) {
+      const status = zone.activeAtSnapshot ? "Actief" : "Inactief";
+      row("Bij API-opname", `${status} · ${droneguideDate(droneguide.snapshotAt)}`);
+    }
+    row("Reden", zone.reason);
+    row("Voorwaarden", (zone.conditions || []).join("\n"));
+    row("Zonebeheer", (zone.authorities || []).map(({name, service}) => name || service).filter(Boolean).join(", "));
+    row("Toelichting", zone.message);
+    content.append(list);
+    const source = make("a", "", "Actuele informatie op Droneguide (skeyes)");
+    source.href = "https://map.droneguide.be/";
+    source.target = "_blank";
+    source.rel = "noopener noreferrer";
+    content.append(source);
+    return content;
+  }
+
+  function renderDroneguideZones() {
+    const key = JSON.stringify([droneguide.revision, Math.round(map.getCenter().lng / 360)]);
+    if (droneguideDrawn === key) return;
+    droneguideDrawn = key;
+    droneguideLayer.clearLayers();
+    for (const zone of droneguide.zones || []) {
+      const style = {color: "#c6b8ff", fillColor: "#ab92ff", weight: 1.3, fillOpacity: .16};
+      if (zone.activeAtSnapshot === false) Object.assign(style, {opacity: .55, fillOpacity: .07, dashArray: "4 4"});
+      const center = point(zone.circle?.center);
+      if (center && Number.isFinite(zone.circle.radiusM) && zone.circle.radiusM > 0) {
+        L.circle(mapCoordinate(center), {...style, radius: zone.circle.radiusM})
+          .bindPopup(() => droneguidePopup(zone)).addTo(droneguideLayer);
+        continue;
+      }
+      const polygons = (zone.polygons || []).map((polygon) => {
+        const rings = polygon.map((ring) => ring.map(point).filter(Boolean));
+        if (!rings.length || rings[0].length < 3) return null;
+        const anchor = mapCoordinate(rings[0][0])[1];
+        return rings.filter((ring) => ring.length >= 3).map((ring) => ring.map((position) => mapCoordinate(position, anchor)));
+      }).filter(Boolean);
+      if (polygons.length) L.polygon(polygons, style).bindPopup(() => droneguidePopup(zone)).addTo(droneguideLayer);
+    }
+  }
+
+  function renderDroneguideStatus() {
+    const hasZones = (droneguide.zones || []).length > 0;
+    const live = Boolean(droneguide.liveEnabled);
+    const fromAPI = droneguide.sourceType === "live";
+    const shown = hasZones && droneguideVisible;
+    if (shown && !map.hasLayer(droneguideLayer)) map.addLayer(droneguideLayer);
+    else if (!shown && map.hasLayer(droneguideLayer)) map.removeLayer(droneguideLayer);
+    const toggle = $("droneguide-toggle");
+    if (hasZones) toggle.setAttribute("aria-pressed", String(shown));
+    else toggle.removeAttribute("aria-pressed");
+    toggle.title = hasZones ? "Belgische geozones tonen of verbergen" : "Belgische geozones beheren";
+    $("droneguide-legend").hidden = !shown;
+    $("droneguide-fit").disabled = !hasZones;
+    $("droneguide-live").setAttribute("aria-pressed", String(live));
+    $("droneguide-refresh").disabled = !live || droneguide.state === "loading" || $("droneguide-refresh").getAttribute("aria-busy") === "true";
+    const count = integer.format(droneguide.count || 0);
+    const zones = `${count} ${droneguide.count === 1 ? "kaartzone" : "kaartzones"}`;
+    const loaded = droneguideDate(droneguide.updatedAt);
+    const source = fromAPI ? "via API" : "uit export";
+    let summary = live ? "Bezig met ophalen…" : "Belgische geozones instellen";
+    if (hasZones) summary = shown ? `${zones} · ${source}` : "Belgische geozones verborgen";
+    else if (droneguide.state === "loading") summary = "Belgische geozones laden…";
+    if (live && droneguide.state === "error") summary = hasZones ? `${summary} · vernieuwen mislukt` : "Droneguide-verzoek mislukt";
+    else if (shown && fromAPI && droneguide.stale) summary = `${zones} · opgeslagen API-opname`;
+    let status = hasZones ? `${zones} ${source}${loaded ? ` ingelezen op ${loaded}` : ""}.` : "Er zijn nog geen geozones ingelezen.";
+    if (droneguide.omittedCount > 0) status += ` Zones zonder tekenbare geometrie: ${integer.format(droneguide.omittedCount)}.`;
+    if (live && droneguide.state === "loading") status = `Droneguide ophalen… ${hasZones ? status : ""}`;
+    if (fromAPI && !live && hasZones) status += " Automatisch ophalen staat uit.";
+    if (droneguide.error) status = `${droneguide.error}${hasZones ? ` Laatste gegevens: ${status}` : ""}`;
+    $("droneguide-summary").textContent = summary;
+    $("droneguide-status").textContent = status;
+    $("droneguide-status").classList.toggle("error", droneguide.state === "error");
+  }
+
+  async function loadDroneguide() {
+    const request = ++droneguideRequest;
+    let view = await api("/api/droneguide?zones=0");
+    if (request !== droneguideRequest) return;
+    if (view.revision !== droneguide.revision) {
+      view = await api("/api/droneguide");
+      if (request !== droneguideRequest) return;
+    } else {
+      view.zones = droneguide.zones;
+    }
+    droneguide = view;
+    renderDroneguideZones();
+    renderDroneguideStatus();
+  }
+
   function showAlert(alert) {
     const positions = [point(alert.origin), point(alert.aircraft?.coordinate)].filter(Boolean);
     if (alert.droneId && getTrack(alert.droneId)) selectTrack(alert.droneId, false, true);
@@ -391,6 +513,7 @@
 
   function renderMap() {
     renderZones();
+    renderDroneguideZones();
     const center = map.getCenter();
     const tracks = (state.receiver.tracks || []).filter((track) => point(track));
     const alerts = airspace.alerts || [];
@@ -662,7 +785,8 @@
     if (![...select.options].some((option) => option.value === value)) select.add(new Option(value, value));
     select.value = value;
     $("settings-dialog").showModal();
-    if (section) $("port-select").focus();
+    if (section === "receiver") $("port-select").focus();
+    if (section === "droneguide") $("droneguide-file").focus();
     action($("refresh-ports"), $("port-message"), refreshPorts);
   }
 
@@ -854,6 +978,41 @@
     await api("/api/airspace/refresh", {});
     await loadAirspace();
   }));
+  $("droneguide-live").addEventListener("click", () => action($("droneguide-live"), $("droneguide-message"), async () => {
+    await api("/api/droneguide/live", {enabled: !droneguide.liveEnabled});
+    await loadDroneguide();
+  }));
+  $("droneguide-refresh").addEventListener("click", () => action($("droneguide-refresh"), $("droneguide-message"), async () => {
+    await api("/api/droneguide/refresh", {});
+    await loadDroneguide();
+  }).then(renderDroneguideStatus));
+  $("droneguide-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const file = $("droneguide-file").files[0];
+    if (!file) return;
+    action($("droneguide-import"), $("droneguide-message"), async () => {
+      await api("/api/droneguide/import", file);
+      droneguideVisible = true;
+      await loadDroneguide();
+      $("droneguide-form").reset();
+      message($("droneguide-message"), "Belgische geozones ingelezen. De app gebruikt nu het geïmporteerde bestand.");
+    });
+  });
+  $("droneguide-toggle").addEventListener("click", () => {
+    if (!(droneguide.zones || []).length) {
+      showSettings("droneguide");
+      return;
+    }
+    droneguideVisible = !droneguideVisible;
+    renderDroneguideStatus();
+  });
+  $("droneguide-fit").addEventListener("click", () => {
+    droneguideVisible = true;
+    renderDroneguideStatus();
+    $("settings-dialog").close();
+    const bounds = droneguideLayer.getBounds();
+    if (bounds.isValid()) map.fitBounds(bounds, {padding: [55, 55], maxZoom: 15});
+  });
   $("log-read").addEventListener("click", () => action($("log-read"), $("log-message"), async () => {
     renderLog(await api("/api/device/log/read", {}));
   }));
@@ -900,10 +1059,11 @@
   new ResizeObserver(() => map.invalidateSize({pan: false})).observe($("map"));
 
   async function refresh() {
-    const results = await Promise.allSettled([loadReceiver(), loadAirspace()]);
+    const results = await Promise.allSettled([loadReceiver(), loadAirspace(), loadDroneguide()]);
     if (results[0].status === "rejected") message($("app-error"), "Verbinding met de desktopapp onderbroken.", true);
     else if ($("app-error").textContent === "Verbinding met de desktopapp onderbroken.") message($("app-error"));
     if (results[1].status === "rejected") $("traffic-status").textContent = "Verkeersgegevens niet beschikbaar";
+    if (results[2].status === "rejected") $("droneguide-status").textContent = "Droneguide-gegevens konden niet worden geladen.";
     if (activeTab === "tiles" && $("tiles-plan").getAttribute("aria-busy") !== "true") loadTiles();
     window.setTimeout(refresh, 1000);
   }

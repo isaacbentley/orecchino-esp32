@@ -24,7 +24,7 @@
   <div id="simulation-banner" class="simulation-banner" role="status" hidden>SIMULATIE ACTIEF <span>Gesimuleerde contacten worden gemarkeerd.</span></div>
   <div id="app-error" class="app-error" role="alert" hidden></div>
   <main class="workspace">
-    <section class="map-section" aria-label="Kaart van waargenomen drones en hun operators">
+    <section class="map-section" aria-label="Kaart van drones, operators en luchtruimzones">
       <div id="map"></div>
       <div class="map-head">
         <div class="map-heading">
@@ -35,6 +35,7 @@
           <span><i class="legend-drone"></i>Drone</span>
           <span><i class="legend-operator"></i>Operator</span>
           <span><i class="legend-airspace"></i>FAA-beperking</span>
+          <span id="droneguide-legend" hidden><i class="legend-droneguide"></i>Belgische geozone</span>
         </div>
       </div>
       <div class="map-actions">
@@ -42,8 +43,14 @@
         <button id="home-button" class="button icon" type="button" aria-label="Toon ontvangerlocatie" title="Toon ontvangerlocatie"><span class="home-icon" aria-hidden="true"></span></button>
       </div>
       <div class="map-status">
-        <button id="traffic-toggle" class="button toggle" type="button" aria-pressed="true" title="Verkeersbewaking in- of uitschakelen"><span class="status-dot"></span>ADS-B</button>
-        <span id="traffic-status" role="status">Verkeersbewaking laden…</span>
+        <div class="map-status-row">
+          <button id="traffic-toggle" class="button toggle" type="button" aria-pressed="true" title="Verkeersbewaking in- of uitschakelen"><span class="status-dot"></span>ADS-B</button>
+          <span id="traffic-status" role="status">Verkeersbewaking laden…</span>
+        </div>
+        <div class="map-status-row">
+          <button id="droneguide-toggle" class="button toggle" type="button" title="Belgische geozones beheren"><span class="legend-droneguide" aria-hidden="true"></span>Droneguide</button>
+          <span id="droneguide-summary" role="status">Belgische geozones laden…</span>
+        </div>
       </div>
     </section>
     <aside class="sidebar" aria-label="Ontvangerinformatie en bediening">
@@ -152,6 +159,23 @@
         </form>
         <p id="tfr-status" class="notice"></p>
         <p id="airspace-message" class="notice" role="status" hidden></p>
+      </section>
+      <section id="droneguide-settings">
+        <h3>Belgische geozones · Droneguide (skeyes)</h3>
+        <p class="notice">Schakel automatisch ophalen in als je toestemming hebt voor API-toegang. Controleer de actuele zones en voorwaarden op de <a href="https://map.droneguide.be/" target="_blank" rel="noopener noreferrer">officiële Droneguide-kaart</a>.</p>
+        <div class="button-row">
+          <button id="droneguide-live" class="button toggle" type="button" aria-pressed="false">Automatisch ophalen</button>
+          <button id="droneguide-refresh" class="button" type="button" disabled>Nu vernieuwen</button>
+        </div>
+        <p id="droneguide-status" class="notice" role="status"></p>
+        <form id="droneguide-form" class="stack">
+          <label>Droneguide-bestand <input id="droneguide-file" type="file" accept=".json,.geojson,application/json,application/geo+json,application/vnd.geo+json" required></label>
+          <div class="button-row">
+            <button id="droneguide-import" class="button primary" type="submit">Geozones importeren</button>
+            <button id="droneguide-fit" class="button" type="button" disabled>Zoom naar geozones</button>
+          </div>
+        </form>
+        <p id="droneguide-message" class="notice" role="status" hidden></p>
       </section>
       <section class="about">
         <h3>Over Orecchino</h3>

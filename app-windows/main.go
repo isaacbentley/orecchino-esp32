@@ -312,6 +312,8 @@ func run() error {
 	mux := http.NewServeMux()
 	a.register(mux)
 	registerDevice(mux, a.receiver, *dataDir)
+	stopDroneguide := registerDroneguide(mux, *dataDir)
+	defer stopDroneguide()
 	stopAirspace, currentAlerts := registerAirspace(mux, a.receiver, a.location, *dataDir)
 	defer stopAirspace()
 
