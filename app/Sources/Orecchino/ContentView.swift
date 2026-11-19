@@ -22,6 +22,10 @@ struct ContentView: View {
                     Label("TFR", systemImage: "exclamationmark.triangle")
                 }
                 .help("Show FAA Temporary Flight Restrictions")
+                Toggle(isOn: Bindable(model.droneguide).showLayer) {
+                    Label("Droneguide", systemImage: "map")
+                }
+                .help("Show Belgian skeyes Droneguide geozones within 0–500 ft AGL")
                 Toggle(isOn: $model.showTraffic) {
                     Label("Traffic", systemImage: "airplane")
                 }
@@ -45,7 +49,7 @@ struct ContentView: View {
                     if case .planned = model.tileSync.phase {
                         Button("Send Map to Receiver") { model.tileSync.send() }
                     }
-                    SettingsLink { Text("Map and ADS-B Settings…") }
+                    SettingsLink { Text("Map and Airspace Settings…") }
                 } label: {
                     Label("Device", systemImage: "square.and.arrow.down.on.square")
                 }
@@ -572,6 +576,8 @@ struct MapPane: View {
     private let lastFitState = State<MKMapRect?>(initialValue: nil)
     /// Labels that fit; nil until the first projection, when all are shown.
     private let visibleLabelsState = State<Set<String>?>(initialValue: nil)
+    private let droneguideDrawings = State<[DroneguideMapZone]>(initialValue: [])
+    private let selectedDroneguide = State<Set<String>>(initialValue: [])
 
     static let cardWidth: CGFloat = 320
     static let tfrCardWidth: CGFloat = 280
@@ -651,6 +657,10 @@ struct MapPane: View {
         GeometryReader { geo in
             MapReader { proxy in
                 let visible = visibleLabelsState.wrappedValue
+                let service = model.droneguide
+                let drawings = service.showLayer ? droneguideDrawings.wrappedValue : []
+                let active = Set(drawings.filter { service.activity(for: $0.zone, at: model.now) == .active }.map(\.id))
+                let shown = service.activeOnly ? drawings.filter { active.contains($0.id) } : drawings
                 Map(position: camera) {
                     if model.showTFR {
                         ForEach(model.tfr.zones) { z in
@@ -662,6 +672,9 @@ struct MapPane: View {
                                     .environment(model)
                             }
                         }
+                    }
+                    if service.showLayer {
+                        DroneguideMapLayer(zones: shown, active: active)
                     }
                     if model.showTraffic {
                         // Only aircraft in an alert, drawn before the drones so
@@ -728,6 +741,13 @@ struct MapPane: View {
                 }
                 .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll,
                                     showsTraffic: false))
+                .simultaneousGesture(SpatialTapGesture().onEnded { tap in
+                    guard !shown.isEmpty, let coordinate = proxy.convert(tap.location, from: .local) else {
+                        selectedDroneguide.wrappedValue = []
+                        return
+                    }
+                    selectedDroneguide.wrappedValue = Set(shown.filter { $0.contains(coordinate) }.map(\.id))
+                })
                 .mapControls {
                     MapCompass()
                     MapScaleView()
@@ -746,16 +766,17 @@ struct MapPane: View {
                 .onChange(of: model.selection) { _, sel in
                     recomputeLabels(proxy)
                     guard let sel, let c = model.tracks[sel]?.coordinate else { return }
+                    selectedDroneguide.wrappedValue = []
                     model.followAll = false  // focusing one drone ends group-follow
                     focus(on: c, size: geo.size)
                 }
                 .onChange(of: model.selectedTraffic) { _, sel in
                     guard let sel, let c = model.traffic.aircraft.first(where: { $0.id == sel })?.coordinate else { return }
+                    selectedDroneguide.wrappedValue = []
                     model.followAll = false
                     focus(on: c, size: geo.size)
                 }
-                .onChange(of: model.mapFocus) { _, f in
-                    // "Show" on a traffic alert: the drone and the aircraft.
+                .onChange(of: model.mapFocus, initial: true) { _, f in
                     guard let f, geo.size.width > 0 else { return }
                     let content = MapFit.bounds(of: f.coords, margin: 1.6, minMeters: 2500)
                     let rect = MapFit.rect(content: content, frame: geo.size, insets: insets)
@@ -763,6 +784,14 @@ struct MapPane: View {
                 }
                 .onChange(of: model.followAll) { _, on in
                     if on { refit(force: true, size: geo.size) }
+                }
+                .onChange(of: service.revision, initial: true) { _, _ in
+                    droneguideDrawings.wrappedValue = service.zones.map(DroneguideMapZone.init)
+                    let ids = Set(service.zones.map(\.id))
+                    selectedDroneguide.wrappedValue.formIntersection(ids)
+                }
+                .onChange(of: service.showLayer) { _, visible in
+                    if !visible { selectedDroneguide.wrappedValue = [] }
                 }
                 .onAppear {
                     refit(force: true, size: geo.size)
@@ -790,6 +819,18 @@ struct MapPane: View {
                     TFRCard(zone: z)
                         .padding(12)
                         .padding(.bottom, 26)
+                } else if model.droneguide.showLayer, droneCard == nil, trafficCard == nil,
+                          !selectedDroneguide.wrappedValue.isEmpty {
+                    let zones = model.droneguide.zones.filter {
+                        selectedDroneguide.wrappedValue.contains($0.id) && model.droneguide.includes($0, at: model.now)
+                    }
+                    if !zones.isEmpty {
+                        DroneguideMapCard(zones: zones, service: model.droneguide, now: model.now) {
+                            selectedDroneguide.wrappedValue = []
+                        }
+                        .padding(12)
+                        .padding(.bottom, 26)
+                    }
                 }
             }
             .overlay(alignment: .bottom) {

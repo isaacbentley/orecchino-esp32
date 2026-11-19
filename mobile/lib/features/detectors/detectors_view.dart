@@ -18,6 +18,7 @@ import '../../core/traffic/adsb_source.dart';
 import '../../data/db.dart';
 import '../../ui/glass.dart';
 import '../../ui/theme/theme.dart';
+import '../droneguide/droneguide_widgets.dart';
 import '../history/clear_history_sheet.dart';
 import '../live/live_map.dart' show MapTileSource;
 import 'wifi_setup_sheet.dart';
@@ -113,6 +114,8 @@ class _DetectorsViewState extends State<DetectorsView> {
                     if (app.settings.adsb) _radius(),
                     _divider(),
                     _mapTiles(context),
+                    _divider(),
+                    DroneguideSettingsTile(service: app.droneguide),
                     _divider(),
                     _toggle('Notifications', 'Traffic near drones, low traffic, emergencies, invalid ID signatures',
                         'notifications', app.settings.notifications),

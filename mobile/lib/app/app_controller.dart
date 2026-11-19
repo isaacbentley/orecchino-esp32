@@ -47,6 +47,7 @@ import '../core/alerts/notifier.dart';
 import '../core/background/watch_service.dart';
 import '../core/ble/ble_service.dart';
 import '../core/ble/simulated_detector.dart';
+import '../core/droneguide/droneguide.dart';
 import '../core/link/detector_link.dart';
 import '../core/live/contact_tracker.dart';
 import '../core/live/phone_history.dart';
@@ -97,6 +98,7 @@ class AppController extends ChangeNotifier {
   final LocationService location;
   final AlertSink alerts;
   final AdsbSource adsb;
+  final DroneguideService droneguide;
 
   /// The phone's own Remote ID receiver (null: none, as in most tests). It
   /// shares one BleScanCoordinator with [ble] ([AppController.platform]).
@@ -121,6 +123,7 @@ class AppController extends ChangeNotifier {
     LocationService? location,
     AlertSink? alerts,
     AdsbSource? adsb,
+    DroneguideService? droneguide,
     this.nativeRx,
     this.watch,
     this.startTimers = true,
@@ -130,8 +133,11 @@ class AppController extends ChangeNotifier {
         location = location ?? LocationService(),
         alerts = alerts ?? SilentAlertSink(),
         adsb = adsb ?? AdsbSource(),
+        droneguide = droneguide ?? DroneguideService(persistent: false),
         _foreground = foreground {
     sync = SyncEngine(db: db, sendCommand: (c) => link.send(c));
+    this.droneguide.setForeground(foreground);
+    this.droneguide.addListener(_changed);
   }
 
   /// The real app: one Bluetooth scan coordinator shared by the detector
@@ -146,6 +152,7 @@ class AppController extends ChangeNotifier {
       ble: BleService(transport: CoordinatedBleTransport(coordinator)),
       nativeRx: NativeRxService.platform(coordinator: coordinator),
       watch: WatchService.platform(),
+      droneguide: DroneguideService(),
       foreground: foreground,
     );
   }
@@ -269,6 +276,7 @@ class AppController extends ChangeNotifier {
   void setVisibility({bool? foreground, AppTab? tab, bool? reduceMotion}) {
     final wasFg = _foreground;
     _foreground = foreground ?? _foreground;
+    if (_foreground != wasFg) droneguide.setForeground(_foreground);
     _tab = tab ?? _tab;
     _reduceMotion = reduceMotion ?? _reduceMotion;
     _applyPower();
@@ -502,6 +510,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> start() async {
     await _loadSettings();
+    unawaited(droneguide.initialize());
     await alerts.init(onAction: _onNotificationAction);
     ble.addListener(_onBleChanged);
     location.addListener(_onLocationChanged);
@@ -1104,6 +1113,8 @@ class AppController extends ChangeNotifier {
     ble.dispose();
     location.dispose();
     adsb.close();
+    droneguide.removeListener(_changed);
+    droneguide.dispose();
     unawaited(_phoneSub?.cancel());
     unawaited(_simPhoneSub?.cancel());
     nativeRx?.removeListener(_changed);

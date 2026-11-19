@@ -411,9 +411,13 @@
     row("Geldig vanaf", droneguideDate(zone.validFrom));
     row("Geldig tot", droneguideDate(zone.validUntil));
     row("Tijdschema volgens export", zone.schedule);
+    const activities = {active: "Actief", inactive: "Inactief", unknown: "Onbekend"};
     if (typeof zone.activeAtSnapshot === "boolean" && droneguide.snapshotAt) {
       const status = zone.activeAtSnapshot ? "Actief" : "Inactief";
       row("Bij API-opname", `${status} · ${droneguideDate(droneguide.snapshotAt)}`);
+      if (droneguide.stale) row("Activiteit", "Onbekend · verouderde opname");
+    } else {
+      row("Activiteit", activities[zone.activity] || activities.unknown);
     }
     row("Reden", zone.reason);
     row("Voorwaarden", (zone.conditions || []).join("\n"));
@@ -429,13 +433,15 @@
   }
 
   function renderDroneguideZones() {
-    const key = JSON.stringify([droneguide.revision, Math.round(map.getCenter().lng / 360)]);
+    const key = JSON.stringify([droneguide.revision, droneguide.activityRevision, droneguide.activeOnly, Math.round(map.getCenter().lng / 360)]);
     if (droneguideDrawn === key) return;
     droneguideDrawn = key;
     droneguideLayer.clearLayers();
     for (const zone of droneguide.zones || []) {
+      if (droneguide.activeOnly && zone.activity !== "active") continue;
       const style = {color: "#c6b8ff", fillColor: "#ab92ff", weight: 1.3, fillOpacity: .16};
-      if (zone.activeAtSnapshot === false) Object.assign(style, {opacity: .55, fillOpacity: .07, dashArray: "4 4"});
+      if (zone.activity === "inactive") Object.assign(style, {opacity: .55, fillOpacity: .07, dashArray: "4 4"});
+      if (zone.activity === "unknown") Object.assign(style, {opacity: .7, fillOpacity: .09, dashArray: "2 4"});
       const center = point(zone.circle?.center);
       if (center && Number.isFinite(zone.circle.radiusM) && zone.circle.radiusM > 0) {
         L.circle(mapCoordinate(center), {...style, radius: zone.circle.radiusM})
@@ -457,28 +463,44 @@
     const hasSnapshot = Boolean(droneguide.updatedAt);
     const live = Boolean(droneguide.liveEnabled);
     const fromAPI = droneguide.sourceType === "live";
-    const shown = hasZones && droneguideVisible;
+    const activeOnly = Boolean(droneguide.activeOnly);
+    const hasVisibleZones = hasZones && (!activeOnly || droneguide.activeCount > 0);
+    const shown = hasVisibleZones && droneguideVisible;
     if (shown && !map.hasLayer(droneguideLayer)) map.addLayer(droneguideLayer);
     else if (!shown && map.hasLayer(droneguideLayer)) map.removeLayer(droneguideLayer);
     const toggle = $("droneguide-toggle");
-    if (hasZones) toggle.setAttribute("aria-pressed", String(shown));
+    if (hasZones) toggle.setAttribute("aria-pressed", String(droneguideVisible));
     else toggle.removeAttribute("aria-pressed");
     toggle.title = hasZones ? "Belgische geozones tonen of verbergen" : "Belgische geozones beheren";
     $("droneguide-legend").hidden = !shown;
-    $("droneguide-fit").disabled = !hasZones;
+    $("droneguide-fit").disabled = !hasVisibleZones;
+    $("droneguide-active-only").setAttribute("aria-checked", String(activeOnly));
     $("droneguide-live").setAttribute("aria-pressed", String(live));
     $("droneguide-refresh").disabled = !live || droneguide.state === "loading" || $("droneguide-refresh").getAttribute("aria-busy") === "true";
     const count = integer.format(droneguide.count || 0);
     const zones = `${count} ${droneguide.count === 1 ? "kaartzone" : "kaartzones"}`;
+    const activeCount = droneguide.activeCount || 0;
+    const activeZones = `${integer.format(activeCount)} actieve ${activeCount === 1 ? "zone" : "zones"}`;
     const loaded = droneguideDate(droneguide.updatedAt);
     const source = fromAPI ? "via API" : "uit export";
     let summary = live ? "Bezig met ophalen…" : "Belgische geozones instellen";
-    if (hasZones) summary = shown ? `${zones} · ${source}` : "Belgische geozones verborgen";
+    if (hasZones && !droneguideVisible) summary = "Belgische geozones verborgen";
+    else if (hasZones && activeOnly && fromAPI && droneguide.stale) summary = "Geen actuele activiteitsgegevens";
+    else if (hasZones && activeOnly && activeCount === 0) summary = "Geen bevestigde actieve zones";
+    else if (shown) summary = `${activeOnly ? activeZones : zones} · ${source}`;
     else if (droneguide.state === "loading") summary = "Belgische geozones laden…";
     else if (hasSnapshot) summary = "0 zones tot 500 ft AGL";
     if (live && droneguide.state === "error") summary = hasZones ? `${summary} · vernieuwen mislukt` : "Droneguide-verzoek mislukt";
     else if (shown && fromAPI && droneguide.stale) summary = `${zones} · opgeslagen API-opname`;
     let status = hasSnapshot ? `${zones} tot 500 ft AGL · ${source}${loaded ? ` · ${loaded}` : ""}.` : "Er zijn nog geen geozones ingelezen.";
+    if (hasSnapshot && activeOnly) status += ` ${activeZones} in deze weergave.`;
+    if (droneguide.snapshotAt) {
+      status += ` Activiteitsopname: ${droneguideDate(droneguide.snapshotAt)}.`;
+      if (droneguide.stale) status += " De activiteitsopname is verouderd.";
+    }
+    if (droneguide.unknownActivityCount > 0) {
+      status += ` Activiteit onbekend bij ${integer.format(droneguide.unknownActivityCount)} ${droneguide.unknownActivityCount === 1 ? "zone" : "zones"}.`;
+    }
     if (droneguide.omittedCount > 0) status += ` Zones zonder tekenbare geometrie: ${integer.format(droneguide.omittedCount)}.`;
     if (droneguide.unknownAltitudeCount > 0) {
       const amount = integer.format(droneguide.unknownAltitudeCount);
@@ -496,7 +518,7 @@
     const request = ++droneguideRequest;
     let view = await api("/api/droneguide?zones=0");
     if (request !== droneguideRequest) return;
-    if (view.revision !== droneguide.revision) {
+    if (view.revision !== droneguide.revision || view.activityRevision !== droneguide.activityRevision) {
       view = await api("/api/droneguide");
       if (request !== droneguideRequest) return;
     } else {
@@ -986,6 +1008,10 @@
   }));
   $("droneguide-live").addEventListener("click", () => action($("droneguide-live"), $("droneguide-message"), async () => {
     await api("/api/droneguide/live", {enabled: !droneguide.liveEnabled});
+    await loadDroneguide();
+  }));
+  $("droneguide-active-only").addEventListener("click", () => action($("droneguide-active-only"), $("droneguide-message"), async () => {
+    await api("/api/droneguide/filter", {activeOnly: !droneguide.activeOnly});
     await loadDroneguide();
   }));
   $("droneguide-refresh").addEventListener("click", () => action($("droneguide-refresh"), $("droneguide-message"), async () => {

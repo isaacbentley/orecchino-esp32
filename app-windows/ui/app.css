@@ -108,6 +108,12 @@ h1,h2,h3,p{margin:0}
 .map-status{left:20px;bottom:24px;max-width:calc(100% - 105px);display:grid;padding:5px;gap:5px}
 .map-status-row{display:flex;align-items:center;gap:8px}
 .map-status .button{min-height:27px;padding:4px 7px;font:600 10px/1.2 var(--mono)}
+#droneguide-active-only{gap:5px;white-space:nowrap}
+#droneguide-active-only .switch-track{position:relative;flex:none;width:19px;height:11px;border:1px solid var(--muted);border-radius:8px}
+#droneguide-active-only .switch-track::after{content:"";position:absolute;top:2px;left:2px;width:5px;height:5px;border-radius:50%;background:var(--muted)}
+#droneguide-active-only[aria-checked="true"]{color:var(--droneguide);background:#302748;border-color:#63538c}
+#droneguide-active-only[aria-checked="true"] .switch-track{border-color:var(--droneguide)}
+#droneguide-active-only[aria-checked="true"] .switch-track::after{left:10px;background:var(--droneguide)}
 #traffic-status,#droneguide-summary{padding-right:5px;font-size:11px;line-height:1.4}
 .button#droneguide-toggle[aria-pressed="true"]{color:var(--droneguide);background:#302748;border-color:#63538c}
 .button#droneguide-toggle[aria-pressed="false"] .legend-droneguide{background:transparent;border-color:var(--muted)}

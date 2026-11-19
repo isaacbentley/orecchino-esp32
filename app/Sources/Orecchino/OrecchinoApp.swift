@@ -31,6 +31,7 @@ struct OrecchinoApp: App {
 
         Settings {
             SettingsView()
+                .environment(model)
                 .preferredColorScheme(.dark)
         }
 
@@ -151,9 +152,10 @@ struct SettingsView: View {
                      + "fit, the closest zoom shrinks first.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            DroneguideSettings()
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: 480)
         .padding(.vertical, 8)
     }
 }

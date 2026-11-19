@@ -287,6 +287,7 @@ final class AppModel {
     /// follow-all logic refits on it.
     var updateTick = 0
     let tfr = TFRService()
+    let droneguide = DroneguideService()
     let tileSync = TileSync()
     let deviceLog = DeviceLog()
     let location = LocationService()
@@ -468,6 +469,7 @@ final class AppModel {
         notifier.requestAuthorization()
         serial.start(preferred: nil)
         tfr.start()
+        droneguide.start()
         location.start()
         // Daily context refresh (TFRs age out; home may move).
         Timer.scheduledTimer(withTimeInterval: 86400, repeats: true) { _ in

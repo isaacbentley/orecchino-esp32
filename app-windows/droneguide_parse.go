@@ -70,6 +70,7 @@ type droneguideZone struct {
 	Applicability    []droneguidePeriod    `json:"applicability,omitempty"`
 	Conditions       []string              `json:"conditions,omitempty"`
 	ActiveAtSnapshot *bool                 `json:"activeAtSnapshot,omitempty"`
+	Activity         string                `json:"activity,omitempty"`
 	lowerAGL         *float64
 	upperAGL         *float64
 }

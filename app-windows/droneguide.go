@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -26,6 +27,10 @@ type droneguideView struct {
 	State                string            `json:"state"`
 	Count                int               `json:"count"`
 	Revision             uint64            `json:"revision"`
+	ActivityRevision     uint64            `json:"activityRevision"`
+	ActiveOnly           bool              `json:"activeOnly"`
+	ActiveCount          int               `json:"activeCount"`
+	UnknownActivityCount int               `json:"unknownActivityCount"`
 	Source               string            `json:"source"`
 	SourceType           string            `json:"sourceType"`
 	LiveEnabled          bool              `json:"liveEnabled"`
@@ -50,6 +55,7 @@ type droneguideSnapshot struct {
 type droneguideDiskState struct {
 	Version     int                 `json:"version"`
 	LiveEnabled bool                `json:"liveEnabled"`
+	ActiveOnly  bool                `json:"activeOnly"`
 	Manual      *droneguideSnapshot `json:"manual,omitempty"`
 	Live        *droneguideSnapshot `json:"live,omitempty"`
 }
@@ -62,6 +68,8 @@ type droneguideService struct {
 	shown            *droneguideSnapshot
 	state, lastError string
 	revision         uint64
+	activityRevision uint64
+	lastActivity     []droneguideActivity
 	client           *http.Client
 	endpoint         string
 	fetchCancel      context.CancelFunc
@@ -98,6 +106,7 @@ func registerDroneguideSource(mux *http.ServeMux, dataDir string, client *http.C
 	mux.HandleFunc("POST /api/droneguide/import", service.importFile)
 	mux.HandleFunc("POST /api/droneguide/live", service.setLive)
 	mux.HandleFunc("POST /api/droneguide/refresh", service.refresh)
+	mux.HandleFunc("POST /api/droneguide/filter", service.setFilter)
 	if service.config.LiveEnabled {
 		service.startRefresh()
 	}
@@ -215,7 +224,8 @@ func (service *droneguideService) choose() {
 func (service *droneguideService) snapshot(includeZones bool, now time.Time) droneguideView {
 	view := droneguideView{
 		State: service.state, Revision: service.revision, Error: service.lastError,
-		LiveEnabled: service.config.LiveEnabled, Source: droneguideImportSource, SourceType: "import",
+		LiveEnabled: service.config.LiveEnabled, ActiveOnly: service.config.ActiveOnly,
+		Source: droneguideImportSource, SourceType: "import",
 	}
 	zones := []droneguideZone{}
 	if service.shown != nil {
@@ -227,13 +237,39 @@ func (service *droneguideService) snapshot(includeZones bool, now time.Time) dro
 		view.Stale = view.LiveEnabled && view.State == "error"
 		if view.SnapshotAt != nil {
 			view.Source, view.SourceType = droneguideLiveSource, "live"
-			view.Stale = view.Stale || !view.LiveEnabled || now.Sub(*view.SnapshotAt) > 2*droneguideRefreshEvery
+			view.Stale = view.Stale || !view.LiveEnabled || now.Before(*view.SnapshotAt) ||
+				now.Sub(*view.SnapshotAt) >= 2*droneguideRefreshEvery
 		}
 	} else if view.LiveEnabled {
 		view.Source, view.SourceType = droneguideLiveSource, "live"
 	}
 	view.Count = len(zones)
+	activityChanged := len(service.lastActivity) != len(zones)
+	if activityChanged {
+		service.lastActivity = make([]droneguideActivity, len(zones))
+	}
+	for index, zone := range zones {
+		activity := droneguideZoneActivity(zone, view, now)
+		if service.lastActivity[index] != activity {
+			service.lastActivity[index] = activity
+			activityChanged = true
+		}
+		switch activity {
+		case droneguideActivityActive:
+			view.ActiveCount++
+		case droneguideActivityUnknown:
+			view.UnknownActivityCount++
+		}
+	}
+	if activityChanged {
+		service.activityRevision++
+	}
+	view.ActivityRevision = service.activityRevision
 	if includeZones {
+		zones = slices.Clone(zones)
+		for index := range zones {
+			zones[index].Activity = service.lastActivity[index].label()
+		}
 		view.Zones = &zones
 	}
 	return view
@@ -242,6 +278,34 @@ func (service *droneguideService) snapshot(includeZones bool, now time.Time) dro
 func (service *droneguideService) get(w http.ResponseWriter, r *http.Request) {
 	service.mu.Lock()
 	view := service.snapshot(r.URL.Query().Get("zones") != "0", time.Now())
+	service.mu.Unlock()
+	replyJSON(w, http.StatusOK, view)
+}
+
+func (service *droneguideService) setFilter(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		ActiveOnly *bool `json:"activeOnly"`
+	}
+	if !readRequest(w, r, &request) {
+		return
+	}
+	if request.ActiveOnly == nil {
+		replyError(w, http.StatusBadRequest, errors.New("geef aan of alleen actieve Droneguide-zones worden getoond"))
+		return
+	}
+
+	service.mu.Lock()
+	config := service.config
+	if config.ActiveOnly != *request.ActiveOnly {
+		config.ActiveOnly = *request.ActiveOnly
+		if err := service.persist(config); err != nil {
+			service.mu.Unlock()
+			replyError(w, http.StatusInternalServerError, errors.New("de Droneguide-filter kan niet worden opgeslagen"))
+			return
+		}
+		service.config = config
+	}
+	view := service.snapshot(false, time.Now())
 	service.mu.Unlock()
 	replyJSON(w, http.StatusOK, view)
 }

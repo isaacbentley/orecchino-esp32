@@ -572,6 +572,12 @@ tools/flash_amoled.sh /dev/cu.usbmodemXXXX
 
 > **Note**: If compiling by hand or in the Arduino IDE instead of using the helper script, select **Partition Scheme: Custom** (`PartitionScheme=custom`) and include `--libraries firmware/libraries` so the 3 MB app partition is used.
 
+## Droneguide on desktop and phone
+
+The Windows, macOS, Android and iOS apps can display Belgian Droneguide zones that overlap the airspace from ground level through 500 ft AGL (152.4 m). In the Droneguide options, **All zones** shows the zones within that altitude band and **Active only** shows zones that the app can determine are active. The option is saved on each device.
+
+Enable automatic updates if you have API permission, or import a Droneguide JSON or GeoJSON file. For live data, activity refers to the timestamp of the last fresh response. For a file, it is evaluated from the validity periods in the export. Check the official map for current operating conditions. [Droneguide (skeyes)](https://map.droneguide.be/)
+
 ## macOS app — `app/`
 
 SwiftUI and MapKit, with no outside dependencies. It builds with the

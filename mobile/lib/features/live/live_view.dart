@@ -421,6 +421,7 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
             rangeM: _rangeM,
             viewport: viewport,
             onSelect: _select,
+            droneguide: app.droneguide,
             source: app.settings.mapUrl.isNotEmpty && MapTileSource.validTemplate(app.settings.mapUrl)
                 ? MapTiles.custom(app.settings.mapUrl, app.settings.mapAttribution)
                 : MapTiles.esriDarkGray,

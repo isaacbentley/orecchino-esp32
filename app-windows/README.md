@@ -26,6 +26,8 @@ Ga naar **Instellingen → Belgische geozones**. Schakel **Automatisch ophalen**
 
 Een zone telt mee zodra haar hoogtebereik het luchtruim tussen de grond en 500 ft AGL overlapt. Voor de selectie gebruikt de app grenzen in AGL en de AGL-omrekening die skeyes aanlevert. De instellingen vermelden hoeveel zones door een onbepaalde AGL-hoogte buiten de selectie vallen. Dit geldt ook voor geïmporteerde gegevens.
 
+Gebruik **Alleen actief** onder **Instellingen → Belgische geozones** om binnen die hoogteselectie enkel zones met een bevestigde activiteitsstatus te tonen. De schakelaar wordt onthouden. Bij online gegevens vermeldt de app het opnametijdstip. Na een mislukte vernieuwing of zodra de opname 30 minuten oud is, geldt de activiteitsstatus als onbekend. Voor geïmporteerde zones gebruikt de app expliciete geldigheidsperiodes en ondersteunde tijdschema’s met tijdzone.
+
 Bij een mislukte vernieuwing toont de app de laatst ingelezen gegevens en vermeldt ze de fout. Activiteit uit de API geldt voor het weergegeven tijdstip van opname. Raadpleeg Droneguide en de actuele NOTAM voor de actuele activiteit en toegangsvoorwaarden. [Droneguide (skeyes)](https://map.droneguide.be/) · [AIM-Meteo Briefing](https://ops.skeyes.be/)
 
 Je kunt ook een bestand gebruiken.
