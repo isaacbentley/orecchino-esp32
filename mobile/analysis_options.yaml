@@ -35,7 +35,6 @@ linter:
     - prefer_final_locals
     - prefer_single_quotes
     - unawaited_futures
-    - unnecessary_await_in_return
     - unnecessary_lambdas
     - unnecessary_parenthesis
     - use_super_parameters

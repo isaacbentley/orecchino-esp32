@@ -251,7 +251,7 @@ class Tag extends StatelessWidget {
 
   Color get color => _color ?? OrecchinoColors.inkMuted;
 
-  const Tag(this.text, {super.key, Color? color, this.filled = false, this.icon}) : _color = color;
+  const Tag(this.text, {super.key, this._color, this.filled = false, this.icon});
 
   @override
   Widget build(BuildContext context) {
@@ -338,7 +338,7 @@ class SignalBars extends StatelessWidget {
 
   Color get color => _color ?? OrecchinoColors.aqua;
 
-  const SignalBars({super.key, required this.level, Color? color, this.height = 14}) : _color = color;
+  const SignalBars({super.key, required this.level, this._color, this.height = 14});
 
   /// Bars for a BLE / Wi-Fi RSSI: >= -55 four, -65 three, -75 two, else one.
   static int fromRssi(int? rssi) =>

@@ -17,7 +17,7 @@ class Sparkline extends StatelessWidget {
 
   Color get color => _color ?? OrecchinoColors.aqua;
 
-  const Sparkline({super.key, required this.values, Color? color, this.height = 28}) : _color = color;
+  const Sparkline({super.key, required this.values, this._color, this.height = 28});
 
   @override
   Widget build(BuildContext context) {

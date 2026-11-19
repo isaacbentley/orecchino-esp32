@@ -475,21 +475,31 @@ display name "Orecchino". The version is `version:` in `pubspec.yaml`
 `CFBundleShortVersionString`/`CFBundleVersion` and
 `versionName`/`versionCode`.
 
-Toolchain, the minimum that builds both (checked with Flutter 3.47.5):
+Use Flutter 3.47 or newer with Dart 3.13 or newer. The Windows Android
+release job uses Flutter 3.50.0, and Flutter analysis and tests use 3.47.5.
 
-- **Android**: JDK 17 and the Android command-line tools, no Android Studio.
-  `brew install openjdk@17` and `brew install --cask android-commandlinetools`,
-  then `sdkmanager --sdk_root=$HOME/Library/Android/sdk --licenses` and
-  `sdkmanager --sdk_root=$HOME/Library/Android/sdk "platform-tools"
-  "platforms;android-36" "build-tools;36.0.0"`, and point Flutter at both:
-  `flutter config --android-sdk $HOME/Library/Android/sdk --jdk-dir
-  "$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"`. The first
-  Gradle build fetches the rest itself (platforms 34/35, CMake, the NDK):
-  budget about 9 GB for the SDK plus `~/.gradle`.
+- **Android**. Use JDK 21 and install Android SDK Platforms 34, 35 and 36,
+  Build-Tools 36.0.0, Platform-Tools, a current Command-line Tools package,
+  CMake 3.22.1 or newer, and NDK (Side by side) **30.0.16248370**. On
+  Windows use Android Studio's SDK Manager with **Show Package Details**
+  enabled to select that NDK version. Preinstalling it avoids depending
+  on Gradle's SDK download. Run `flutter doctor --android-licenses` and use
+  `flutter doctor -v` to verify the SDK and JDK. Point Flutter to your
+  installation with `flutter config --android-sdk <sdk> --jdk-dir <jdk>`
+  when needed. Budget about 9 GB for the SDK and the Gradle cache.
 - **iOS**: full Xcode (the Command Line Tools are not enough) and CocoaPods
   (`brew install cocoapods`; `flutter_compass` and `flutter_tts` have no
   Swift Package Manager support yet, the other plugins come through SPM).
   No simulator runtime is needed to compile.
+
+The project pins **Gradle 9.6.0** in the wrapper and **Android Gradle
+Plugin 9.3.1** with **Kotlin 2.4.20** in `android/settings.gradle.kts`.
+Flutter generates the wrapper launch scripts on a fresh checkout. To use
+another compatible NDK installed on your machine, set the Gradle property
+`orecchinoNdkVersion` in your user Gradle properties or set
+`$env:ORG_GRADLE_PROJECT_orecchinoNdkVersion` in PowerShell before building.
+On Windows, keep `PUB_CACHE` on the same drive as the checkout so Kotlin
+can write its incremental compiler cache.
 
 ```bash
 flutter build apk --release          # build/app/outputs/flutter-apk/
@@ -519,6 +529,9 @@ release cannot ship by mistake. To sign:
    keyAlias=upload
    storeFile=/Users/<you>/orecchino-upload.jks
    ```
+
+   On Windows use an absolute path such as
+   `storeFile=C:/Users/<you>/orecchino-upload.jks`.
 
 3. `flutter build appbundle` (Play Store) or `flutter build apk --release`.
 
