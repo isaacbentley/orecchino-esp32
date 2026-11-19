@@ -153,6 +153,7 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             DroneguideSettings()
+            ATAKSettings()
         }
         .formStyle(.grouped)
         .frame(width: 480)

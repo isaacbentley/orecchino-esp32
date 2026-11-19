@@ -15,6 +15,9 @@ struct DroneTrack: Identifiable {
     var firstSeen: Date
     var lastSeen: Date
     var coordinate: CLLocationCoordinate2D?
+    /// Keep a valid location's observation time and ellipsoid altitude
+    /// together for CoT, independent of later identity or no-fix messages.
+    var atakFix: ATAKFix?
     var altGeo: Double?
     var altBaro: Double?
     var height: Double?
@@ -288,6 +291,7 @@ final class AppModel {
     var updateTick = 0
     let tfr = TFRService()
     let droneguide = DroneguideService()
+    let atak = ATAKService()
     let tileSync = TileSync()
     let deviceLog = DeviceLog()
     let location = LocationService()
@@ -463,6 +467,7 @@ final class AppModel {
                     guard let self else { return }
                     self.now = Date()
                     self.trafficTick()
+                    self.atakTick()
                 }
             }
         }
@@ -718,6 +723,9 @@ final class AppModel {
                 if dst.trail.count > 600 { dst.trail.removeFirst(dst.trail.count - 600) }
                 dst.firstSeen = min(dst.firstSeen, old.firstSeen)
                 dst.msgCount += old.msgCount
+                if let fix = old.atakFix, fix.observedAt > (dst.atakFix?.observedAt ?? .distantPast) {
+                    dst.atakFix = fix
+                }
                 tracks[key] = dst
             } else {
                 var moved = old
@@ -759,6 +767,10 @@ final class AppModel {
             if Self.validCoord(l.lat, l.lon) {
                 let c = CLLocationCoordinate2D(latitude: l.lat, longitude: l.lon)
                 t.coordinate = c
+                if !demo {
+                    t.atakFix = ATAKFix(observedAt: now, latitude: l.lat, longitude: l.lon,
+                                        hae: l.alt_geo > -999 ? l.alt_geo : nil)
+                }
                 updateTick &+= 1
                 if let last = t.trail.last, !Self.plausibleStep(last, c, elapsed: sinceLast) {
                     // A jump no aircraft makes between two broadcasts: a bad
@@ -812,6 +824,17 @@ final class AppModel {
             t.seenOp = true
         }
         tracks[key] = t
+    }
+
+    private func atakTick() {
+        guard atak.enabled else { return }
+        let samples = tracks.values.compactMap { track -> ATAKSample? in
+            guard !track.isDemo, let fix = track.atakFix else { return nil }
+            // This private track number survives a MAC-only track learning
+            // its Basic ID. Neither identifier is needed in the export.
+            return ATAKSample(sequence: track.colorIndex + 1, fix: fix)
+        }
+        atak.publish(samples, at: now)
     }
 
     /// The clock command a receiver understands: whole UTC seconds. The

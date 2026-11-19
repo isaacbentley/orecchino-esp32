@@ -129,6 +129,25 @@
         </form>
         <p id="port-message" class="notice" role="status" hidden></p>
       </section>
+      <section id="atak-settings" aria-labelledby="atak-heading">
+        <h3 id="atak-heading">ATAK-uitvoer</h3>
+        <p id="atak-help" class="notice">Verbind beide toestellen met hetzelfde lokale netwerk. Gebruik het IP-adres van het ATAK-toestel en de poort van de ingestelde UDP-ingang.</p>
+        <form id="atak-form" class="stack" aria-describedby="atak-help">
+          <fieldset id="atak-fields" class="stack" aria-labelledby="atak-heading" disabled>
+            <label class="checkbox"><input id="atak-enabled" type="checkbox"> Actuele droneposities via UDP sturen</label>
+            <div class="field-grid atak-endpoint">
+              <label>Hostnaam of IP-adres <input id="atak-host" type="text" spellcheck="false" autocomplete="off" maxlength="253" placeholder="Bijv. 192.168.1.25"></label>
+              <label>UDP-poort <input id="atak-port" type="number" inputmode="numeric" min="1" max="65535" step="1" value="4242" required></label>
+            </div>
+          </fieldset>
+          <div class="button-row">
+            <button id="atak-save" class="button primary" type="submit" disabled>ATAK-instellingen opslaan</button>
+          </div>
+        </form>
+        <p id="atak-status" class="notice" role="status">ATAK-status laden…</p>
+        <p id="atak-send-detail" class="notice" hidden></p>
+        <p id="atak-message" class="notice" role="status" hidden></p>
+      </section>
       <section>
         <h3>Ontvangerlocatie</h3>
         <form id="location-form" class="stack">

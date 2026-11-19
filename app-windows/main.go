@@ -314,6 +314,8 @@ func run() error {
 	registerDevice(mux, a.receiver, *dataDir)
 	stopDroneguide := registerDroneguide(mux, *dataDir)
 	defer stopDroneguide()
+	stopATAK := registerATAK(mux, *dataDir, a.receiver.Snapshot)
+	defer stopATAK()
 	stopAirspace, currentAlerts := registerAirspace(mux, a.receiver, a.location, *dataDir)
 	defer stopAirspace()
 

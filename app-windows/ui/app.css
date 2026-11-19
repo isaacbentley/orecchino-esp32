@@ -247,6 +247,8 @@ select{font:500 12px/1.3 Inter,Segoe UI,sans-serif}
 input[type="file"]::file-selector-button{margin-right:8px;border:1px solid var(--line);border-radius:4px;background:var(--surface-raised);color:var(--text);cursor:pointer;font-family:inherit}
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
 .airspace-fields{grid-template-columns:minmax(75px,1fr) minmax(0,3fr)}
+.atak-endpoint{grid-template-columns:minmax(0,3fr) minmax(75px,1fr)}
+#atak-fields{min-width:0;margin:0;padding:0;border:0}
 .checkbox{display:flex;align-items:center;gap:6px;color:var(--text)}
 .checkbox input{accent-color:var(--teal)}
 #tiles-use-map{justify-self:start}

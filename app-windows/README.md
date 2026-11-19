@@ -19,6 +19,15 @@ Gebruik **Instellingen → USB-ontvanger** om zo nodig zelf een COM-poort te kie
 - **ADS-B** toont waarschuwingen voor mogelijke conflicten tussen ontvangen drones en bemand luchtverkeer. De standaardbron is adsb.lol. Het Windows-systeemvak toont het aantal actuele contacten en geeft bij conflicten een Windows-melding als je meldingsinstellingen dat toelaten.
 - De **FAA-laag** toont tijdelijke beperkingen uit de Verenigde Staten. De kaartachtergrond, ADS-B, de FAA-laag en het downloaden van offline kaarttegels hebben internet nodig.
 - De **Droneguide-laag** toont Belgische geozones die het luchtruim tot en met **500 ft boven de grond** (AGL, 152,4 m) raken. Je kunt de laag naast de FAA-laag aan- en uitzetten. Open een zone om de beschikbare hoogte-, beperkings- en tijdgegevens te bekijken.
+- De **ATAK-uitvoer** deelt live dronedetecties met een geldige positie als kaartmarkeringen via Cursor on Target (CoT) over UDP.
+
+## Detecties naar ATAK sturen
+
+1. Verbind de Windows-pc en het ATAK-toestel met hetzelfde bereikbare netwerk. Gebruik het netwerkadres van het ATAK-toestel als bestemming.
+2. Controleer in ATAK onder **Settings → Network Preferences → Network Connection Preferences → Input/Output Management → Manage Inputs** of **Enable Mesh Network Mode** en de UDP-ingang op poort **4242** aanstaan. Gebruik de ingestelde poort als die afwijkt. [ATAK-CIV-netwerkbroncode](https://github.com/TAK-Product-Center/atak-civ/blob/main/atak/ATAK/app/src/main/java/com/atakmap/comms/CotService.java#L745-L762)
+3. Open **Instellingen → ATAK** in Orecchino, vul het adres en de UDP-poort in en schakel de uitvoer in. Sla de instellingen op.
+
+De uitvoer deelt de dronepositie, de kaartnaam en indien beschikbaar de hoogte boven de WGS 84-ellipsoïde. De verzendstatus geeft aan wanneer Orecchino een bericht lokaal aan UDP heeft aangeboden. Controleer de kaart in ATAK om de ontvangst te zien.
 
 ## Belgische geozones laden
 

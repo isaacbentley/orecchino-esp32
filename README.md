@@ -588,6 +588,8 @@ app/Scripts/make_app.sh     # produces app/build/Orecchino.app
 open app/build/Orecchino.app
 ```
 
+Windows and macOS can forward live positional drone detections as Cursor on Target (CoT) markers over UDP. In **Settings → ATAK**, enter the ATAK device's network address and its UDP input port, then enable forwarding. ATAK-CIV's default UDP input is **4242**. In ATAK, enable **Mesh Network Mode** and check the UDP input under **Input/Output Management → Manage Inputs**. macOS may prompt for local network access. The send indicator reports local UDP writes. [ATAK-CIV input defaults](https://github.com/TAK-Product-Center/atak-civ/blob/main/atak/ATAK/app/src/main/java/com/atakmap/comms/CotService.java#L745-L762) · [Windows setup](app-windows/README.md#detecties-naar-atak-sturen)
+
 What it does:
 
 - Live dark map with color-coded drones, heading arrows, flight trails,

@@ -94,8 +94,9 @@ type Track struct {
 	CatEU               *int       `json:"catEu,omitempty"`
 	ClassEU             *int       `json:"classEu,omitempty"`
 
-	lastFix  time.Time
-	evidence [5]bool
+	lastFix    time.Time
+	lastFixHAE *float64
+	evidence   [5]bool
 }
 
 func textField(message map[string]any, key string) string {
@@ -265,7 +266,8 @@ func (r *Receiver) mergeTrackLocked(track, old *Track) {
 	track.MsgCount += old.MsgCount
 	switch {
 	case track.lastFix.IsZero() || (old.lastFix.After(track.lastFix) && len(old.Trail) > 0):
-		track.Lat, track.Lon, track.lastFix, track.Trail = old.Lat, old.Lon, old.lastFix, old.Trail
+		track.Lat, track.Lon, track.lastFix, track.lastFixHAE, track.Trail =
+			old.Lat, old.Lon, old.lastFix, old.lastFixHAE, old.Trail
 	case len(old.Trail) > 0 && len(track.Trail) > 0:
 		limit := 300 + 120*max(0, track.lastFix.Sub(old.lastFix).Seconds())
 		if trackDistance(old.Trail[len(old.Trail)-1], track.Trail[0]) <= limit {
@@ -422,6 +424,7 @@ func updateTrackDetails(track *Track, message map[string]any, now time.Time) {
 
 func updateTrackLocation(track *Track, loc map[string]any, now time.Time) {
 	lat, lon := numberField(loc, "lat"), numberField(loc, "lon")
+	hae := knownAltitude(numberField(loc, "alt_geo"))
 	if validRIDPoint(lat, lon) {
 		point := GeoPoint{*lat, *lon}
 		track.Lat, track.Lon = lat, lon
@@ -440,10 +443,11 @@ func updateTrackLocation(track *Track, loc map[string]any, now time.Time) {
 			}
 		}
 		track.lastFix = now
+		track.lastFixHAE = hae
 	}
 	track.Status = intField(loc, "status")
 	track.Height = knownAltitude(numberField(loc, "height"))
-	track.AltGeo = knownAltitude(numberField(loc, "alt_geo"))
+	track.AltGeo = hae
 	track.AltBaro = knownAltitude(numberField(loc, "alt_baro"))
 	track.VSpeed = numberField(loc, "vspeed")
 	track.HAcc = intField(loc, "h_acc")

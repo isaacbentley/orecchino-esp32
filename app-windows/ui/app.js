@@ -51,6 +51,9 @@
   let tilesUpdating = false;
   let receiverRequest = 0;
   let airspaceRequest = 0;
+  let atak = null;
+  let atakRequest = 0;
+  let atakDraftChanged = false;
 
   async function api(path, body) {
     const options = {cache: "no-store"};
@@ -773,6 +776,9 @@
     $("tiles-plan").disabled = !canTiles || uploading || $("tiles-plan").getAttribute("aria-busy") === "true";
     $("tiles-send").disabled = !canTiles || uploading || !tileState.storageKnown || tileState.phase !== "planned" || !stillPlanned || $("tiles-send").getAttribute("aria-busy") === "true";
     $("tile-availability").textContent = !ready ? "Verbind een ontvanger om kaarten te plannen." : !canTiles ? "Deze ontvanger ondersteunt geen kaartoverdracht." : "";
+    const savingAtak = $("atak-save").getAttribute("aria-busy") === "true";
+    $("atak-save").disabled = !atak || savingAtak;
+    $("atak-fields").disabled = !atak || savingAtak;
   }
 
   function setInputs(prefix, values) {
@@ -801,6 +807,55 @@
     if (!all.length) message($("port-message"), "Geen COM-poorten gevonden.");
   }
 
+  function syncAtakForm() {
+    $("atak-enabled").checked = Boolean(atak?.enabled);
+    $("atak-host").value = atak?.host || "";
+    $("atak-host").required = Boolean(atak?.enabled);
+    $("atak-port").value = atak?.port || 4242;
+  }
+
+  function renderAtak() {
+    if (!atakDraftChanged) syncAtakForm();
+    const states = {
+      off: "ATAK-uitvoer uitgeschakeld.",
+      waiting: "Wacht op een actuele dronepositie.",
+      ready: "UDP-verzending actief. Ontvangst in ATAK is onbevestigd.",
+      error: atak.error || "UDP-verzending mislukt.",
+    };
+    const status = $("atak-status");
+    const summary = states[atak.state] || "ATAK-status onbekend.";
+    if (status.textContent !== summary) status.textContent = summary;
+    status.classList.toggle("error", atak.state === "error");
+
+    const details = [];
+    if (atak.enabled && atak.host) {
+      const host = atak.host.includes(":") && !atak.host.startsWith("[") ? `[${atak.host}]` : atak.host;
+      details.push(`Bestemming ${host}:${atak.port}`);
+      if (atak.sent > 0) {
+        const quantity = integer.format(atak.sent);
+        details.push(atak.sent === 1 ? "1 UDP-pakket lokaal verzonden" : `${quantity} UDP-pakketten lokaal verzonden`);
+        const lastSentAt = Date.parse(atak.lastSentAt);
+        if (Number.isFinite(lastSentAt)) details.push(datetime.format(lastSentAt));
+      }
+    }
+    message($("atak-send-detail"), details.join(" · "));
+    updateActionAvailability();
+  }
+
+  async function loadAtak() {
+    if ($("atak-save").getAttribute("aria-busy") === "true") return;
+    const request = ++atakRequest;
+    try {
+      const next = await api("/api/atak");
+      if (request !== atakRequest) return;
+      atak = next;
+      renderAtak();
+    } catch {
+      if (request !== atakRequest) return;
+      message($("atak-status"), "ATAK-status kon niet worden opgehaald.", true);
+    }
+  }
+
   function showSettings(section) {
     setInputs("location", location());
     $("traffic-enabled").checked = Boolean(airspace.trafficEnabled);
@@ -808,6 +863,9 @@
     $("traffic-source").value = airspace.source || "";
     message($("location-message"));
     message($("airspace-message"));
+    message($("atak-message"));
+    atakDraftChanged = false;
+    syncAtakForm();
     const value = state.receiver.preferredPort || "auto";
     const select = $("port-select");
     if (![...select.options].some((option) => option.value === value)) select.add(new Option(value, value));
@@ -816,6 +874,7 @@
     if (section === "receiver") $("port-select").focus();
     if (section === "droneguide") $("droneguide-file").focus();
     action($("refresh-ports"), $("port-message"), refreshPorts);
+    loadAtak();
   }
 
   function formatUTC(seconds) {
@@ -961,6 +1020,27 @@
     await api("/api/disconnect", {});
     await loadReceiver();
   }));
+  $("atak-form").addEventListener("input", () => {
+    atakDraftChanged = true;
+    $("atak-host").required = $("atak-enabled").checked;
+    message($("atak-message"));
+  });
+  $("atak-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const values = {
+      enabled: $("atak-enabled").checked,
+      host: $("atak-host").value.trim(),
+      port: $("atak-port").valueAsNumber,
+    };
+    action($("atak-save"), $("atak-message"), async () => {
+      ++atakRequest;
+      $("atak-fields").disabled = true;
+      atak = await api("/api/atak", values);
+      atakDraftChanged = false;
+      renderAtak();
+      message($("atak-message"), "ATAK-instellingen opgeslagen.");
+    });
+  });
   $("demo-button").addEventListener("click", () => action($("demo-button"), $("app-error"), async () => {
     const enabled = !state.receiver.demo;
     await api("/api/demo", {enabled});
@@ -1096,6 +1176,7 @@
     else if ($("app-error").textContent === "Verbinding met de desktopapp onderbroken.") message($("app-error"));
     if (results[1].status === "rejected") $("traffic-status").textContent = "Verkeersgegevens niet beschikbaar";
     if (results[2].status === "rejected") $("droneguide-status").textContent = "Droneguide-gegevens konden niet worden geladen.";
+    if ($("settings-dialog").open) loadAtak();
     if (activeTab === "tiles" && $("tiles-plan").getAttribute("aria-busy") !== "true") loadTiles();
     window.setTimeout(refresh, 1000);
   }
