@@ -146,6 +146,9 @@ jobs:
     name: Android release build on Windows
     runs-on: windows-2025
     timeout-minutes: 35
+    env:
+      # Kotlin's incremental cache needs the plugin sources and build on one drive.
+      PUB_CACHE: ${{ github.workspace }}/.pub-cache
     defaults:
       run:
         working-directory: mobile

@@ -498,6 +498,8 @@ Flutter generates the wrapper launch scripts on a fresh checkout. To use
 another compatible NDK installed on your machine, set the Gradle property
 `orecchinoNdkVersion` in your user Gradle properties or set
 `$env:ORG_GRADLE_PROJECT_orecchinoNdkVersion` in PowerShell before building.
+On Windows, keep `PUB_CACHE` on the same drive as the checkout so Kotlin
+can write its incremental compiler cache.
 
 ```bash
 flutter build apk --release          # build/app/outputs/flutter-apk/
