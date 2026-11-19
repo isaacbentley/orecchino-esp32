@@ -163,7 +163,9 @@ jobs:
       - name: Select JDK 21 for Flutter
         run: flutter config --jdk-dir "$env:JAVA_HOME"
       - name: flutter pub get
-        run: flutter pub get --enforce-lockfile
+        # Also exercise the newer Flutter SDK used by the Windows build.
+        # Its SDK packages pin different versions from the 3.47.5 lockfile.
+        run: flutter pub get
       - name: Build Android release with a Windows keystore path
         run: |
           $keystore = Join-Path $env:RUNNER_TEMP 'orecchino test key.jks'
