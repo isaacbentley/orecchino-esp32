@@ -363,14 +363,20 @@ fetches map tiles for the area on screen from Esri
 (server.arcgisonline.com), or from the template you set, as any map does;
 they are cached on the phone (up to 50 MB).
 
-## ADS-B request limits
+## ADS-B status and request limits
+
+Live shows when ADS-B is waiting for the phone's first location, fetching,
+paused in Saver mode, or unable to reach the feed. The phone needs a location
+fix before its first request. Android actively asks for this fix and checks
+again when returning from Android Settings. In **Detectors → Settings**, use
+**Refresh ADS-B** to request an update when a location is available.
 
 adsb.lol allows 500 anonymous requests per day per public IP address. If
 the feed responds with `HTTP 429`, the app shows the quota message and the
-next retry time under **Detectors → Settings → adsb.lol API key**. It resumes
+next retry time under **Detectors → Settings**, in the ADS-B section. It resumes
 automatically once the wait and the current polling interval have elapsed.
 
-You can save an optional API key in that setting. The app stores it in its
+You can save an optional key under **adsb.lol API key**. The app stores it in its
 private settings and sends it in the `x-api-key` header only to adsb.lol.
 Quotas depend on the type of key. [adsb.lol API documentation](https://www.adsb.lol/docs/open-data/api)
 

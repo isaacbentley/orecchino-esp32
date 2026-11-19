@@ -37,6 +37,12 @@ import 'support/fakes.dart';
 class PolicyLocation extends LocationService {
   final List<(LocationPrecision, int)> configured = [];
   PhoneLocation? fix = const PhoneLocation(lat: 37.8039, lon: -122.464, timeMs: 0);
+
+  void provideFix(PhoneLocation position) {
+    fix = position;
+    notifyListeners();
+  }
+
   @override
   Future<void> start() async {}
   @override
@@ -260,6 +266,7 @@ void main() {
       expect(app.adsbDue(now), isTrue); // never fetched
       await app.refreshTraffic();
       expect(gets, hasLength(1));
+      expect(app.conflictWatchSummary, contains('503'));
       expect(app.adsbFailures, 1);
       expect(app.adsbInterval, const Duration(seconds: 60)); // never sooner than usual
       await app.refreshTraffic();
@@ -275,6 +282,65 @@ void main() {
       (app.location as PolicyLocation).fix = null;
       expect(app.adsbInterval, isNull);
       app.dispose();
+    });
+
+    test('an old map centre does not fetch; the first phone fix starts ADS-B even with no traffic', () async {
+      final location = PolicyLocation()..fix = null;
+      final response = Completer<http.Response>();
+      final queries = <Uri>[];
+      final db = AppDatabase(NativeDatabase.memory());
+      await db.setSetting('last_home', '51.20,4.40');
+      final app = AppController(
+        db: db,
+        ble: BleService(transport: FakeTransport()),
+        location: location,
+        adsb: AdsbSource(client: MockClient((req) {
+          queries.add(req.url);
+          return response.future;
+        })),
+      );
+      addTearDown(app.dispose);
+      await app.start();
+      expect(app.lastHome, isNotNull);
+      expect(app.conflictWatchSummary, 'ADS-B waiting for phone location');
+      expect(app.canRefreshTraffic, isFalse);
+      await app.refreshTraffic();
+      expect(queries, isEmpty);
+
+      location.provideFix(const PhoneLocation(lat: 50.85, lon: 4.35, timeMs: 0));
+      await settle();
+      expect(queries.single.path, '/v2/point/50.85/4.35/6');
+      expect(app.conflictWatchSummary, 'ADS-B fetching aircraft…');
+      expect(app.canRefreshTraffic, isFalse);
+      response.complete(http.Response('{"ac":[]}', 200));
+      await settle();
+      app.tick();
+      expect(app.conflictWatchSummary, startsWith('conflict watch on, no ADS-B conflicts'));
+      expect(app.canRefreshTraffic, isTrue);
+    });
+
+    test('Saver pauses automatic ADS-B, but a manual refresh can get traffic', () async {
+      var requests = 0;
+      final app = AppController(
+        db: AppDatabase(NativeDatabase.memory()),
+        ble: BleService(transport: FakeTransport()),
+        location: PolicyLocation(),
+        adsb: AdsbSource(client: MockClient((_) async {
+          requests++;
+          return http.Response('{"ac":[]}', 200);
+        })),
+        startTimers: false,
+      );
+      addTearDown(app.dispose);
+      await app.start();
+      await app.setPowerMode(PowerMode.saver);
+      expect(app.adsbDue(app.nowMs()), isFalse);
+      expect(app.conflictWatchSummary, contains('Saver mode'));
+      expect(app.canRefreshTraffic, isTrue);
+      await app.refreshTraffic();
+      app.tick();
+      expect(requests, 1);
+      expect(app.conflictWatchSummary, startsWith('conflict watch on'));
     });
 
     test('rate limit blocks immediate refresh and polling until Retry-After; a new key retries', () async {
@@ -297,6 +363,8 @@ void main() {
       await app.refreshTraffic();
       expect(keys, [null]);
       expect(app.adsbError, contains('429'));
+      expect(app.conflictWatchSummary, contains('429'));
+      expect(app.canRefreshTraffic, isFalse);
       final retry = app.adsbRetryAt!.millisecondsSinceEpoch;
       expect(app.adsbDue(retry - 1), isFalse);
       expect(app.adsbDue(retry), isTrue);

@@ -167,13 +167,14 @@ class AppController extends ChangeNotifier {
   /// first); its frames go straight to the tracker, never to the sync.
   Future<void> _startPhoneRx() async {
     final rx = nativeRx;
-    if (rx == null || !settings.phoneRx || rx.running) return;
+    if (_disposed || rx == null || !settings.phoneRx || rx.running) return;
     _phoneSub ??= rx.messages.listen(ingestPhoneFrame);
     try {
       if (rx.isAndroid) await rx.wifi.requestPermissions();
     } catch (e) {
       debugPrint('phone rx permissions: $e');
     }
+    if (_disposed || !settings.phoneRx) return;
     try {
       await rx.refreshCapabilities();
       await rx.start();
@@ -292,6 +293,7 @@ class AppController extends ChangeNotifier {
       _watchPausedUntilMs = 0;
       if (_pauseMuteUntilMs != 0 && policy.mutedUntilMs == _pauseMuteUntilMs) policy.unmute();
       _pauseMuteUntilMs = 0;
+      unawaited(location.resume());
       unawaited(pushContext());
       if (adsbDue(nowMs())) unawaited(refreshTraffic());
     }
@@ -474,6 +476,25 @@ class AppController extends ChangeNotifier {
     return d != null && now - _adsbLastMs >= d.inMilliseconds;
   }
 
+  bool get canRefreshTraffic => !_disposed && settings.adsb && observer != null && !_adsbFetching && adsbRetryAt == null;
+
+  /// Explain why the watch has no data while its first request is pending.
+  String get conflictWatchSummary {
+    if (!settings.adsb) return 'CONFLICT WATCH OFF: ADS-B off in Settings';
+    if (observer == null) {
+      return switch (location.status) {
+        LocationStatus.denied || LocationStatus.deniedForever => 'ADS-B needs location permission',
+        LocationStatus.servicesOff => 'ADS-B needs location services',
+        _ => 'ADS-B waiting for phone location',
+      };
+    }
+    if (traffic.result.haveData) return traffic.result.summary;
+    if (_adsbFetching) return 'ADS-B fetching aircraft…';
+    if (_adsbError case final error?) return error;
+    if (adsbInterval == null) return 'ADS-B paused in Saver mode until a drone is detected';
+    return 'ADS-B waiting for first traffic update';
+  }
+
   /// Consecutive failed ADS-B fetches (the backoff), for the tests.
   int get adsbFailures => _adsbFailures;
 
@@ -532,13 +553,19 @@ class AppController extends ChangeNotifier {
     }
     _syncSub = sync.progress.listen((_) => _changed());
     _bindLink();
-    unawaited(location.start());
+    final locationStart = location.start();
     nativeRx?.addListener(_changed);
     // The demo's stand-in for the phone's receiver (SIMULATED).
     _simPhoneSub = sim.phoneFrames.listen((m) {
       if (settings.demo) ingestPhoneFrame(m);
     });
-    unawaited(_startPhoneRx());
+    // Android's Wi-Fi detector requests some of the same location permissions.
+    // Let the phone location service finish its permission check first.
+    if (nativeRx?.isAndroid ?? false) {
+      unawaited(locationStart.whenComplete(_startPhoneRx));
+    } else {
+      unawaited(_startPhoneRx());
+    }
     if (startTimers) {
       _tick = Timer.periodic(const Duration(seconds: 1), (_) => tick());
       _ctxTimer = Timer.periodic(const Duration(seconds: 60), (_) => pushContext());
@@ -943,8 +970,9 @@ class AppController extends ChangeNotifier {
     _adsbFetching = true;
     _adsbLastMs = now;
     final apiKey = _adsbApiKey;
-    bool stillCurrent() => !_disposed && settings.adsb && !settings.demo && apiKey == _adsbApiKey;
+    bool stillCurrent() => !_disposed && settings.adsb && !settings.demo && apiKey == _adsbApiKey && observer != null;
     try {
+      _changed();
       // Stamped when the answer arrives, not when it was asked for: a slow
       // fetch must not make the set look older than it is.
       final answer = await adsb.fetch(area, clock: nowMs, apiKey: apiKey);

@@ -112,7 +112,7 @@ class _DetectorsViewState extends State<DetectorsView> {
                             'minute; none without your position',
                         'adsb',
                         app.settings.adsb),
-                    if (app.settings.adsb) _radius(),
+                    if (app.settings.adsb) ...[_radius(), _adsbStatus(context)],
                     _adsbKey(context),
                     _divider(),
                     _mapTiles(context),
@@ -441,28 +441,43 @@ class _DetectorsViewState extends State<DetectorsView> {
     );
   }
 
-  Widget _adsbKey(BuildContext context) {
-    final retryAt = app.settings.adsb ? app.adsbRetryAt?.toLocal() : null;
+  Widget _adsbStatus(BuildContext context) {
+    final summary = app.conflictWatchSummary;
+    final hasPosition = app.observer != null;
+    final error = hasPosition ? app.adsbError : null;
+    final retryAt = hasPosition ? app.adsbRetryAt?.toLocal() : null;
     final format = MaterialLocalizations.of(context);
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      ListTile(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(summary, style: OrecchinoType.caption),
+          if (error != null && !summary.contains(error))
+            Text(error, style: OrecchinoType.caption.copyWith(color: OrecchinoColors.caution)),
+          if (retryAt != null)
+            Text(
+              'Retry after ${format.formatShortDate(retryAt)} '
+              'at ${format.formatTimeOfDay(TimeOfDay.fromDateTime(retryAt))}.',
+              style: OrecchinoType.caption.copyWith(color: OrecchinoColors.caution),
+            ),
+          const SizedBox(height: 6),
+          OutlinedButton(
+            onPressed: app.canRefreshTraffic ? app.refreshTraffic : null,
+            child: const Text('Refresh ADS-B'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _adsbKey(BuildContext context) => ListTile(
         contentPadding: EdgeInsets.zero,
         title: Text('adsb.lol API key', style: OrecchinoType.bodyStrong),
         subtitle: Text(app.hasAdsbApiKey ? 'Configured' : 'Optional · public access', style: OrecchinoType.caption),
         trailing: const Icon(Icons.chevron_right_rounded),
         onTap: () => showDialog<void>(context: context, builder: (_) => _AdsbKeyDialog(app: app)),
-      ),
-      if (retryAt != null)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Text(
-            'adsb.lol rate limit reached. Retry after ${format.formatShortDate(retryAt)} '
-            'at ${format.formatTimeOfDay(TimeOfDay.fromDateTime(retryAt))}.',
-            style: OrecchinoType.caption.copyWith(color: OrecchinoColors.caution),
-          ),
-        ),
-    ]);
-  }
+      );
 
   Widget _toggle(String title, String subtitle, String key, bool value) => SwitchListTile(
         contentPadding: EdgeInsets.zero,
