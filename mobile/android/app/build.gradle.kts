@@ -1,4 +1,3 @@
-import java.io.FileInputStream
 import java.util.Properties
 
 plugins {
@@ -10,17 +9,71 @@ plugins {
 // Release signing comes from android/key.properties (never committed; see
 // mobile/README.md "Signing an Android release"). Without it the release
 // build is left unsigned rather than silently signed with the debug key.
+fun readSigningProperties(contents: String): Properties {
+    fun parse(text: String) = Properties().apply { load(text.reader()) }
+
+    val standard = runCatching { parse(contents) }
+    val windowsAbsolutePath = Regex("""^[A-Za-z]:[/\\]""")
+    val standardStoreFile = standard.getOrNull()?.getProperty("storeFile")
+    if (standardStoreFile != null && windowsAbsolutePath.containsMatchIn(standardStoreFile)) {
+        return standard.getOrThrow()
+    }
+
+    // A pasted drive-letter path uses single backslashes. Java Properties
+    // treats these as escapes (including \t and \u). Leave every other
+    // property, escaped paths, and continuation lines to its normal parser.
+    val rawWindowsStoreFile = Regex("""([ \t\f]*storeFile(?:[ \t\f]*[=:][ \t\f]*|[ \t\f]+))([A-Za-z]:\\(?!\\).*)""")
+    var continued = false
+    var corrected = false
+    val normalized = contents.lineSequence().joinToString("\n") { line ->
+        val entry = if (continued) null else rawWindowsStoreFile.matchEntire(line)
+        val value = if (entry != null) {
+            corrected = true
+            entry.groupValues[1] + entry.groupValues[2].replace('\\', '/')
+        } else {
+            line
+        }
+        val first = line.trimStart(' ', '\t', '\u000c').firstOrNull()
+        val comment = !continued && (first == '#' || first == '!')
+        continued = !comment && value.takeLastWhile { it == '\\' }.length % 2 == 1
+        value
+    }
+    return if (corrected) parse(normalized) else standard.getOrThrow()
+}
+
 val keystorePropertiesFile = rootProject.file("key.properties")
-val keystoreProperties = Properties().apply {
-    if (keystorePropertiesFile.exists()) {
-        FileInputStream(keystorePropertiesFile).use { load(it) }
+val hasKeystoreProperties = keystorePropertiesFile.exists()
+val releaseSigning = if (hasKeystoreProperties) runCatching {
+    val properties = readSigningProperties(keystorePropertiesFile.readText(Charsets.ISO_8859_1))
+    val store = properties.getProperty("storeFile")?.takeUnless { it.isBlank() }?.let { file(it) }
+    properties to store
+}.getOrNull() else null
+
+if (hasKeystoreProperties) {
+    val checkReleaseKeystore = tasks.register("checkReleaseKeystore") {
+        val readable = releaseSigning != null
+        val store = releaseSigning?.second
+        doLast {
+            if (!readable) {
+                throw GradleException("Could not read android/key.properties. Check its Java properties syntax.")
+            }
+            if (store?.isFile != true) {
+                throw GradleException(
+                    "Set storeFile in android/key.properties to an existing keystore file. " +
+                        "Use C:/Users/.../orecchino-upload.jks on Windows. Relative paths start in android/app."
+                )
+            }
+        }
+    }
+    tasks.matching { it.name == "preReleaseBuild" || it.name == "validateSigningRelease" }.configureEach {
+        dependsOn(checkReleaseKeystore)
     }
 }
 
 android {
     namespace = "dev.bentley.orecchino_mobile"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = rootProject.extra["orecchinoNdkVersion"] as String
 
     compileOptions {
         // flutter_local_notifications needs core library desugaring.
@@ -41,12 +94,13 @@ android {
     }
 
     signingConfigs {
-        if (keystorePropertiesFile.exists()) {
+        if (hasKeystoreProperties) {
             create("release") {
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
-                storeFile = keystoreProperties.getProperty("storeFile")?.let { file(it) }
-                storePassword = keystoreProperties.getProperty("storePassword")
+                val keystoreProperties = releaseSigning?.first
+                keyAlias = keystoreProperties?.getProperty("keyAlias")
+                keyPassword = keystoreProperties?.getProperty("keyPassword")
+                storeFile = releaseSigning?.second
+                storePassword = keystoreProperties?.getProperty("storePassword")
             }
         }
     }
