@@ -86,9 +86,9 @@ project.
 ## Vendored / derived code
 
 - `firmware/libraries/JPEGDEC/` — [JPEGDEC](https://github.com/bitbank2/JPEGDEC)
-  1.8.4 by Larry Bank (Apache-2.0, `LICENSE`), unmodified: `src/`, its
-  `library.properties`, `LICENSE` and `README.md` from the Arduino library
-  release. Decodes the Esri JPEG map tiles: 8-bit grey on the T5, RGB565 on
+  1.8.4 by Larry Bank (Apache-2.0, `LICENSE`), from the Arduino library
+  release. A local patch initializes the x86 SSE marker mask in `src/jpeg.inl`.
+  Decodes the Esri JPEG map tiles: 8-bit grey on the T5, RGB565 on
   the SenseCAP, its ~18 KB of state in PSRAM. (`library.properties` lists
   `bb_spi_lcd` as a dependency; only its `JPEGDisplay.h`, which nothing here
   includes, uses it.) Apache-2.0 is compatible with this project's
