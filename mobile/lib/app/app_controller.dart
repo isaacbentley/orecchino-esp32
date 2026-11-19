@@ -224,6 +224,9 @@ class AppController extends ChangeNotifier {
   String? _adsbError;
   int _adsbLastMs = -1 << 40; // the last ADS-B attempt
   int _adsbFailures = 0; // consecutive failed fetches (the backoff)
+  int _adsbRetryAtMs = 0;
+  bool _adsbFetching = false;
+  String _adsbApiKey = '';
   PhoneLocation? _lastLocation;
   LocationStatus? _lastLocationStatus;
   String? _ongoingId;
@@ -466,6 +469,7 @@ class AppController extends ChangeNotifier {
 
   /// Whether an ADS-B fetch is due now.
   bool adsbDue(int now) {
+    if (!settings.demo && (_adsbFetching || now < _adsbRetryAtMs)) return false;
     final d = adsbInterval;
     return d != null && now - _adsbLastMs >= d.inMilliseconds;
   }
@@ -496,6 +500,9 @@ class AppController extends ChangeNotifier {
   String? get connectedDetectorId => settings.demo ? 'simulated' : _pinnedId;
   DeviceInfoMessage? get detectorInfo => settings.demo ? SimulatedDetector.info : ble.info;
   String? get adsbError => _adsbError;
+  DateTime? get adsbRetryAt => !settings.demo && _adsbRetryAtMs > nowMs()
+      ? DateTime.fromMillisecondsSinceEpoch(_adsbRetryAtMs)
+      : null;
   SyncProgress get syncProgress => sync.lastProgress;
 
   /// The observer: the phone, or in demo mode the simulated position.
@@ -570,6 +577,7 @@ class AppController extends ChangeNotifier {
     }
     settings.adsbRadiusKm =
         int.tryParse(await db.getSetting('adsb_km') ?? '')?.clamp(AdsbArea.minKm, AdsbArea.maxKm) ?? AdsbArea.defaultKm;
+    _adsbApiKey = await db.getSetting('adsb_api_key') ?? '';
   }
 
   /// The map's own tile template ('' for the default) and its attribution.
@@ -603,6 +611,25 @@ class AppController extends ChangeNotifier {
     if (v == settings.adsbRadiusKm) return;
     settings.adsbRadiusKm = v;
     await db.setSetting('adsb_km', '$v');
+    _changed();
+    unawaited(refreshTraffic());
+  }
+
+  bool get hasAdsbApiKey => _adsbApiKey.isNotEmpty;
+
+  /// Use a separate quota when the person supplies an adsb.lol key.
+  Future<void> setAdsbApiKey(String value) async {
+    final key = value.trim();
+    if (key.length > 512 || !RegExp(r'^[!-~]*$').hasMatch(key)) {
+      throw ArgumentError('Enter an API key without spaces or control characters.');
+    }
+    if (key == _adsbApiKey) return;
+    await db.setSetting('adsb_api_key', key);
+    if (_disposed) return;
+    _adsbApiKey = key;
+    _adsbRetryAtMs = 0;
+    _adsbFailures = 0;
+    _adsbError = null;
     _changed();
     unawaited(refreshTraffic());
   }
@@ -901,33 +928,48 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> refreshTraffic() async {
-    if (!settings.adsb) return;
+    if (_disposed || !settings.adsb) return;
     final now = nowMs();
     final area = adsbArea(now);
     if (area == null) return;
-    _adsbLastMs = now;
     if (settings.demo) {
+      _adsbLastMs = now;
       traffic.update(sim.demoAircraft(now), now, area);
       _adsbError = null;
       await pushTraffic();
       return;
     }
+    if (_adsbFetching || now < _adsbRetryAtMs) return;
+    _adsbFetching = true;
+    _adsbLastMs = now;
+    final apiKey = _adsbApiKey;
+    bool stillCurrent() => !_disposed && settings.adsb && !settings.demo && apiKey == _adsbApiKey;
     try {
       // Stamped when the answer arrives, not when it was asked for: a slow
       // fetch must not make the set look older than it is.
-      final answer = await adsb.fetch(area, clock: nowMs);
+      final answer = await adsb.fetch(area, clock: nowMs, apiKey: apiKey);
+      if (!stillCurrent()) return;
       traffic.update(answer.aircraft, answer.atMs, area);
       if (_adsbFailures > 0 && kDebugMode) debugPrint('adsb: back after $_adsbFailures failures');
       _adsbError = null;
       _adsbFailures = 0;
+      _adsbRetryAtMs = 0;
       await pushTraffic();
-    } catch (e) {
-      _adsbError = 'ADS-B fetch failed';
-      // Back off (10 s doubling to 5 minutes); log the first failure only.
-      if (_adsbFailures == 0 && kDebugMode) debugPrint('adsb: $e');
+    } on AdsbFetchException catch (e) {
+      if (!stillCurrent()) return;
+      _adsbError = e.message;
+      _adsbRetryAtMs = e.retryAtMs ?? 0;
       _adsbFailures++;
+    } catch (e) {
+      if (!stillCurrent()) return;
+      _adsbError = 'ADS-B fetch failed';
+      if (_adsbFailures == 0 && kDebugMode) debugPrint('adsb: ${e.runtimeType}');
+      _adsbFailures++;
+    } finally {
+      _adsbFetching = false;
+      _changed();
+      if (apiKey != _adsbApiKey) unawaited(refreshTraffic());
     }
-    _changed();
   }
 
   /// The `traffic` lines to a board that takes them (plan §8.1).

@@ -8,6 +8,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../app/app_controller.dart';
 import '../../core/ble/ble_service.dart';
@@ -112,6 +113,7 @@ class _DetectorsViewState extends State<DetectorsView> {
                         'adsb',
                         app.settings.adsb),
                     if (app.settings.adsb) _radius(),
+                    _adsbKey(context),
                     _divider(),
                     _mapTiles(context),
                     _divider(),
@@ -437,6 +439,29 @@ class _DetectorsViewState extends State<DetectorsView> {
         ),
       ]),
     );
+  }
+
+  Widget _adsbKey(BuildContext context) {
+    final retryAt = app.settings.adsb ? app.adsbRetryAt?.toLocal() : null;
+    final format = MaterialLocalizations.of(context);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        title: Text('adsb.lol API key', style: OrecchinoType.bodyStrong),
+        subtitle: Text(app.hasAdsbApiKey ? 'Configured' : 'Optional · public access', style: OrecchinoType.caption),
+        trailing: const Icon(Icons.chevron_right_rounded),
+        onTap: () => showDialog<void>(context: context, builder: (_) => _AdsbKeyDialog(app: app)),
+      ),
+      if (retryAt != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text(
+            'adsb.lol rate limit reached. Retry after ${format.formatShortDate(retryAt)} '
+            'at ${format.formatTimeOfDay(TimeOfDay.fromDateTime(retryAt))}.',
+            style: OrecchinoType.caption.copyWith(color: OrecchinoColors.caution),
+          ),
+        ),
+    ]);
   }
 
   Widget _toggle(String title, String subtitle, String key, bool value) => SwitchListTile(
@@ -769,4 +794,107 @@ class _DetectorsViewState extends State<DetectorsView> {
       content: Text(ok ? 'Paired with ${name.isEmpty ? 'the detector' : name}' : 'Pairing failed: ${app.ble.error}'),
     ));
   }
+}
+
+class _AdsbKeyDialog extends StatefulWidget {
+  final AppController app;
+
+  const _AdsbKeyDialog({required this.app});
+
+  @override
+  State<_AdsbKeyDialog> createState() => _AdsbKeyDialogState();
+}
+
+class _AdsbKeyDialogState extends State<_AdsbKeyDialog> {
+  static final _docs = Uri.https('www.adsb.lol', '/docs/open-data/api');
+
+  final _key = TextEditingController();
+  bool _saving = false;
+  bool _linkFailed = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _key.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save({bool clear = false}) async {
+    if (_saving) return;
+    final value = clear ? '' : _key.text.trim();
+    if (!clear && value.isEmpty) {
+      setState(() => _error = 'Enter a key to save.');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    String? error;
+    try {
+      await widget.app.setAdsbApiKey(value);
+    } on ArgumentError {
+      error = 'Enter a valid adsb.lol API key.';
+    } catch (_) {
+      error = 'Could not update the API key.';
+    }
+    if (!mounted) return;
+    if (error == null) {
+      Navigator.of(context).pop();
+    } else {
+      setState(() {
+        _saving = false;
+        _error = error;
+      });
+    }
+  }
+
+  Future<void> _openDocs() async {
+    try {
+      if (await launchUrl(_docs, mode: LaunchMode.externalApplication)) return;
+    } catch (_) {
+      // A browser is unavailable on this device.
+    }
+    if (mounted) setState(() => _linkFailed = true);
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+        canPop: !_saving,
+        child: AlertDialog(
+          title: const Text('adsb.lol API key'),
+          scrollable: true,
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(
+              'Public access allows 500 requests per day per IP. Key limits depend on the adsb.lol tier.',
+              style: OrecchinoType.caption,
+            ),
+            TextButton(onPressed: _openDocs, child: const Text('adsb.lol keys and limits')),
+            if (_linkFailed) Text(_docs.toString(), style: OrecchinoType.caption),
+            TextField(
+              controller: _key,
+              enabled: !_saving,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              enableIMEPersonalizedLearning: false,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _save(),
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              decoration: InputDecoration(
+                labelText: widget.app.hasAdsbApiKey ? 'Replacement API key' : 'API key',
+                errorText: _error,
+              ),
+            ),
+          ]),
+          actions: [
+            if (widget.app.hasAdsbApiKey)
+              TextButton(onPressed: _saving ? null : () => _save(clear: true), child: const Text('CLEAR')),
+            TextButton(onPressed: _saving ? null : () => Navigator.of(context).pop(), child: const Text('CANCEL')),
+            TextButton(onPressed: _saving ? null : _save, child: Text(_saving ? 'SAVING…' : 'SAVE')),
+          ],
+        ),
+      );
 }

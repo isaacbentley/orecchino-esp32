@@ -24,6 +24,8 @@ void main() {
     await tester.tap(find.text('Belgian geozones · Droneguide'));
     await tester.pumpAndSettle();
 
+    final sheet = tester.widget<BottomSheet>(find.byType(BottomSheet));
+    expect(sheet.backgroundColor, OrecchinoColors.raised);
     expect(service.autoRefresh, isFalse);
     expect(tester.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'Refresh now')).onPressed, isNull);
     final activeChoice = tester.getSemantics(find.bySemanticsLabel('Active only')).getSemanticsData();

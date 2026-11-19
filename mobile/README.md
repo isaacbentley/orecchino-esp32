@@ -363,6 +363,17 @@ fetches map tiles for the area on screen from Esri
 (server.arcgisonline.com), or from the template you set, as any map does;
 they are cached on the phone (up to 50 MB).
 
+## ADS-B request limits
+
+adsb.lol allows 500 anonymous requests per day per public IP address. If
+the feed responds with `HTTP 429`, the app shows the quota message and the
+next retry time under **Detectors → Settings → adsb.lol API key**. It resumes
+automatically once the wait and the current polling interval have elapsed.
+
+You can save an optional API key in that setting. The app stores it in its
+private settings and sends it in the `x-api-key` header only to adsb.lol.
+Quotas depend on the type of key. [adsb.lol API documentation](https://www.adsb.lol/docs/open-data/api)
+
 ## Permissions
 
 - **iOS** (deployment target 16.0): `NSBluetoothAlwaysUsageDescription`,

@@ -277,6 +277,42 @@ void main() {
       app.dispose();
     });
 
+    test('rate limit blocks immediate refresh and polling until Retry-After; a new key retries', () async {
+      final keys = <String?>[];
+      final app = AppController(
+        db: AppDatabase(NativeDatabase.memory()),
+        ble: BleService(transport: FakeTransport()),
+        location: PolicyLocation(),
+        adsb: AdsbSource(client: MockClient((req) async {
+          final key = req.headers['x-api-key'];
+          keys.add(key);
+          return key == null
+              ? http.Response('quota', 429, headers: {'retry-after': '600'})
+              : http.Response('{"ac":[]}', 200);
+        })),
+        startTimers: false,
+      );
+      addTearDown(app.dispose);
+      await app.start();
+      await app.refreshTraffic();
+      expect(keys, [null]);
+      expect(app.adsbError, contains('429'));
+      final retry = app.adsbRetryAt!.millisecondsSinceEpoch;
+      expect(app.adsbDue(retry - 1), isFalse);
+      expect(app.adsbDue(retry), isTrue);
+      await app.refreshTraffic();
+      await app.setAdsbRadiusKm(20);
+      expect(keys, [null]);
+
+      await app.setAdsbApiKey(' test-key ');
+      await Future<void>.delayed(Duration.zero);
+      expect(keys, [null, 'test-key']);
+      expect(app.hasAdsbApiKey, isTrue);
+      expect(app.adsbRetryAt, isNull);
+      expect(app.adsbError, isNull);
+      expect(app.traffic.dataMs, isNotNull);
+    });
+
     test('demo drones make it 10 s', () async {
       final app = AppController(
         db: AppDatabase(NativeDatabase.memory()),

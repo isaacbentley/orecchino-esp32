@@ -39,6 +39,8 @@ Future<void> showDroneguideOptions(
 }) =>
     showModalBottomSheet<void>(
       context: context,
+      backgroundColor: OrecchinoColors.raised,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
       isScrollControlled: true,
       showDragHandle: true,
       useSafeArea: true,
