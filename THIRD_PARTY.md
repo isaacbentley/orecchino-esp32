@@ -35,6 +35,8 @@ package's `LICENSE` in the pub cache. All are GPL-compatible.
 | [flutter_tts](https://pub.dev/packages/flutter_tts) | 4.2.5 | MIT | Optional spoken traffic callout |
 | [http](https://pub.dev/packages/http) | 1.6.0 | BSD-3-Clause | adsb.lol requests |
 | [path_provider](https://pub.dev/packages/path_provider), [path](https://pub.dev/packages/path) | 2.1.6, 1.9.1 | BSD-3-Clause | Database location |
+| [file_selector](https://pub.dev/packages/file_selector) (+ platform packages) | 1.1.0 | BSD-3-Clause | Select local Droneguide JSON and GeoJSON files |
+| [url_launcher](https://pub.dev/packages/url_launcher) (+ platform packages) | 6.3.3 | BSD-3-Clause | Open the official Droneguide map |
 | [flutter_map](https://pub.dev/packages/flutter_map) | 8.3.2 | BSD-3-Clause | Live screen's Map mode |
 | [latlong2](https://pub.dev/packages/latlong2) | 0.10.1 | Apache-2.0 | Coordinates for flutter_map |
 | [dart_earcut](https://pub.dev/packages/dart_earcut), [dart_polylabel2](https://pub.dev/packages/dart_polylabel2) | 1.2.0, 1.0.0 | MIT; BSD-3-Clause plus ISC (© 2016 Mapbox, the polylabel it ports) | Pulled in by flutter_map (polygons) |
@@ -84,9 +86,9 @@ project.
 ## Vendored / derived code
 
 - `firmware/libraries/JPEGDEC/` — [JPEGDEC](https://github.com/bitbank2/JPEGDEC)
-  1.8.4 by Larry Bank (Apache-2.0, `LICENSE`), unmodified: `src/`, its
-  `library.properties`, `LICENSE` and `README.md` from the Arduino library
-  release. Decodes the Esri JPEG map tiles: 8-bit grey on the T5, RGB565 on
+  1.8.4 by Larry Bank (Apache-2.0, `LICENSE`), from the Arduino library
+  release. A local patch initializes the x86 SSE marker mask in `src/jpeg.inl`.
+  Decodes the Esri JPEG map tiles: 8-bit grey on the T5, RGB565 on
   the SenseCAP, its ~18 KB of state in PSRAM. (`library.properties` lists
   `bb_spi_lcd` as a dependency; only its `JPEGDisplay.h`, which nothing here
   includes, uses it.) Apache-2.0 is compatible with this project's

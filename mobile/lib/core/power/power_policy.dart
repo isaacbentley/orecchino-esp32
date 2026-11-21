@@ -14,8 +14,8 @@
 //   (Android)                            2 min after a drone)
 //   Wi-Fi beacon/NAN  30 s / on          60 s fg, 120 s bg /         off
 //                                        NAN on Live/Find only
-//   ADS-B             10 s               10 s with drones or a       30 s with drones
-//                                        traffic detector, else 60 s only
+//   ADS-B with drones 10 s               10 s                        30 s
+//   ADS-B map only    30 s               30 s                        30 s
 //   detector feed     full               full (a background digest   full (the same)
 //                                        needs the firmware)
 //   location          high               high on Live/Find, else     medium; kept last
@@ -76,10 +76,11 @@ class PowerPolicy {
   final Duration? beaconEvery;
   final bool nan;
 
-  /// ADS-B polling, fast (with drones or a traffic detector) and slow
-  /// (otherwise; null = none).
+  /// ADS-B polling while a drone is being heard.
   final Duration adsbFast;
-  final Duration? adsbSlow;
+
+  /// ADS-B polling for low traffic around the phone while only Map needs it.
+  static const adsbMapInterval = Duration(seconds: 30);
 
   final LocationPrecision location;
 
@@ -99,7 +100,6 @@ class PowerPolicy {
     required this.beaconEvery,
     required this.nan,
     required this.adsbFast,
-    required this.adsbSlow,
     required this.location,
     required this.compassHz,
   });
@@ -182,11 +182,6 @@ class PowerPolicy {
         PowerMode.balanced => const Duration(seconds: 10),
         PowerMode.saver => const Duration(seconds: 30),
       },
-      adsbSlow: switch (mode) {
-        PowerMode.full => const Duration(seconds: 10),
-        PowerMode.balanced => const Duration(seconds: 60),
-        PowerMode.saver => null,
-      },
       location: rest ? LocationPrecision.off : loc,
       compassHz: compass,
     );
@@ -224,12 +219,13 @@ Duration? adsbNextDelay({
   required bool enabled,
   required bool hasPosition,
   required bool liveDrones,
-  required bool trafficDetector,
+  required bool mapVisible,
   int failures = 0,
 }) {
   if (!enabled || !hasPosition) return null;
-  final usual = liveDrones || trafficDetector ? policy.adsbFast : policy.adsbSlow;
-  if (usual == null || failures <= 0) return usual;
+  if (!liveDrones && (!mapVisible || !policy.foreground || policy.tab != AppTab.live)) return null;
+  final usual = liveDrones ? policy.adsbFast : PowerPolicy.adsbMapInterval;
+  if (failures <= 0) return usual;
   final s = 10 * (1 << (failures - 1).clamp(0, 5));
   final backoff = Duration(seconds: s.clamp(10, 300));
   return backoff > usual ? backoff : usual;

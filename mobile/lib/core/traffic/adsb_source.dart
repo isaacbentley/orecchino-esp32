@@ -1,7 +1,7 @@
 // adsb_source.dart — manned aircraft from adsb.lol (plan §1, §8.1), and the
 // set the phone keeps and evaluates (like the Mac's TrafficService.swift).
 //
-// ADS-B is only for drone-aircraft conflicts, so the query is small: 10 km
+// ADS-B is for drone-aircraft conflicts and nearby low traffic, so the query is small: 10 km
 // around the phone by default (5-30 km, Detectors > Settings). A live drone
 // more than 3 km from the phone moves the centre to the middle of the phone
 // and the drones and widens the radius until every live drone has 9 km
@@ -19,7 +19,9 @@
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show HttpDate, HttpException, SocketException, TlsException;
 import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
@@ -97,20 +99,89 @@ class AdsbSource {
   /// answer is stamped with [clock] read once it is in (the wall clock by
   /// default): each aircraft's "seen" age counts from when adsb.lol
   /// answered, so a slow fetch never makes the data look older than it is.
-  Future<AdsbAnswer> fetch(AdsbArea area, {int Function()? clock}) async {
-    final res = await client
-        .get(urlFor(base, area), headers: const {'Accept': 'application/json'}).timeout(const Duration(seconds: 8));
-    if (res.statusCode != 200) throw http.ClientException('adsb.lol answered ${res.statusCode}');
-    final at = clock != null ? clock() : DateTime.now().millisecondsSinceEpoch;
-    return AdsbAnswer(parse(res.body, at), at);
+  Future<AdsbAnswer> fetch(AdsbArea area, {int Function()? clock, String apiKey = ''}) async {
+    final url = urlFor(base, area);
+    final abort = Completer<void>();
+    final request = http.AbortableRequest('GET', url, abortTrigger: abort.future)
+      ..followRedirects = false
+      ..headers['Accept'] = 'application/json';
+    final key = apiKey.trim();
+    if (key.isNotEmpty && url.scheme == 'https' && url.host == 'api.adsb.lol' && url.port == 443 && url.userInfo.isEmpty) {
+      if (key.contains(RegExp(r'[\x00-\x20\x7f]'))) {
+        throw const AdsbFetchException('The ADS-B API key contains invalid characters. Check it in Detectors settings.');
+      }
+      request.headers['x-api-key'] = key;
+    }
+    try {
+      final response = await client.send(request).then(http.Response.fromStream).timeout(const Duration(seconds: 8));
+      final at = clock != null ? clock() : DateTime.now().millisecondsSinceEpoch;
+      if (response.statusCode == 429) {
+        throw AdsbFetchException('adsb.lol request limit reached (HTTP 429).',
+            retryAtMs: _retryAt(response.headers['retry-after'], at));
+      }
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        final advice = request.headers.containsKey('x-api-key') ? ' Check the ADS-B API key in Detectors settings.' : '';
+        throw AdsbFetchException('adsb.lol denied access (HTTP ${response.statusCode}).$advice');
+      }
+      if (response.statusCode >= 300 && response.statusCode < 400) {
+        throw AdsbFetchException('adsb.lol returned an unexpected redirect (HTTP ${response.statusCode}).');
+      }
+      if (response.statusCode != 200) {
+        throw AdsbFetchException('adsb.lol returned HTTP ${response.statusCode}. Check the service and try again.');
+      }
+      return AdsbAnswer(parse(utf8.decode(response.bodyBytes), at), at);
+    } on TimeoutException {
+      abort.complete();
+      throw const AdsbFetchException('adsb.lol did not respond in time. Check your connection.');
+    } on TlsException {
+      throw const AdsbFetchException('Could not verify the secure connection to adsb.lol. Check the device date and network.');
+    } on SocketException {
+      throw const AdsbFetchException('Could not reach adsb.lol. Check internet access and DNS.');
+    } on http.ClientException {
+      throw const AdsbFetchException('Connection to adsb.lol failed. Check your internet access.');
+    } on FormatException {
+      throw const AdsbFetchException('adsb.lol returned an unreadable response.');
+    }
+  }
+
+  /// The documented daily quota resets at 00:00 UTC when the server gives
+  /// no usable HTTP Retry-After value.
+  static int _retryAt(String? header, int nowMs) {
+    final value = header?.trim();
+    if (value != null && value.isNotEmpty) {
+      if (RegExp(r'^\d+$').hasMatch(value)) {
+        final seconds = int.tryParse(value);
+        // DateTime's epoch range is ±100 million days. Avoid overflow and
+        // avoid returning a timestamp the settings screen cannot display.
+        if (seconds != null && seconds <= (8640000000000000 - nowMs) ~/ 1000) {
+          return nowMs + seconds * 1000;
+        }
+      } else {
+        try {
+          final at = HttpDate.parse(value).millisecondsSinceEpoch;
+          if (at >= nowMs) return at;
+        } on HttpException {
+          // Malformed Retry-After: use the documented daily reset instead.
+        }
+      }
+    }
+    final now = DateTime.fromMillisecondsSinceEpoch(nowMs, isUtc: true);
+    return DateTime.utc(now.year, now.month, now.day + 1).millisecondsSinceEpoch;
   }
 
   /// The adsb.lol answer as aircraft, unusable ones dropped.
   static List<TrafficAircraft> parse(String body, int nowMs) {
     final v = jsonDecode(body);
-    if (v is! Map<String, dynamic>) return const [];
+    if (v is! Map<String, dynamic>) throw const FormatException('Expected a readsb object');
     final ac = v['ac'];
-    if (ac is! List) return const [];
+    if (ac is! List) {
+      // Some empty readsb replies omit "ac" or set it to null. An empty
+      // object or a nonempty total without its list is not a fresh answer.
+      final total = v['total'];
+      final at = v['now'];
+      if (ac == null && (total == 0 || (total == null && at is num && at.isFinite && at >= 0))) return const [];
+      throw const FormatException('Expected a readsb aircraft list');
+    }
     final out = <TrafficAircraft>[];
     for (final a in ac) {
       if (a is! Map<String, dynamic>) continue;
@@ -148,6 +219,16 @@ class AdsbSource {
   }
 
   void close() => client.close();
+}
+
+class AdsbFetchException implements Exception {
+  final String message;
+  final int? retryAtMs;
+
+  const AdsbFetchException(this.message, {this.retryAtMs});
+
+  @override
+  String toString() => message;
 }
 
 /// One answer from adsb.lol: the aircraft, and when it arrived (what their

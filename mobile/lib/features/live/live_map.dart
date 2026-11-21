@@ -20,18 +20,22 @@
 //
 // Part of orecchino-esp32. SPDX-License-Identifier: GPL-3.0-or-later
 
+import 'dart:async' show unawaited;
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
 
+import '../../core/droneguide/droneguide.dart';
 import '../../core/geo.dart';
 import '../../core/traffic/traffic_rules.dart';
 import '../../ui/canvas_text.dart';
 import '../../ui/glass.dart';
 import '../../ui/theme/theme.dart';
 import '../../ui/traffic_widgets.dart';
+import '../droneguide/droneguide_widgets.dart';
 import 'live_items.dart';
 import 'sky_painter.dart';
 import 'sky_scene.dart' show badgeSpots;
@@ -145,12 +149,14 @@ class LiveMap extends StatefulWidget {
 
   /// Where the tiles come from.
   final MapTileSource source;
+  final DroneguideService? droneguide;
 
   /// The last position this phone saved, for a centre before a fix.
   final double? fallbackLat, fallbackLon;
 
   const LiveMap({
     this.source = MapTiles.esriDarkGray,
+    this.droneguide,
     this.fallbackLat,
     this.fallbackLon,
     super.key,
@@ -172,6 +178,9 @@ class LiveMap extends StatefulWidget {
 
 class LiveMapState extends State<LiveMap> {
   final MapController _map = MapController();
+  final LayerHitNotifier<DroneguideZone> _droneguideHits = ValueNotifier(null);
+  List<DroneguideZone> _drawnZones = const [];
+  List<Polygon<DroneguideZone>> _zonePolygons = const [];
   late final TileProvider _tiles = MapTiles.provider();
   bool _ready = false;
   bool _follow = true;
@@ -240,6 +249,7 @@ class LiveMapState extends State<LiveMap> {
 
   @override
   void dispose() {
+    _droneguideHits.dispose();
     _map.dispose();
     super.dispose();
   }
@@ -252,13 +262,20 @@ class LiveMapState extends State<LiveMap> {
   }
 
   void _fitAll() {
-    if (!_ready) return;
     final pts = <LatLng>[
       if (_you != null) _you!,
       for (final c in widget.items)
         if (c.lat != null && c.lon != null) LatLng(c.lat!, c.lon!),
     ];
-    if (pts.isEmpty) return;
+    _fitPoints(pts);
+  }
+
+  void _fitDroneguide() => _fitPoints([
+        for (final polygon in _zonePolygons) ...polygon.points,
+      ]);
+
+  void _fitPoints(List<LatLng> pts) {
+    if (!_ready || pts.isEmpty) return;
     setState(() => _follow = false);
     final v = widget.viewport;
     final pad = EdgeInsets.fromLTRB(
@@ -268,6 +285,40 @@ class LiveMapState extends State<LiveMap> {
     } else {
       _map.fitCamera(CameraFit.coordinates(coordinates: pts, padding: pad, maxZoom: 17));
     }
+  }
+
+  List<Polygon<DroneguideZone>> _droneguidePolygons() {
+    final zones = widget.droneguide?.visibleZones ?? const [];
+    if (!listEquals(_drawnZones, zones)) {
+      _drawnZones = zones;
+      _zonePolygons = [
+        for (final zone in zones)
+          for (final polygon in zone.polygons)
+            if (polygon.isNotEmpty && polygon.first.length >= 3)
+              Polygon<DroneguideZone>(
+                points: polygon.first,
+                holePointsList: polygon.length > 1 ? polygon.sublist(1) : null,
+                color: droneguideColor.withValues(alpha: 0.12),
+                borderColor: droneguideColor,
+                borderStrokeWidth: 1.2,
+                hitValue: zone,
+              ),
+      ];
+    }
+    return _zonePolygons;
+  }
+
+  void _showDroneguideAt(LatLng position) {
+    final service = widget.droneguide;
+    final hit = _droneguideHits.value;
+    _droneguideHits.value = null;
+    if (service == null || hit == null || !service.layerEnabled) return;
+    if ((position.latitude - hit.coordinate.latitude).abs() > 1e-6 ||
+        (position.longitude - hit.coordinate.longitude).abs() > 1e-6) {
+      return;
+    }
+    final zones = hit.hitValues.toSet().where(_drawnZones.contains).toList();
+    if (zones.isNotEmpty) unawaited(showDroneguideZones(context, service, zones));
   }
 
   void _tileError(Object error) {
@@ -323,6 +374,8 @@ class LiveMapState extends State<LiveMap> {
   Widget build(BuildContext context) {
     final home = _home;
     final src = widget.source;
+    final service = widget.droneguide;
+    final zones = _droneguidePolygons();
     final status = this.status;
     return LayoutBuilder(builder: (context, box) {
       _size = box.biggest;
@@ -348,6 +401,7 @@ class LiveMapState extends State<LiveMap> {
               onPositionChanged: (_, hasGesture) {
                 if (hasGesture && _follow) setState(() => _follow = false);
               },
+              onTap: (_, position) => _showDroneguideAt(position),
             ),
             children: [
               // The plain grid first: all there is when no tile loads.
@@ -378,20 +432,24 @@ class LiveMapState extends State<LiveMap> {
                     maxNativeZoom: src.maxNativeZoom,
                   ),
                 ),
+              if (zones.isNotEmpty)
+                PolygonLayer<DroneguideZone>(polygons: zones, hitNotifier: _droneguideHits, polygonLabels: false),
               if (_you != null)
-                CircleLayer(circles: [
-                  for (final f in ringFractions(widget.rangeM))
-                    CircleMarker(
-                      point: _you!,
-                      radius: widget.rangeM * f,
-                      useRadiusInMeter: true,
-                      color: Colors.transparent,
-                      borderColor: f == 1
-                          ? (Look.flat ? OrecchinoColors.lineBright : OrecchinoColors.aqua.withValues(alpha: 0.6))
-                          : ringColor,
-                      borderStrokeWidth: f == 1 ? 1.6 : 1,
-                    ),
-                ]),
+                IgnorePointer(
+                  child: CircleLayer(circles: [
+                    for (final f in ringFractions(widget.rangeM))
+                      CircleMarker(
+                        point: _you!,
+                        radius: widget.rangeM * f,
+                        useRadiusInMeter: true,
+                        color: Colors.transparent,
+                        borderColor: f == 1
+                            ? (Look.flat ? OrecchinoColors.lineBright : OrecchinoColors.aqua.withValues(alpha: 0.6))
+                            : ringColor,
+                        borderStrokeWidth: f == 1 ? 1.6 : 1,
+                      ),
+                  ]),
+                ),
               _Marks(
                 items: widget.items,
                 bridges: widget.bridges,
@@ -447,6 +505,27 @@ class LiveMapState extends State<LiveMap> {
             ),
           ]),
         ),
+        if (service != null)
+          Positioned(
+            left: v.left + 8,
+            right: _size.width - v.right + 64,
+            bottom: _size.height - v.bottom + 12 + OrecchinoTheme.minTarget,
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: Semantics(
+                hint: 'Options, ${droneguideSummary(service)}',
+                child: OutlinedButton(
+                  onPressed: () => showDroneguideOptions(context, service, onFit: _fitDroneguide),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: droneguideColor,
+                    backgroundColor: OrecchinoColors.raised,
+                    minimumSize: const Size(OrecchinoTheme.minTarget, OrecchinoTheme.minTarget),
+                  ),
+                  child: const Text('Droneguide'),
+                ),
+              ),
+            ),
+          ),
         // The attribution: always visible, opens its full text. No wider
         // than the free area (it wraps beside a panel), never under it.
         Positioned(

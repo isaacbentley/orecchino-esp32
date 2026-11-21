@@ -8,6 +8,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../app/app_controller.dart';
 import '../../core/ble/ble_service.dart';
@@ -18,6 +19,7 @@ import '../../core/traffic/adsb_source.dart';
 import '../../data/db.dart';
 import '../../ui/glass.dart';
 import '../../ui/theme/theme.dart';
+import '../droneguide/droneguide_widgets.dart';
 import '../history/clear_history_sheet.dart';
 import '../live/live_map.dart' show MapTileSource;
 import 'wifi_setup_sheet.dart';
@@ -105,14 +107,18 @@ class _DetectorsViewState extends State<DetectorsView> {
                     _divider(),
                     _toggle(
                         'ADS-B conflict watch (adsb.lol)',
-                        'Aircraft near your drones, and low aircraft. Sends an approximate area (about 1 km) '
-                            'every 10 s while drones are about or a detector takes traffic, otherwise every '
-                            'minute; none without your position',
+                        'Checks for aircraft near drones and low traffic. Requests need a phone location '
+                            'and send an approximate area (about 1 km). While drones are heard, updates '
+                            'run every 10 s in Full or Balanced and every 30 s in Saver. With no drones, '
+                            'the visible Live map checks ADS-B every 30 s. ADS-B stays idle otherwise.',
                         'adsb',
                         app.settings.adsb),
-                    if (app.settings.adsb) _radius(),
+                    if (app.settings.adsb) ...[_radius(), _adsbStatus(context)],
+                    _adsbKey(context),
                     _divider(),
                     _mapTiles(context),
+                    _divider(),
+                    DroneguideSettingsTile(service: app.droneguide),
                     _divider(),
                     _toggle('Notifications', 'Traffic near drones, low traffic, emergencies, invalid ID signatures',
                         'notifications', app.settings.notifications),
@@ -180,12 +186,12 @@ class _DetectorsViewState extends State<DetectorsView> {
   Widget _divider() => Divider(height: 1, color: OrecchinoColors.line);
 
   static String powerWords(PowerMode m) => switch (m) {
-        PowerMode.full => 'The smoothest sky and the fastest scans on every screen; ADS-B every 10 s. '
-            'Uses the most battery.',
-        PowerMode.balanced => 'Scans hardest on Live and Find, lighter elsewhere and in the background; a '
-            'slower sky; ADS-B every 10 s while drones are about, otherwise every minute.',
-        PowerMode.saver => 'A still sky without blur. This phone listens only on Live and Find, never in the '
-            'background, and not on Wi-Fi; ADS-B only while drones are about. A detector still alerts.',
+        PowerMode.full => 'The smoothest sky and the fastest scans on every screen. '
+            'ADS-B updates every 10 s while drones are heard. Uses the most battery.',
+        PowerMode.balanced => 'Scans hardest on Live and Find and lighter elsewhere and in the background. '
+            'A slower sky. ADS-B updates every 10 s while drones are heard.',
+        PowerMode.saver => 'A still sky without blur. The phone scans for Bluetooth Remote ID on Live and Find. '
+            'ADS-B updates every 30 s while drones are heard. A paired detector still alerts.',
       };
 
   /// Sky / Flat.
@@ -435,6 +441,44 @@ class _DetectorsViewState extends State<DetectorsView> {
       ]),
     );
   }
+
+  Widget _adsbStatus(BuildContext context) {
+    final summary = app.conflictWatchSummary;
+    final hasPosition = app.observer != null;
+    final error = hasPosition ? app.adsbError : null;
+    final retryAt = hasPosition ? app.adsbRetryAt?.toLocal() : null;
+    final format = MaterialLocalizations.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(summary, style: OrecchinoType.caption),
+          if (error != null && !summary.contains(error))
+            Text(error, style: OrecchinoType.caption.copyWith(color: OrecchinoColors.caution)),
+          if (retryAt != null)
+            Text(
+              'Retry after ${format.formatShortDate(retryAt)} '
+              'at ${format.formatTimeOfDay(TimeOfDay.fromDateTime(retryAt))}.',
+              style: OrecchinoType.caption.copyWith(color: OrecchinoColors.caution),
+            ),
+          const SizedBox(height: 6),
+          OutlinedButton(
+            onPressed: app.canRefreshTraffic ? app.refreshTraffic : null,
+            child: const Text('Refresh ADS-B'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _adsbKey(BuildContext context) => ListTile(
+        contentPadding: EdgeInsets.zero,
+        title: Text('adsb.lol API key', style: OrecchinoType.bodyStrong),
+        subtitle: Text(app.hasAdsbApiKey ? 'Configured' : 'Optional · public access', style: OrecchinoType.caption),
+        trailing: const Icon(Icons.chevron_right_rounded),
+        onTap: () => showDialog<void>(context: context, builder: (_) => _AdsbKeyDialog(app: app)),
+      );
 
   Widget _toggle(String title, String subtitle, String key, bool value) => SwitchListTile(
         contentPadding: EdgeInsets.zero,
@@ -766,4 +810,107 @@ class _DetectorsViewState extends State<DetectorsView> {
       content: Text(ok ? 'Paired with ${name.isEmpty ? 'the detector' : name}' : 'Pairing failed: ${app.ble.error}'),
     ));
   }
+}
+
+class _AdsbKeyDialog extends StatefulWidget {
+  final AppController app;
+
+  const _AdsbKeyDialog({required this.app});
+
+  @override
+  State<_AdsbKeyDialog> createState() => _AdsbKeyDialogState();
+}
+
+class _AdsbKeyDialogState extends State<_AdsbKeyDialog> {
+  static final _docs = Uri.https('www.adsb.lol', '/docs/open-data/api');
+
+  final _key = TextEditingController();
+  bool _saving = false;
+  bool _linkFailed = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _key.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save({bool clear = false}) async {
+    if (_saving) return;
+    final value = clear ? '' : _key.text.trim();
+    if (!clear && value.isEmpty) {
+      setState(() => _error = 'Enter a key to save.');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    String? error;
+    try {
+      await widget.app.setAdsbApiKey(value);
+    } on ArgumentError {
+      error = 'Enter a valid adsb.lol API key.';
+    } catch (_) {
+      error = 'Could not update the API key.';
+    }
+    if (!mounted) return;
+    if (error == null) {
+      Navigator.of(context).pop();
+    } else {
+      setState(() {
+        _saving = false;
+        _error = error;
+      });
+    }
+  }
+
+  Future<void> _openDocs() async {
+    try {
+      if (await launchUrl(_docs, mode: LaunchMode.externalApplication)) return;
+    } catch (_) {
+      // A browser is unavailable on this device.
+    }
+    if (mounted) setState(() => _linkFailed = true);
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+        canPop: !_saving,
+        child: AlertDialog(
+          title: const Text('adsb.lol API key'),
+          scrollable: true,
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(
+              'Public access allows 500 requests per day per IP. Key limits depend on the adsb.lol tier.',
+              style: OrecchinoType.caption,
+            ),
+            TextButton(onPressed: _openDocs, child: const Text('adsb.lol keys and limits')),
+            if (_linkFailed) Text(_docs.toString(), style: OrecchinoType.caption),
+            TextField(
+              controller: _key,
+              enabled: !_saving,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              enableIMEPersonalizedLearning: false,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _save(),
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              decoration: InputDecoration(
+                labelText: widget.app.hasAdsbApiKey ? 'Replacement API key' : 'API key',
+                errorText: _error,
+              ),
+            ),
+          ]),
+          actions: [
+            if (widget.app.hasAdsbApiKey)
+              TextButton(onPressed: _saving ? null : () => _save(clear: true), child: const Text('CLEAR')),
+            TextButton(onPressed: _saving ? null : () => Navigator.of(context).pop(), child: const Text('CANCEL')),
+            TextButton(onPressed: _saving ? null : _save, child: Text(_saving ? 'SAVING…' : 'SAVE')),
+          ],
+        ),
+      );
 }

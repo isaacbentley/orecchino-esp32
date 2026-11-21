@@ -275,7 +275,7 @@ struct TrafficStatusPill: View {
         HStack(spacing: 6) {
             Image(systemName: warn ? "exclamationmark.triangle.fill"
                   : r.alerts.isEmpty ? "eye" : trafficSymbol(r.highest))
-            Text(model.demoMode ? "SIMULATED · " + r.summary : r.summary)
+            Text(model.demoMode ? "SIMULATED · " + r.summary : model.traffic.watchLabel)
             if let problem { Text("· \(problem)") }
         }
         .font(.system(size: 11, weight: warn ? .semibold : .regular, design: .monospaced))

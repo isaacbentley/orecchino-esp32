@@ -98,7 +98,7 @@ DroneDetails? liveDetailsFor(AppController app, String key) {
       for (final a in app.traffic.result.alerts)
         if (a.droneId == key) a
     ],
-    conflictWatch: app.settings.adsb ? app.traffic.result.summary : null,
+    conflictWatch: app.settings.adsb ? app.conflictWatchSummary : null,
     rssiSeries: ContactHistory.of(app).series(key),
   );
 }

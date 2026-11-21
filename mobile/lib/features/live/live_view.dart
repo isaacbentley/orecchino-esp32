@@ -305,10 +305,12 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
     ];
     final inRange = marks.where((m) => m.distanceM <= _rangeM).length;
     final beyond = marks.length - inRange;
+    final conflictWatch = app.conflictWatchSummary;
+    final adsbWarning = app.settings.adsb && o != null ? app.adsbError : null;
     final notices = <(String, Color)>[
       if (app.isSimulated) ('SIMULATED detector and position', OrecchinoColors.caution),
       if (!app.isSimulated && app.location.problem != null) (app.location.problem!, OrecchinoColors.caution),
-      if (app.settings.adsb && app.adsbError != null) (app.adsbError!, OrecchinoColors.caution),
+      if (adsbWarning != null && !conflictWatch.contains(adsbWarning)) (adsbWarning, OrecchinoColors.caution),
     ];
     final drones = contacts.where((c) => c.isDrone).toList();
     final nearest = (drones.where((c) => c.distanceM != null).toList()
@@ -318,7 +320,6 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
         ? (app.detectorReady ? 'Listening · no drone heard yet' : 'No detector connected')
         : contactCounts(drones);
     final idleDetail = nearest == null ? null : 'nearest ${nearest.label} ${nearest.rangeText}';
-    final conflictWatch = app.settings.adsb ? result.summary : 'CONFLICT WATCH OFF: ADS-B off in Settings';
 
     // An operator's card is its drone's (the operator line is on it).
     final shown = selected != null && selected.isOperator ? byId[selected.ofDrone] : selected;
@@ -421,6 +422,7 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
             rangeM: _rangeM,
             viewport: viewport,
             onSelect: _select,
+            droneguide: app.droneguide,
             source: app.settings.mapUrl.isNotEmpty && MapTileSource.validTemplate(app.settings.mapUrl)
                 ? MapTiles.custom(app.settings.mapUrl, app.settings.mapAttribution)
                 : MapTiles.esriDarkGray,
@@ -637,14 +639,11 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
           onChanged: (v) {
             // The map is opaque: the sweep goes, and the aurora under it
             // stands still until the sky comes back.
-            if (v == 'map') {
-              setState(() => _map = true);
-              LivingBackground.covered.value = true;
-            } else {
-              setState(() => _map = false);
-              LivingBackground.covered.value = false;
-              _setView(v == '3d');
-            }
+            final mapSelected = v == 'map';
+            setState(() => _map = mapSelected);
+            LivingBackground.covered.value = mapSelected;
+            if (!mapSelected) _setView(v == '3d');
+            widget.app.setLiveMapSelected(mapSelected);
           },
         ),
         GlassSegmented<double>(

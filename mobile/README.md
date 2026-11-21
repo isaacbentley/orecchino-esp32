@@ -248,7 +248,8 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   | This phone's Bluetooth scan, in front | low latency, all PHYs | low latency on Live and Find, balanced elsewhere | balanced on Live and Find only |
   | ... in the background (Android) | balanced | low power (balanced for 2 min after a drone) | off |
   | Wi-Fi beacons / NAN (Android) | every 30 s / on | 60 s in front, 2 min behind / Live and Find only | off |
-  | ADS-B | every 10 s | 10 s with a live drone or a traffic detector, else 60 s | 30 s with a live drone only |
+  | ADS-B with a live drone | every 10 s | every 10 s | every 30 s |
+  | ADS-B with only the Live map visible | every 30 s | every 30 s | every 30 s |
   | Detector feed | on | on (a background digest needs the firmware; the feed stays on until the detector supports it) | on (same) |
   | Location | high accuracy | high on Live and Find, medium (50 m) elsewhere | medium; last fix in the background |
   | Compass | 15/s on Live and Find | 10/s on Live and Find | Find only |
@@ -356,12 +357,34 @@ Android launch drawable; re-run it after editing a master.
 Drone and operator positions and the history stay on the phone; nothing is
 uploaded, and Android backup / device transfer of app data is disabled. ADS-B
 requests go to adsb.lol with the query centre (the phone, or the middle of
-the phone and far drones) rounded to 0.01° (about 1 km), every 10 s while a
-drone is live or a detector takes traffic, otherwise every 60 s (see Power
-modes), and only while the ADS-B setting is on. In Map mode the phone
+the phone and far drones) rounded to 0.01° (about 1 km). The ADS-B setting
+and a phone location are required. In Map mode the phone
 fetches map tiles for the area on screen from Esri
 (server.arcgisonline.com), or from the template you set, as any map does;
 they are cached on the phone (up to 50 MB).
+
+## ADS-B status and request limits
+
+ADS-B starts when the phone or a paired receiver hears a drone. It polls
+every 10 seconds in Full or Balanced and every 30 seconds in Saver until
+the last detection is more than 60 seconds old. Without a drone, the app
+polls every 30 seconds while **Live → Map** is visible in the foreground.
+The map can show low aircraft around the phone even without a drone.
+
+Live shows whether ADS-B is waiting for a position, a drone or the map,
+fetching traffic, or unable to reach the feed. Android asks for a first
+location fix and checks again on returning from Android Settings. In
+**Detectors → Settings**, use **Refresh ADS-B** when a drone is active and
+the phone has a location.
+
+adsb.lol allows 500 anonymous requests per day per public IP address. If
+the feed responds with `HTTP 429`, the app shows the quota message and the
+next retry time under **Detectors → Settings**, in the ADS-B section. It resumes
+automatically once the wait and the current polling interval have elapsed.
+
+You can save an optional key under **adsb.lol API key**. The app stores it in its
+private settings and sends it in the `x-api-key` header only to adsb.lol.
+Quotas depend on the type of key. [adsb.lol API documentation](https://www.adsb.lol/docs/open-data/api)
 
 ## Permissions
 
@@ -464,21 +487,31 @@ display name "Orecchino". The version is `version:` in `pubspec.yaml`
 `CFBundleShortVersionString`/`CFBundleVersion` and
 `versionName`/`versionCode`.
 
-Toolchain, the minimum that builds both (checked with Flutter 3.47.5):
+Use Flutter 3.47 or newer with Dart 3.13 or newer. The Windows Android
+release job uses Flutter 3.50.0, and Flutter analysis and tests use 3.47.5.
 
-- **Android**: JDK 17 and the Android command-line tools, no Android Studio.
-  `brew install openjdk@17` and `brew install --cask android-commandlinetools`,
-  then `sdkmanager --sdk_root=$HOME/Library/Android/sdk --licenses` and
-  `sdkmanager --sdk_root=$HOME/Library/Android/sdk "platform-tools"
-  "platforms;android-36" "build-tools;36.0.0"`, and point Flutter at both:
-  `flutter config --android-sdk $HOME/Library/Android/sdk --jdk-dir
-  "$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"`. The first
-  Gradle build fetches the rest itself (platforms 34/35, CMake, the NDK):
-  budget about 9 GB for the SDK plus `~/.gradle`.
+- **Android**. Use JDK 21 and install Android SDK Platforms 34, 35 and 36,
+  Build-Tools 36.0.0, Platform-Tools, a current Command-line Tools package,
+  CMake 3.22.1 or newer, and NDK (Side by side) **30.0.16248370**. On
+  Windows use Android Studio's SDK Manager with **Show Package Details**
+  enabled to select that NDK version. Preinstalling it avoids depending
+  on Gradle's SDK download. Run `flutter doctor --android-licenses` and use
+  `flutter doctor -v` to verify the SDK and JDK. Point Flutter to your
+  installation with `flutter config --android-sdk <sdk> --jdk-dir <jdk>`
+  when needed. Budget about 9 GB for the SDK and the Gradle cache.
 - **iOS**: full Xcode (the Command Line Tools are not enough) and CocoaPods
   (`brew install cocoapods`; `flutter_compass` and `flutter_tts` have no
   Swift Package Manager support yet, the other plugins come through SPM).
   No simulator runtime is needed to compile.
+
+The project pins **Gradle 9.6.0** in the wrapper and **Android Gradle
+Plugin 9.3.1** with **Kotlin 2.4.20** in `android/settings.gradle.kts`.
+Flutter generates the wrapper launch scripts on a fresh checkout. To use
+another compatible NDK installed on your machine, set the Gradle property
+`orecchinoNdkVersion` in your user Gradle properties or set
+`$env:ORG_GRADLE_PROJECT_orecchinoNdkVersion` in PowerShell before building.
+On Windows, keep `PUB_CACHE` on the same drive as the checkout so Kotlin
+can write its incremental compiler cache.
 
 ```bash
 flutter build apk --release          # build/app/outputs/flutter-apk/
@@ -508,6 +541,9 @@ release cannot ship by mistake. To sign:
    keyAlias=upload
    storeFile=/Users/<you>/orecchino-upload.jks
    ```
+
+   On Windows use an absolute path such as
+   `storeFile=C:/Users/<you>/orecchino-upload.jks`.
 
 3. `flutter build appbundle` (Play Store) or `flutter build apk --release`.
 

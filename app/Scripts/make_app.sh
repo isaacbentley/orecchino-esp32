@@ -34,6 +34,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>Your location is sent to the Remote ID receiver so it can show range to detected drones.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Your location is sent to the Remote ID receiver so it can show range to detected drones.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Orecchino sends detected drone positions to your configured ATAK device when you enable UDP output.</string>
     <key>NSHumanReadableCopyright</key> <string>Receive-only ASTM F3411 Remote ID viewer</string>
 </dict>
 </plist>

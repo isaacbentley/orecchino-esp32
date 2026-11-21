@@ -1,5 +1,7 @@
 # Orecchino
 
+[Windows 10/11 x64 app and build instructions](app-windows/README.md).
+
 Orecchino is a small ear for drone Remote ID. Most drones must broadcast
 their identity and position using a standard called Remote ID (ASTM F3411 /
 Open Drone ID). Orecchino listens for those broadcasts and puts them on a
@@ -570,6 +572,12 @@ tools/flash_amoled.sh /dev/cu.usbmodemXXXX
 
 > **Note**: If compiling by hand or in the Arduino IDE instead of using the helper script, select **Partition Scheme: Custom** (`PartitionScheme=custom`) and include `--libraries firmware/libraries` so the 3 MB app partition is used.
 
+## Droneguide on desktop and phone
+
+The Windows, macOS, Android and iOS apps can display Belgian Droneguide zones that overlap the airspace from ground level through 500 ft AGL (152.4 m). In the Droneguide options, **All zones** shows the zones within that altitude band and **Active only** shows zones that the app can determine are active. The option is saved on each device.
+
+Enable automatic updates if you have API permission, or import a Droneguide JSON or GeoJSON file. For live data, activity refers to the timestamp of the last fresh response. For a file, it is evaluated from the validity periods in the export. Check the official map for current operating conditions. [Droneguide (skeyes)](https://map.droneguide.be/)
+
 ## macOS app — `app/`
 
 SwiftUI and MapKit, with no outside dependencies. It builds with the
@@ -579,6 +587,8 @@ Command Line Tools alone (macOS 14 or newer):
 app/Scripts/make_app.sh     # produces app/build/Orecchino.app
 open app/build/Orecchino.app
 ```
+
+Windows and macOS can forward live positional drone detections as Cursor on Target (CoT) markers over UDP. In **Settings → ATAK**, enter the ATAK device's network address and its UDP input port, then enable forwarding. ATAK-CIV's default UDP input is **4242**. In ATAK, enable **Mesh Network Mode** and check the UDP input under **Input/Output Management → Manage Inputs**. macOS may prompt for local network access. The send indicator reports local UDP writes. [ATAK-CIV input defaults](https://github.com/TAK-Product-Center/atak-civ/blob/main/atak/ATAK/app/src/main/java/com/atakmap/comms/CotService.java#L745-L762) · [Windows setup](app-windows/README.md#detecties-naar-atak-sturen)
 
 What it does:
 
@@ -594,9 +604,13 @@ What it does:
   that cuts inside it
 - The app is about drones; ADS-B is used only to spot and resolve
   conflicts with them (the **Traffic** toolbar toggle turns the check
-  off). It fetches adsb.lol every 10 s (backing off on errors) within
-  10 km of this Mac, settable from 5 to 30 km in Settings; when a live
-  drone is more than 3 km away the circle moves and grows so every live
+  off). The first live drone starts an ADS-B fetch. The app then fetches
+  every 10 seconds while a drone has been heard within the last minute.
+  With no live drones, it fetches every 30 seconds while the map is visible
+  and pauses when the map is hidden. Errors extend the retry interval.
+  The default adsb.lol search covers 10 km around this Mac, settable from
+  5 to 30 km in Settings. When a live drone is more than 3 km away, the
+  circle moves and grows so every live
   drone has 9 km around it covered (at most 30 km), and aircraft beyond it
   are dropped. There is no aircraft list and no aircraft count: an
   aircraft appears on the map only while it is in an alert, with a dashed

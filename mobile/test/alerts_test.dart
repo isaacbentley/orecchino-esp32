@@ -9,6 +9,8 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:orecchino_mobile/core/alerts/alert_policy.dart';
 import 'package:orecchino_mobile/core/live/contact_tracker.dart';
 import 'package:orecchino_mobile/core/protocol/messages.dart';
@@ -242,6 +244,57 @@ void main() {
   });
 
   group('adsb.lol', () {
+    const area = AdsbArea(50.851, 4.354, 10000);
+
+    test('only the official HTTPS endpoint receives the API key, and redirects are blocked', () async {
+      final requests = <http.Request>[];
+      final client = MockClient((request) async {
+        requests.add(request);
+        return http.Response('{"ac":[]}', 200);
+      });
+      addTearDown(client.close);
+      await AdsbSource(client: client).fetch(area);
+      await AdsbSource(client: client).fetch(area, apiKey: 'local-test-key');
+      for (final base in [
+        'https://api.adsb.lol.example.org/v2/point',
+        'https://api.adsb.lol:8443/v2/point',
+        'http://api.adsb.lol/v2/point',
+      ]) {
+        await AdsbSource(client: client, base: base).fetch(area, apiKey: 'local-test-key');
+      }
+      expect(requests.map((r) => r.headers['x-api-key']), [null, 'local-test-key', null, null, null]);
+      expect(requests.every((r) => !r.followRedirects), isTrue);
+    });
+
+    test('429 honours Retry-After and falls back to the next UTC midnight', () async {
+      final at = DateTime.utc(2026, 11, 19, 14, 0).millisecondsSinceEpoch;
+      final retryDate = DateTime.utc(2026, 11, 19, 14, 2).millisecondsSinceEpoch;
+      final nextDay = DateTime.utc(2026, 11, 20).millisecondsSinceEpoch;
+      for (final (header, retryAt) in [
+        ('45', at + 45000),
+        ('Thu, 19 Nov 2026 14:02:00 GMT', retryDate),
+        ('invalid', nextDay),
+        (null, nextDay),
+      ]) {
+        final source = AdsbSource(client: MockClient((_) async =>
+            http.Response('limit', 429, headers: {if (header != null) 'retry-after': header})));
+        addTearDown(source.close);
+        await expectLater(
+          source.fetch(area, clock: () => at),
+          throwsA(isA<AdsbFetchException>()
+              .having((e) => e.message, 'message', contains('429'))
+              .having((e) => e.retryAtMs, 'retryAtMs', retryAt)),
+        );
+      }
+    });
+
+    test('a valid empty answer refreshes the feed; a malformed 200 does not', () async {
+      expect(AdsbSource.parse('{"ac":null,"total":0}', now), isEmpty);
+      final source = AdsbSource(client: MockClient((_) async => http.Response('{"error":"unavailable"}', 200)));
+      addTearDown(source.close);
+      await expectLater(source.fetch(area), throwsA(isA<AdsbFetchException>()));
+    });
+
     test('an answer maps onto the traffic wire format', () {
       final body = jsonEncode({
         'now': 1790000000000,

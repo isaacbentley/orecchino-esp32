@@ -149,6 +149,8 @@ class ContactTracker {
 
   static bool isStale(Contact c, int nowMs) => c.ageS(nowMs) > staleAfterS;
 
+  bool hasLiveContact(int nowMs) => _contacts.values.any((c) => !isStale(c, nowMs));
+
   void clear() {
     _contacts.clear();
     _macIndex.clear();

@@ -31,6 +31,7 @@ struct OrecchinoApp: App {
 
         Settings {
             SettingsView()
+                .environment(model)
                 .preferredColorScheme(.dark)
         }
 
@@ -104,7 +105,7 @@ struct TrafficMenu: View {
         }
         if model.showTraffic {
             Divider()
-            Text(model.traffic.result.summary)
+            Text(model.traffic.watchLabel)
             // Alerts with no drone of their own (traffic near the user).
             ForEach(model.traffic.result.alerts.filter { $0.droneId.isEmpty }) { al in
                 Button {
@@ -151,9 +152,11 @@ struct SettingsView: View {
                      + "fit, the closest zoom shrinks first.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            DroneguideSettings()
+            ATAKSettings()
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: 480)
         .padding(.vertical, 8)
     }
 }
