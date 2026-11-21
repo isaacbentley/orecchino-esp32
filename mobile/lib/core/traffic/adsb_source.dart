@@ -1,7 +1,7 @@
 // adsb_source.dart — manned aircraft from adsb.lol (plan §1, §8.1), and the
 // set the phone keeps and evaluates (like the Mac's TrafficService.swift).
 //
-// ADS-B is only for drone-aircraft conflicts, so the query is small: 10 km
+// ADS-B is for drone-aircraft conflicts and nearby low traffic, so the query is small: 10 km
 // around the phone by default (5-30 km, Detectors > Settings). A live drone
 // more than 3 km from the phone moves the centre to the middle of the phone
 // and the drones and widens the radius until every live drone has 9 km

@@ -32,21 +32,15 @@ class FakeLocation extends LocationService {
 void main() {
   late FakeTransport t;
   late AppController app;
-  late List<Uri> adsbGets;
 
   setUp(() async {
     t = FakeTransport();
-    // Never the real adsb.lol: a ready detector fetches ADS-B at once.
-    adsbGets = [];
-    final adsbClient = MockClient((req) async {
-      adsbGets.add(req.url);
-      return http.Response('{"ac":[]}', 200);
-    });
+    // Keep all ADS-B requests local to the test.
     app = AppController(
       db: AppDatabase(NativeDatabase.memory()),
       ble: BleService(transport: t, pairTimeout: const Duration(seconds: 2)),
       location: FakeLocation(const PhoneLocation(lat: 37.8039, lon: -122.464, accuracyM: 5, timeMs: 0)),
-      adsb: AdsbSource(client: adsbClient),
+      adsb: AdsbSource(client: MockClient((_) async => http.Response('{"ac":[]}', 200))),
       startTimers: false,
     );
     await app.start();
@@ -206,13 +200,38 @@ void main() {
     expect(impostor.writes, isEmpty);
   });
 
-  test('a ready detector fetches ADS-B at once, 10 km (6 NM) around the phone', () async {
-    t.peers['A'] = FakePeer('A');
-    expect(adsbGets, isEmpty);
-    expect(await app.pair('A', 'Orecchino'), isTrue);
+  test('a verified traffic-capable T5 stays idle until its first Remote ID message', () async {
+    final transport = FakeTransport();
+    final peer = transport.peers['A'] = FakePeer('A', info: t5Info.replaceFirst('"tiles"]', '"tiles","traffic"]'));
+    final gets = <Uri>[];
+    final controller = AppController(
+      db: AppDatabase(NativeDatabase.memory()),
+      ble: BleService(transport: transport, pairTimeout: const Duration(seconds: 2)),
+      location: FakeLocation(const PhoneLocation(lat: 37.8039, lon: -122.464, accuracyM: 5, timeMs: 0)),
+      adsb: AdsbSource(client: MockClient((req) async {
+        gets.add(req.url);
+        return http.Response('{"ac":[]}', 200);
+      })),
+    );
+    addTearDown(controller.dispose);
+    await controller.start();
+    expect(await controller.pair('A', 'Orecchino'), isTrue);
     await settle();
-    expect(adsbGets, hasLength(1));
-    expect(adsbGets.single.path, '/v2/point/37.80/-122.46/6');
+    expect(controller.detectorInfo?.has('traffic'), isTrue);
+    expect(controller.adsbInterval, isNull);
+    expect(controller.canRefreshTraffic, isFalse);
+    await controller.refreshTraffic();
+    expect(gets, isEmpty);
+
+    peer.notify('{"type":"hb","up":12345,"rid":0}\n');
+    await settle();
+    expect(gets, isEmpty);
+    peer.notify('{"type":"rid","src":"ble","mac":"AA:BB:CC:DD:EE:01",'
+        '"basic_id":[{"id_type":1,"ua_type":2,"uas_id":"TEST-BLE-DETECTION"}]}\n');
+    await settle();
+    expect(controller.tracker.contacts.single.hasPosition, isFalse);
+    expect(gets.single.path, '/v2/point/37.80/-122.46/6');
+    expect(peer.lines.any((line) => line.contains('"cmd":"traffic_done"')), isTrue);
   });
 
   test('forget unpins: no automatic connection afterwards', () async {

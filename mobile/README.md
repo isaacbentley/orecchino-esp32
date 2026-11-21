@@ -248,7 +248,8 @@ Design and protocol: [`docs/plans/mobile-app-and-t5-wifi.md`](../docs/plans/mobi
   | This phone's Bluetooth scan, in front | low latency, all PHYs | low latency on Live and Find, balanced elsewhere | balanced on Live and Find only |
   | ... in the background (Android) | balanced | low power (balanced for 2 min after a drone) | off |
   | Wi-Fi beacons / NAN (Android) | every 30 s / on | 60 s in front, 2 min behind / Live and Find only | off |
-  | ADS-B | every 10 s | 10 s with a live drone or a traffic detector, else 60 s | 30 s with a live drone only |
+  | ADS-B with a live drone | every 10 s | every 10 s | every 30 s |
+  | ADS-B with only the Live map visible | every 30 s | every 30 s | every 30 s |
   | Detector feed | on | on (a background digest needs the firmware; the feed stays on until the detector supports it) | on (same) |
   | Location | high accuracy | high on Live and Find, medium (50 m) elsewhere | medium; last fix in the background |
   | Compass | 15/s on Live and Find | 10/s on Live and Find | Find only |
@@ -356,20 +357,25 @@ Android launch drawable; re-run it after editing a master.
 Drone and operator positions and the history stay on the phone; nothing is
 uploaded, and Android backup / device transfer of app data is disabled. ADS-B
 requests go to adsb.lol with the query centre (the phone, or the middle of
-the phone and far drones) rounded to 0.01° (about 1 km), every 10 s while a
-drone is live or a detector takes traffic, otherwise every 60 s (see Power
-modes), and only while the ADS-B setting is on. In Map mode the phone
+the phone and far drones) rounded to 0.01° (about 1 km). The ADS-B setting
+and a phone location are required. In Map mode the phone
 fetches map tiles for the area on screen from Esri
 (server.arcgisonline.com), or from the template you set, as any map does;
 they are cached on the phone (up to 50 MB).
 
 ## ADS-B status and request limits
 
-Live shows when ADS-B is waiting for the phone's first location, fetching,
-paused in Saver mode, or unable to reach the feed. The phone needs a location
-fix before its first request. Android actively asks for this fix and checks
-again when returning from Android Settings. In **Detectors → Settings**, use
-**Refresh ADS-B** to request an update when a location is available.
+ADS-B starts when the phone or a paired receiver hears a drone. It polls
+every 10 seconds in Full or Balanced and every 30 seconds in Saver until
+the last detection is more than 60 seconds old. Without a drone, the app
+polls every 30 seconds while **Live → Map** is visible in the foreground.
+The map can show low aircraft around the phone even without a drone.
+
+Live shows whether ADS-B is waiting for a position, a drone or the map,
+fetching traffic, or unable to reach the feed. Android asks for a first
+location fix and checks again on returning from Android Settings. In
+**Detectors → Settings**, use **Refresh ADS-B** when a drone is active and
+the phone has a location.
 
 adsb.lol allows 500 anonymous requests per day per public IP address. If
 the feed responds with `HTTP 429`, the app shows the quota message and the

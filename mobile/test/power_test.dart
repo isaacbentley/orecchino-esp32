@@ -25,6 +25,7 @@ import 'package:orecchino_mobile/core/native_rx/native_rx_service.dart';
 import 'package:orecchino_mobile/core/native_rx/rid_observation.dart';
 import 'package:orecchino_mobile/core/native_rx/wifi_rid_android.dart';
 import 'package:orecchino_mobile/core/power/power_policy.dart';
+import 'package:orecchino_mobile/core/protocol/messages.dart';
 import 'package:orecchino_mobile/core/traffic/adsb_source.dart';
 import 'package:orecchino_mobile/data/db.dart';
 import 'package:orecchino_mobile/main.dart';
@@ -118,7 +119,7 @@ Future<void> settle() async {
 class ClockApp extends AppController {
   int skewMs = 0;
   int? fixedMs;
-  ClockApp({required super.db, super.ble, super.location, super.watch, super.startTimers});
+  ClockApp({required super.db, super.ble, super.location, super.adsb, super.watch, super.startTimers});
   @override
   int nowMs() => fixedMs ?? super.nowMs() + skewMs;
 }
@@ -137,7 +138,6 @@ void main() {
       expect(f.beaconEvery, const Duration(seconds: 30));
       expect(f.nan, isTrue);
       expect(f.adsbFast, const Duration(seconds: 10));
-      expect(f.adsbSlow, const Duration(seconds: 10));
       expect(f.location, LocationPrecision.high);
       expect(f.compassHz, 15);
       final bg = p(PowerMode.full, fg: false);
@@ -167,7 +167,6 @@ void main() {
       expect(bg.nan, isFalse);
       expect(p(PowerMode.balanced, fg: false, drone: true).phoneScan, ScanDuty.balanced);
       expect(live.adsbFast, const Duration(seconds: 10));
-      expect(live.adsbSlow, const Duration(seconds: 60));
     });
 
     test('Saver: a still sky, no blur, the phone listens on Live and Find only', () {
@@ -185,7 +184,6 @@ void main() {
       expect(bg.phoneScan, ScanDuty.off);
       expect(bg.location, LocationPrecision.off);
       expect(live.adsbFast, const Duration(seconds: 30));
-      expect(live.adsbSlow, isNull);
     });
 
     test('iPhone: no Wi-Fi paths, and no phone scan in the background in any mode', () {
@@ -219,20 +217,25 @@ void main() {
   });
 
   group('ADS-B gating and backoff', () {
+    final full = PowerPolicy.of(mode: PowerMode.full, foreground: true, tab: AppTab.live);
     final balanced = PowerPolicy.of(mode: PowerMode.balanced, foreground: true, tab: AppTab.live);
     final saver = PowerPolicy.of(mode: PowerMode.saver, foreground: true, tab: AppTab.live);
     Duration? d(PowerPolicy p,
-            {bool on = true, bool pos = true, bool drones = false, bool traffic = false, int failures = 0}) =>
-        adsbNextDelay(
-            policy: p, enabled: on, hasPosition: pos, liveDrones: drones, trafficDetector: traffic, failures: failures);
+            {bool on = true, bool pos = true, bool drones = false, bool map = false, int failures = 0}) =>
+        adsbNextDelay(policy: p, enabled: on, hasPosition: pos, liveDrones: drones, mapVisible: map, failures: failures);
 
-    test('10 s only with live drones or a traffic detector, otherwise 60 s; none without a position', () {
-      expect(d(balanced), const Duration(seconds: 60));
+    test('polls for a detected drone or visible Map only, and needs phone position', () {
+      for (final p in [full, balanced, saver]) {
+        expect(d(p), isNull);
+        expect(d(p, map: true), const Duration(seconds: 30));
+        expect(d(p, pos: false, map: true), isNull);
+        expect(d(p, on: false, map: true), isNull);
+      }
+      expect(d(full, drones: true), const Duration(seconds: 10));
       expect(d(balanced, drones: true), const Duration(seconds: 10));
-      expect(d(balanced, traffic: true), const Duration(seconds: 10));
+      expect(d(balanced, drones: true, map: true), const Duration(seconds: 10));
       expect(d(balanced, pos: false, drones: true), isNull);
       expect(d(balanced, on: false, drones: true), isNull);
-      expect(d(saver), isNull);
       expect(d(saver, drones: true), const Duration(seconds: 30));
     });
 
@@ -242,12 +245,13 @@ void main() {
     });
 
     test('a failure never asks sooner than usual, nor at all where the policy asks for none', () {
-      expect([for (var f = 1; f <= 4; f++) d(balanced, failures: f)!.inSeconds], [60, 60, 60, 80]);
+      expect([for (var f = 1; f <= 4; f++) d(balanced, map: true, failures: f)!.inSeconds], [30, 30, 40, 80]);
+      expect(d(balanced, failures: 1), isNull);
       expect(d(saver, failures: 1), isNull);
       expect(d(saver, drones: true, failures: 1), const Duration(seconds: 30));
     });
 
-    test('the app: 60 s with nothing about, 10 s with a live drone, and backs off after errors', () async {
+    test('idle makes no request; Map polls every 30 s and backs off after errors', () async {
       var fail = true;
       final gets = <Uri>[];
       final app = AppController(
@@ -260,31 +264,38 @@ void main() {
         })),
         startTimers: false,
       );
+      addTearDown(app.dispose);
       await app.start();
-      expect(app.adsbInterval, const Duration(seconds: 60));
+      expect(app.adsbInterval, isNull);
+      expect(app.canRefreshTraffic, isFalse);
+      expect(app.conflictWatchSummary, 'ADS-B waiting for a drone or the Live map');
+      await app.refreshTraffic();
+      expect(gets, isEmpty);
+
+      app.setLiveMapSelected(true);
+      expect(app.adsbInterval, const Duration(seconds: 30));
       final now = app.nowMs();
       expect(app.adsbDue(now), isTrue); // never fetched
       await app.refreshTraffic();
       expect(gets, hasLength(1));
       expect(app.conflictWatchSummary, contains('503'));
       expect(app.adsbFailures, 1);
-      expect(app.adsbInterval, const Duration(seconds: 60)); // never sooner than usual
+      expect(app.adsbInterval, const Duration(seconds: 30)); // never sooner than usual
       await app.refreshTraffic();
       expect(app.adsbFailures, 2);
-      expect(app.adsbInterval, const Duration(seconds: 60));
+      expect(app.adsbInterval, const Duration(seconds: 30));
       expect(app.adsbDue(app.nowMs()), isFalse);
       fail = false;
       await app.refreshTraffic();
       expect(app.adsbFailures, 0);
       expect(app.adsbError, isNull);
-      expect(app.adsbInterval, const Duration(seconds: 60));
+      expect(app.adsbInterval, const Duration(seconds: 30));
       // No position: nothing to ask.
       (app.location as PolicyLocation).fix = null;
       expect(app.adsbInterval, isNull);
-      app.dispose();
     });
 
-    test('an old map centre does not fetch; the first phone fix starts ADS-B even with no traffic', () async {
+    test('an old map centre does not fetch; the first phone fix starts ADS-B on visible Map', () async {
       final location = PolicyLocation()..fix = null;
       final response = Completer<http.Response>();
       final queries = <Uri>[];
@@ -301,6 +312,7 @@ void main() {
       );
       addTearDown(app.dispose);
       await app.start();
+      app.setLiveMapSelected(true);
       expect(app.lastHome, isNotNull);
       expect(app.conflictWatchSummary, 'ADS-B waiting for phone location');
       expect(app.canRefreshTraffic, isFalse);
@@ -312,14 +324,18 @@ void main() {
       expect(queries.single.path, '/v2/point/50.85/4.35/6');
       expect(app.conflictWatchSummary, 'ADS-B fetching aircraft…');
       expect(app.canRefreshTraffic, isFalse);
+      app.ingestPhoneFrame(const RidMessage(src: 'phone-ble', mac: 'AA:BB:CC:DD:EE:01'));
+      await settle();
+      expect(queries, hasLength(1)); // first drone cannot duplicate the in-flight Map request
       response.complete(http.Response('{"ac":[]}', 200));
       await settle();
+      await app.phoneHistory.flush(app.db, app.nowMs());
       app.tick();
       expect(app.conflictWatchSummary, startsWith('conflict watch on, no ADS-B conflicts'));
       expect(app.canRefreshTraffic, isTrue);
     });
 
-    test('Saver pauses automatic ADS-B, but a manual refresh can get traffic', () async {
+    test('Saver permits manual refresh on Map, but idle and background Map cannot fetch', () async {
       var requests = 0;
       final app = AppController(
         db: AppDatabase(NativeDatabase.memory()),
@@ -335,12 +351,84 @@ void main() {
       await app.start();
       await app.setPowerMode(PowerMode.saver);
       expect(app.adsbDue(app.nowMs()), isFalse);
-      expect(app.conflictWatchSummary, contains('Saver mode'));
+      expect(app.canRefreshTraffic, isFalse);
+      await app.refreshTraffic();
+      expect(requests, 0);
+
+      app.setLiveMapSelected(true);
       expect(app.canRefreshTraffic, isTrue);
       await app.refreshTraffic();
       app.tick();
       expect(requests, 1);
       expect(app.conflictWatchSummary, startsWith('conflict watch on'));
+
+      app.setVisibility(foreground: false);
+      expect(app.adsbInterval, isNull);
+      expect(app.canRefreshTraffic, isFalse);
+      await app.refreshTraffic();
+      expect(requests, 1);
+      app.setVisibility(foreground: true);
+      expect(app.adsbInterval, const Duration(seconds: 30));
+      app.setVisibility(tab: AppTab.history);
+      expect(app.adsbInterval, isNull);
+      app.setVisibility(tab: AppTab.live);
+      expect(app.adsbInterval, isNull); // returning to Live starts in Sky
+      expect(app.canRefreshTraffic, isFalse);
+      await app.refreshTraffic();
+      expect(requests, 1);
+    });
+
+    test('Basic ID alone starts drone cadence immediately even after a Map request', () async {
+      var requests = 0;
+      const began = 1795000000000;
+      final app = ClockApp(
+        db: AppDatabase(NativeDatabase.memory()),
+        ble: BleService(transport: FakeTransport()),
+        location: PolicyLocation(),
+        adsb: AdsbSource(client: MockClient((_) async {
+          requests++;
+          return http.Response('{"ac":[]}', 200);
+        })),
+      )..fixedMs = began;
+      addTearDown(app.dispose);
+      await app.start();
+      app.ingestPhoneFrame(const RidMessage(src: 'phone-ble', mac: ''));
+      expect(app.tracker.contacts, isEmpty);
+      expect(requests, 0);
+
+      app.setLiveMapSelected(true);
+      await settle();
+      expect(requests, 1);
+      expect(app.adsbInterval, const Duration(seconds: 30));
+
+      const rid = RidMessage(
+        src: 'phone-ble',
+        mac: 'AA:BB:CC:11:22:33',
+        basicId: [RidBasicId(idType: 1, uaType: 2, uasId: 'TEST-DETECTION')],
+      );
+      app.fixedMs = began + 1000;
+      app.ingestPhoneFrame(rid);
+      await settle();
+      expect(app.tracker.contacts.single.hasPosition, isFalse);
+      expect(requests, 2);
+      expect(app.adsbInterval, const Duration(seconds: 10));
+
+      app.setLiveMapSelected(false);
+      app.fixedMs = began + 2000;
+      app.ingestPhoneFrame(rid);
+      await settle();
+      expect(requests, 2);
+      app.fixedMs = began + 11000;
+      app.tick();
+      await settle();
+      expect(requests, 3);
+
+      app.fixedMs = began + 63000;
+      app.tick();
+      await settle();
+      expect(app.adsbInterval, isNull);
+      expect(app.canRefreshTraffic, isFalse);
+      expect(requests, 3);
     });
 
     test('rate limit blocks immediate refresh and polling until Retry-After; a new key retries', () async {
@@ -360,6 +448,7 @@ void main() {
       );
       addTearDown(app.dispose);
       await app.start();
+      app.setLiveMapSelected(true);
       await app.refreshTraffic();
       expect(keys, [null]);
       expect(app.adsbError, contains('429'));
@@ -368,6 +457,8 @@ void main() {
       final retry = app.adsbRetryAt!.millisecondsSinceEpoch;
       expect(app.adsbDue(retry - 1), isFalse);
       expect(app.adsbDue(retry), isTrue);
+      app.setLiveMapSelected(false);
+      app.setLiveMapSelected(true);
       await app.refreshTraffic();
       await app.setAdsbRadiusKm(20);
       expect(keys, [null]);
@@ -577,7 +668,7 @@ void main() {
       expect(calls.where((c) => c.method == 'start'), isEmpty);
       await app.setWatchInBackground(true);
       final start = calls.lastWhere((c) => c.method == 'start');
-      expect((start.arguments as Map)['text'], 'Orecchino watching · no drones · conflict watch on · no detector');
+      expect((start.arguments as Map)['text'], 'Orecchino watching · no drones · conflict watch idle · no detector');
       expect((start.arguments as Map)['location'], isFalse); // the fake location reports no status ok
       expect(app.watchRunning, isTrue);
       expect(await app.db.getSetting('watch_bg'), '1');

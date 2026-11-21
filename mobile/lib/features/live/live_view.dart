@@ -639,14 +639,11 @@ class _LiveViewState extends State<LiveView> with SingleTickerProviderStateMixin
           onChanged: (v) {
             // The map is opaque: the sweep goes, and the aurora under it
             // stands still until the sky comes back.
-            if (v == 'map') {
-              setState(() => _map = true);
-              LivingBackground.covered.value = true;
-            } else {
-              setState(() => _map = false);
-              LivingBackground.covered.value = false;
-              _setView(v == '3d');
-            }
+            final mapSelected = v == 'map';
+            setState(() => _map = mapSelected);
+            LivingBackground.covered.value = mapSelected;
+            if (!mapSelected) _setView(v == '3d');
+            widget.app.setLiveMapSelected(mapSelected);
           },
         ),
         GlassSegmented<double>(

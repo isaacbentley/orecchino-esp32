@@ -107,9 +107,10 @@ class _DetectorsViewState extends State<DetectorsView> {
                     _divider(),
                     _toggle(
                         'ADS-B conflict watch (adsb.lol)',
-                        'Aircraft near your drones, and low aircraft. Sends an approximate area (about 1 km) '
-                            'every 10 s while drones are about or a detector takes traffic, otherwise every '
-                            'minute; none without your position',
+                        'Checks for aircraft near drones and low traffic. Requests need a phone location '
+                            'and send an approximate area (about 1 km). While drones are heard, updates '
+                            'run every 10 s in Full or Balanced and every 30 s in Saver. With no drones, '
+                            'the visible Live map checks ADS-B every 30 s. ADS-B stays idle otherwise.',
                         'adsb',
                         app.settings.adsb),
                     if (app.settings.adsb) ...[_radius(), _adsbStatus(context)],
@@ -185,12 +186,12 @@ class _DetectorsViewState extends State<DetectorsView> {
   Widget _divider() => Divider(height: 1, color: OrecchinoColors.line);
 
   static String powerWords(PowerMode m) => switch (m) {
-        PowerMode.full => 'The smoothest sky and the fastest scans on every screen; ADS-B every 10 s. '
-            'Uses the most battery.',
-        PowerMode.balanced => 'Scans hardest on Live and Find, lighter elsewhere and in the background; a '
-            'slower sky; ADS-B every 10 s while drones are about, otherwise every minute.',
-        PowerMode.saver => 'A still sky without blur. This phone listens only on Live and Find, never in the '
-            'background, and not on Wi-Fi; ADS-B only while drones are about. A detector still alerts.',
+        PowerMode.full => 'The smoothest sky and the fastest scans on every screen. '
+            'ADS-B updates every 10 s while drones are heard. Uses the most battery.',
+        PowerMode.balanced => 'Scans hardest on Live and Find and lighter elsewhere and in the background. '
+            'A slower sky. ADS-B updates every 10 s while drones are heard.',
+        PowerMode.saver => 'A still sky without blur. The phone scans for Bluetooth Remote ID on Live and Find. '
+            'ADS-B updates every 30 s while drones are heard. A paired detector still alerts.',
       };
 
   /// Sky / Flat.

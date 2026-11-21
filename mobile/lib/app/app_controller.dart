@@ -7,9 +7,8 @@
 // - On every ready link to a pinned detector: feed on, set_time, set_home,
 //   log_get from the stored cursor; then set_time/set_home every 60 s and
 //   the ADS-B set as it is fetched (boards with "traffic").
-// - ADS-B is fetched every 10 s only while it matters (a live drone, or a
-//   detector that takes traffic), otherwise every 60 s, never without a
-//   position; failures back off to 5 minutes (power_policy.dart).
+// - ADS-B is fetched while a drone is live or the Live map is visible, using
+//   the phone's position. Failures back off (power_policy.dart).
 // - Power: the policy (power_policy.dart) follows the power mode, the
 //   foreground and the visible tab ([setVisibility]); the location, the
 //   compass, the phone's receiver and ADS-B follow it. The compass heading
@@ -28,7 +27,7 @@
 // - "Watch in the background" (Android, off by default): the native
 //   foreground service (watch_service.dart) with its notification, started
 //   only while the app is on screen.
-// - ADS-B is only for drone-aircraft conflicts: 10 km around the phone by
+// - ADS-B is for drone-aircraft conflicts and low traffic: 10 km around the phone by
 //   default (5-30 km), widened around far drones (AdsbArea.plan); aircraft
 //   outside the area are dropped. The screens show aircraft only while an
 //   alert names them. The phone's position
@@ -208,8 +207,15 @@ class AppController extends ChangeNotifier {
   void ingestPhoneFrame(RidMessage m) {
     if (!settings.phoneRx) return;
     final now = nowMs();
-    final c = tracker.ingest(m, now, observer);
+    final c = _ingestDrone(m, now);
     if (c != null) phoneHistory.note(c, m, now);
+  }
+
+  Contact? _ingestDrone(RidMessage message, int now, {String? detector}) {
+    final firstDrone = startTimers && !tracker.hasLiveContact(now);
+    final contact = tracker.ingest(message, now, observer, detector: detector);
+    if (contact != null && firstDrone) _pollAdsb(now, firstDrone: true);
+    return contact;
   }
 
   /// The connected detector's short name for sensor chips ("T5").
@@ -248,6 +254,7 @@ class AppController extends ChangeNotifier {
 
   bool _foreground; // from the constructor, then setVisibility
   AppTab _tab = AppTab.live;
+  bool _liveMapSelected = false;
   bool _reduceMotion = false;
   late PowerPolicy _power = _policyNow();
   late final ValueNotifier<PowerPolicy> power = ValueNotifier<PowerPolicy>(_power);
@@ -282,6 +289,7 @@ class AppController extends ChangeNotifier {
     _foreground = foreground ?? _foreground;
     if (_foreground != wasFg) droneguide.setForeground(_foreground);
     _tab = tab ?? _tab;
+    if (_tab != AppTab.live) _liveMapSelected = false;
     _reduceMotion = reduceMotion ?? _reduceMotion;
     _applyPower();
     if (_foreground && !wasFg) {
@@ -295,7 +303,7 @@ class AppController extends ChangeNotifier {
       _pauseMuteUntilMs = 0;
       unawaited(location.resume());
       unawaited(pushContext());
-      if (adsbDue(nowMs())) unawaited(refreshTraffic());
+      _pollAdsb(nowMs());
     }
     if (_foreground != wasFg) unawaited(_syncWatch());
   }
@@ -330,9 +338,12 @@ class AppController extends ChangeNotifier {
           '${detectorReady ? ' · $detectorShort connected' : ''}';
     }
     final n = tracker.contacts.where((c) => c.ageS(now) <= 60).length;
-    final watchWords = !settings.adsb
-        ? 'conflict watch off'
-        : (observer == null ? 'conflict watch: no position' : (_adsbError != null ? 'conflict watch stale' : 'conflict watch on'));
+    final watchWords = switch ((settings.adsb, observer != null)) {
+      (false, _) => 'conflict watch off',
+      (_, false) => 'conflict watch: no position',
+      _ when _adsbIntervalAt(now) == null => 'conflict watch idle',
+      _ => _adsbError != null ? 'conflict watch stale' : 'conflict watch on',
+    };
     return [
       'Orecchino watching',
       n == 0 ? 'no drones' : (n == 1 ? '1 drone' : '$n drones'),
@@ -455,28 +466,45 @@ class AppController extends ChangeNotifier {
 
   // ------------------------------------------------------------------ ADS-B
 
-  /// When the next ADS-B fetch is due after the last (null: not now).
-  Duration? get adsbInterval {
-    final now = nowMs();
-    final info = detectorInfo;
-    return adsbNextDelay(
-      policy: _power,
-      enabled: settings.adsb,
-      hasPosition: observer != null,
-      liveDrones: tracker.contacts.any((c) => c.hasPosition && c.ageS(now) <= 60),
-      trafficDetector: detectorReady && info != null && info.has('traffic'),
-      failures: _adsbFailures,
-    );
+  /// Map is one of the Live views. Selecting it can start aircraft polling.
+  void setLiveMapSelected(bool selected) {
+    if (_disposed || _tab != AppTab.live || _liveMapSelected == selected) return;
+    _liveMapSelected = selected;
+    if (selected) _pollAdsb(nowMs());
   }
+
+  /// When the next ADS-B fetch is due after the last (null: not now).
+  Duration? get adsbInterval => _adsbIntervalAt(nowMs());
+
+  Duration? _adsbIntervalAt(int now) => adsbNextDelay(
+        policy: _power,
+        enabled: settings.adsb,
+        hasPosition: observer != null,
+        liveDrones: tracker.hasLiveContact(now),
+        mapVisible: _liveMapSelected,
+        failures: _adsbFailures,
+      );
 
   /// Whether an ADS-B fetch is due now.
   bool adsbDue(int now) {
-    if (!settings.demo && (_adsbFetching || now < _adsbRetryAtMs)) return false;
-    final d = adsbInterval;
+    if (_disposed || (!settings.demo && (_adsbFetching || now < _adsbRetryAtMs))) return false;
+    final d = _adsbIntervalAt(now);
     return d != null && now - _adsbLastMs >= d.inMilliseconds;
   }
 
-  bool get canRefreshTraffic => !_disposed && settings.adsb && observer != null && !_adsbFetching && adsbRetryAt == null;
+  void _pollAdsb(int now, {bool firstDrone = false}) {
+    if (!startTimers) return;
+    // Start as soon as the first drone is heard, even just after a successful
+    // map fetch. An in-flight request or a failure backoff still takes priority.
+    if (adsbDue(now) || (firstDrone && _adsbFailures == 0 && _canRefreshTraffic(now))) {
+      unawaited(refreshTraffic());
+    }
+  }
+
+  bool get canRefreshTraffic => _canRefreshTraffic(nowMs());
+
+  bool _canRefreshTraffic(int now) => !_disposed && settings.adsb && observer != null &&
+      (settings.demo || (!_adsbFetching && now >= _adsbRetryAtMs && _adsbIntervalAt(now) != null));
 
   /// Explain why the watch has no data while its first request is pending.
   String get conflictWatchSummary {
@@ -488,10 +516,10 @@ class AppController extends ChangeNotifier {
         _ => 'ADS-B waiting for phone location',
       };
     }
+    if (!settings.demo && adsbInterval == null) return 'ADS-B waiting for a drone or the Live map';
     if (traffic.result.haveData) return traffic.result.summary;
     if (_adsbFetching) return 'ADS-B fetching aircraft…';
     if (_adsbError case final error?) return error;
-    if (adsbInterval == null) return 'ADS-B paused in Saver mode until a drone is detected';
     return 'ADS-B waiting for first traffic update';
   }
 
@@ -711,7 +739,7 @@ class AppController extends ChangeNotifier {
     // Sync first, in order (the engine queues and awaits each record).
     unawaited(sync.handleMessage(msg).catchError((Object e) => debugPrint('sync: $e')));
     if (msg is RidMessage) {
-      tracker.ingest(msg, nowMs(), observer, detector: detectorShort);
+      _ingestDrone(msg, nowMs(), detector: detectorShort);
     } else if (msg is NetStatusMessage && msg.map != null && msg.map!.isNotEmpty) {
       mapPlan = msg.map;
     } else if (msg is LogClearedMessage) {
@@ -887,9 +915,12 @@ class AppController extends ChangeNotifier {
     await _send(HostCommands.feed(on: true));
     await pushContext();
     await syncNow();
-    // A fresh ADS-B set at once (it is pushed to the board as it arrives),
-    // so the conflict watch does not wait for the first 10 s tick.
-    await refreshTraffic();
+    // Send the held set when pairing. The phone fetches on demand.
+    if (settings.demo) {
+      await refreshTraffic();
+    } else {
+      await pushTraffic();
+    }
   }
 
   Future<bool> _send(String cmd) async {
@@ -955,8 +986,8 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> refreshTraffic() async {
-    if (_disposed || !settings.adsb) return;
     final now = nowMs();
+    if (!_canRefreshTraffic(now)) return;
     final area = adsbArea(now);
     if (area == null) return;
     if (settings.demo) {
@@ -966,22 +997,22 @@ class AppController extends ChangeNotifier {
       await pushTraffic();
       return;
     }
-    if (_adsbFetching || now < _adsbRetryAtMs) return;
     _adsbFetching = true;
     _adsbLastMs = now;
     final apiKey = _adsbApiKey;
-    bool stillCurrent() => !_disposed && settings.adsb && !settings.demo && apiKey == _adsbApiKey && observer != null;
+    bool stillCurrent() => !_disposed && settings.adsb && !settings.demo && apiKey == _adsbApiKey;
     try {
       _changed();
       // Stamped when the answer arrives, not when it was asked for: a slow
       // fetch must not make the set look older than it is.
       final answer = await adsb.fetch(area, clock: nowMs, apiKey: apiKey);
       if (!stillCurrent()) return;
-      traffic.update(answer.aircraft, answer.atMs, area);
       if (_adsbFailures > 0 && kDebugMode) debugPrint('adsb: back after $_adsbFailures failures');
       _adsbError = null;
       _adsbFailures = 0;
       _adsbRetryAtMs = 0;
+      if (_adsbIntervalAt(nowMs()) == null) return;
+      traffic.update(answer.aircraft, answer.atMs, area);
       await pushTraffic();
     } on AdsbFetchException catch (e) {
       if (!stillCurrent()) return;
@@ -1071,7 +1102,7 @@ class AppController extends ChangeNotifier {
       }
     }
     _updateOngoing(result, now);
-    if (startTimers && adsbDue(now)) unawaited(refreshTraffic());
+    _pollAdsb(now);
     // In the background the scan follows whether a drone was heard lately
     // (and a pause's end).
     if (!_foreground) _applyPower();
@@ -1149,7 +1180,7 @@ class AppController extends ChangeNotifier {
     _saveHome(now);
     _changed();
     // The first fix: the conflict watch need not wait for the next check.
-    if (first && startTimers && adsbDue(now)) unawaited(refreshTraffic());
+    if (first) _pollAdsb(now);
   }
 
   void _syncHeading() {
