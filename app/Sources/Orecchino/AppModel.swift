@@ -2,6 +2,7 @@ import Foundation
 import CoreLocation
 import Observation
 import SwiftUI
+import AppKit
 
 struct DroneTrack: Identifiable {
     var id: String
@@ -296,7 +297,11 @@ final class AppModel {
     let deviceLog = DeviceLog()
     let location = LocationService()
     let traffic = TrafficService()
-    var showTraffic = true
+    var showTraffic = true {
+        didSet {
+            if showTraffic != oldValue { pollTraffic(at: Date()) }
+        }
+    }
     /// Capabilities the receiver reported ("caps" on its boot or heartbeat
     /// line); nil until it says. Reset when the port changes.
     var receiverCaps: Set<String>?
@@ -330,6 +335,7 @@ final class AppModel {
     @ObservationIgnored private let demo = DemoFeed()
     @ObservationIgnored private var expiryTimer: Timer?
     @ObservationIgnored private var clockTimer: Timer?
+    @ObservationIgnored private weak var trafficMapView: NSView?
     @ObservationIgnored private let decoder = JSONDecoder()
     @ObservationIgnored private let notifier = TrafficNotifier()
     @ObservationIgnored private var focusSerial = 0
@@ -535,11 +541,35 @@ final class AppModel {
         let lon = drones.map(\.longitude).reduce(0, +) / Double(drones.count)
         return CLLocationCoordinate2D(latitude: lat, longitude: lon)
     }
-    /// The ADS-B query's circle: this Mac and the set radius, stretched to
-    /// cover live drones that are far away (AdsbArea).
-    var adsbArea: AdsbArea? {
-        AdsbArea.make(mac: location.current,
-                      liveDrones: tracks.values.filter { !isStale($0) }.compactMap(\.coordinate))
+    private func isLiveTrafficContact(_ track: DroneTrack, at date: Date) -> Bool {
+        !track.isDemo && date.timeIntervalSince(track.lastSeen) <= Self.staleAfter
+    }
+
+    func hasLiveTrafficContact(at date: Date) -> Bool {
+        tracks.values.contains { isLiveTrafficContact($0, at: date) }
+    }
+
+    func setTrafficMapView(_ view: NSView) {
+        trafficMapView = view
+    }
+
+    private var trafficMapIsVisible: Bool {
+        guard let view = trafficMapView, let window = view.window else { return false }
+        return NSApp.isActive && window.isKeyWindow && window.isVisible && !window.isMiniaturized
+            && window.occlusionState.contains(.visible) && !view.isHiddenOrHasHiddenAncestor
+    }
+
+    private func pollTraffic(at date: Date, firstDrone: Bool = false) {
+        guard servicesOn, !demoMode else { return }
+        guard showTraffic else {
+            traffic.pause()
+            return
+        }
+        let live = tracks.values.filter { isLiveTrafficContact($0, at: date) }
+        let demand: TrafficService.Demand = !live.isEmpty ? .drone : trafficMapIsVisible ? .map : .idle
+        let area = demand == .idle ? nil : AdsbArea.make(mac: location.current, liveDrones: live.compactMap(\.coordinate))
+        traffic.pollIfDue(nowMs: TrafficRules.nowMs(date), area: area, demand: demand,
+                          firstDrone: firstDrone)
     }
     /// Where the receiver's map is centred: this Mac, else the drones.
     var mapCenter: (lat: Double, lon: Double)? {
@@ -565,11 +595,7 @@ final class AppModel {
     /// Every clock tick: fetch when due, run the rules, notify, push.
     func trafficTick() {
         let nowMs = TrafficRules.nowMs(now)
-        if showTraffic && !demoMode {
-            if servicesOn { traffic.pollIfDue(nowMs: nowMs, area: adsbArea) }
-        } else if !demoMode {
-            traffic.pause()
-        }
+        pollTraffic(at: now)
         traffic.tick(nowMs: nowMs, observer: trafficObserver, drones: trafficDrones(now: now))
         if showTraffic {
             notifier.consider(traffic.result, aircraft: traffic.aircraft, nowMs: nowMs, simulated: demoMode)
@@ -707,6 +733,7 @@ final class AppModel {
     private func ingestRid(_ msg: RidMessage, demo: Bool) {
         guard let mac = msg.mac else { return }
         let now = Date()
+        let firstDrone = servicesOn && showTraffic && !demo && !demoMode && !hasLiveTrafficContact(at: now)
         let uasId = msg.basic_id?.first(where: { !$0.uas_id.isEmpty })?.uas_id
 
         // Key by UAS ID when known so WiFi + BLE from one drone merge;
@@ -824,6 +851,7 @@ final class AppModel {
             t.seenOp = true
         }
         tracks[key] = t
+        if firstDrone { pollTraffic(at: now, firstDrone: true) }
     }
 
     private func atakTick() {

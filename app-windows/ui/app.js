@@ -54,9 +54,13 @@
   let atak = null;
   let atakRequest = 0;
   let atakDraftChanged = false;
+  const mapVisibilityHeartbeatMs = 5000;
+  let pageActive = true;
+  let reportedMapVisible = null;
+  let mapVisibilitySending = false;
 
-  async function api(path, body) {
-    const options = {cache: "no-store"};
+  async function api(path, body, {keepalive = false} = {}) {
+    const options = {cache: "no-store", keepalive};
     if (body !== undefined) {
       options.method = "POST";
       options.headers = {"Content-Type": "application/json"};
@@ -682,6 +686,7 @@
 
   function translateTraffic() {
     const status = airspace.trafficStatus;
+    if (airspace.trafficState === "idle") return "Wacht op een drone of een actieve kaart";
     if (airspace.trafficState === "loading") return "Wacht op ADS-B-gegevens";
     if (airspace.trafficState === "ready") {
       const age = airspace.trafficAgeSec;
@@ -1167,8 +1172,60 @@
     }
     renderTiles();
   }));
+
+  function mapIsVisible() {
+    if (!pageActive || document.visibilityState !== "visible" || !document.hasFocus() ||
+        document.querySelector("dialog[open]")) return false;
+    const element = $("map");
+    const bounds = element.getBoundingClientRect();
+    return bounds.width > 0 && bounds.height > 0 && bounds.right > 0 && bounds.bottom > 0 &&
+      bounds.left < window.innerWidth && bounds.top < window.innerHeight &&
+      getComputedStyle(element).visibility === "visible";
+  }
+
+  function sendMapVisibility(visible) {
+    return api("/api/airspace/map-visibility", {visible}, {keepalive: true});
+  }
+
+  async function reportMapVisibility(heartbeat = false) {
+    if (!pageActive || mapVisibilitySending) return;
+    const visible = mapIsVisible();
+    if (visible === reportedMapVisible && (!visible || !heartbeat)) return;
+    mapVisibilitySending = true;
+    try {
+      await sendMapVisibility(visible);
+      if (pageActive) reportedMapVisible = visible;
+    } catch {
+      // The next heartbeat can retry. The server's lease expires on disconnect.
+    } finally {
+      mapVisibilitySending = false;
+      if (pageActive && visible !== mapIsVisible()) reportMapVisibility();
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => reportMapVisibility());
+  window.addEventListener("focus", () => reportMapVisibility());
+  window.addEventListener("blur", () => reportMapVisibility());
+  window.addEventListener("pagehide", () => {
+    pageActive = false;
+    sendMapVisibility(false).catch(() => {});
+  });
+  window.addEventListener("pageshow", () => {
+    pageActive = true;
+    reportedMapVisible = null;
+    reportMapVisibility();
+  });
+  const mapDialogs = new MutationObserver(() => reportMapVisibility());
+  for (const dialog of document.querySelectorAll("dialog")) {
+    mapDialogs.observe(dialog, {attributes: true, attributeFilter: ["open"]});
+  }
+  window.setInterval(() => reportMapVisibility(true), mapVisibilityHeartbeatMs);
+
   map.on("moveend zoomend", renderMap);
-  new ResizeObserver(() => map.invalidateSize({pan: false})).observe($("map"));
+  new ResizeObserver(() => {
+    map.invalidateSize({pan: false});
+    reportMapVisibility();
+  }).observe($("map"));
 
   async function refresh() {
     const results = await Promise.allSettled([loadReceiver(), loadAirspace(), loadDroneguide()]);
@@ -1181,5 +1238,6 @@
     window.setTimeout(refresh, 1000);
   }
 
+  reportMapVisibility();
   refresh();
 })();

@@ -105,7 +105,7 @@ struct TrafficMenu: View {
         }
         if model.showTraffic {
             Divider()
-            Text(model.traffic.result.summary)
+            Text(model.traffic.watchLabel)
             // Alerts with no drone of their own (traffic near the user).
             ForEach(model.traffic.result.alerts.filter { $0.droneId.isEmpty }) { al in
                 Button {

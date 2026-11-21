@@ -219,6 +219,7 @@ func (r *Receiver) ingestTrackLocked(message map[string]any, now time.Time, simu
 		r.tracks[track.ID] = track
 	}
 	r.macIndex[macKey] = track.ID
+	hadPosition := track.Lat != nil && track.Lon != nil
 	track.LastSeen = now
 	track.MsgCount++
 	track.MACs = insertTrackValue(track.MACs, mac)
@@ -240,6 +241,16 @@ func (r *Receiver) ingestTrackLocked(message map[string]any, now time.Time, simu
 		track.evidence[0] = true
 	}
 	updateTrackDetails(track, message, now)
+	if !simulated {
+		firstLive := r.lastLiveRID.IsZero() || now.Sub(r.lastLiveRID) > receiverTrackFreshness
+		r.lastLiveRID = now
+		if firstLive {
+			r.liveRIDEpoch++
+		}
+		if firstLive || !hadPosition && track.Lat != nil && track.Lon != nil {
+			r.wakeTraffic()
+		}
+	}
 }
 
 func trackIndexPrefix(simulated bool) string {
@@ -500,6 +511,7 @@ func (r *Receiver) SetDemo(enabled bool) {
 	}
 
 	r.demo = enabled
+	r.wakeTraffic()
 	if !enabled {
 		close(r.demoStop)
 		r.demoStop = nil

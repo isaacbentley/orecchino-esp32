@@ -80,6 +80,33 @@ func airValidSource(source string) bool {
 	return parsed.Scheme == "https" || parsed.Scheme == "http"
 }
 
+type airFetchHTTPError struct {
+	Status  int
+	RetryAt time.Time
+}
+
+func (err airFetchHTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d", err.Status)
+}
+
+func airRetryAfter(header string, now time.Time, dailyQuota bool) time.Time {
+	value := strings.TrimSpace(header)
+	if value != "" {
+		if seconds, err := strconv.ParseUint(value, 10, 64); err == nil &&
+			seconds <= uint64(math.MaxInt64)/uint64(time.Second) {
+			return now.Add(time.Duration(seconds) * time.Second)
+		}
+		if at, err := http.ParseTime(value); err == nil && !at.Before(now) {
+			return at
+		}
+	}
+	if dailyQuota {
+		utc := now.UTC()
+		return time.Date(utc.Year(), utc.Month(), utc.Day()+1, 0, 0, 0, 0, time.UTC)
+	}
+	return time.Time{}
+}
+
 func airFetch(ctx context.Context, client *http.Client, template string, area airArea) ([]airAircraft, error) {
 	radius := strconv.Itoa(max(1, int(math.Ceil(area.RadiusM/1852-1e-9))))
 	address := strings.NewReplacer(
@@ -103,7 +130,15 @@ func airFetch(ctx context.Context, client *http.Client, template string, area ai
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
+		err := airFetchHTTPError{Status: response.StatusCode}
+		if err.Status == http.StatusTooManyRequests || err.Status == http.StatusServiceUnavailable {
+			// adsb.lol's public daily quota resets at midnight UTC; a
+			// custom source without a header keeps its ordinary backoff.
+			dailyQuota := err.Status == http.StatusTooManyRequests &&
+				strings.EqualFold(request.URL.Hostname(), "api.adsb.lol")
+			err.RetryAt = airRetryAfter(response.Header.Get("Retry-After"), time.Now(), dailyQuota)
+		}
+		return nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024+1))
 	if err != nil {

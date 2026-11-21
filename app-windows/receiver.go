@@ -22,12 +22,13 @@ import (
 )
 
 const (
-	receiverCommandLimit = 1600
-	receiverLineLimit    = 8192
-	receiverProbeTime    = 7 * time.Second
-	receiverSilenceTime  = 15 * time.Second
-	receiverPollTime     = 35 * time.Millisecond
-	receiverWriteTime    = 3 * time.Second
+	receiverCommandLimit   = 1600
+	receiverLineLimit      = 8192
+	receiverProbeTime      = 7 * time.Second
+	receiverSilenceTime    = 15 * time.Second
+	receiverPollTime       = 35 * time.Millisecond
+	receiverWriteTime      = 3 * time.Second
+	receiverTrackFreshness = 60 * time.Second
 )
 
 var (
@@ -65,6 +66,7 @@ type ReceiverState struct {
 	Stats         ReceiverStats `json:"stats"`
 	Tracks        []Track       `json:"tracks"`
 	Session       uint64        `json:"session"`
+	liveRIDEpoch  uint64
 }
 
 type receiverWrite struct {
@@ -98,6 +100,9 @@ type Receiver struct {
 	uasIndex      map[string]string
 	macIndex      map[string]string
 	nextTrack     uint64
+	lastLiveRID   time.Time
+	liveRIDEpoch  uint64
+	trafficWake   chan struct{}
 	demo          bool
 	demoStop      chan struct{}
 	subscribers   map[chan map[string]any]struct{}
@@ -107,6 +112,14 @@ func NewReceiver() *Receiver {
 	return &Receiver{
 		preferred: "auto", tracks: make(map[string]*Track), uasIndex: make(map[string]string),
 		macIndex: make(map[string]string), subscribers: make(map[chan map[string]any]struct{}),
+		trafficWake: make(chan struct{}, 1),
+	}
+}
+
+func (r *Receiver) wakeTraffic() {
+	select {
+	case r.trafficWake <- struct{}{}:
+	default:
 	}
 }
 
@@ -193,6 +206,7 @@ func (r *Receiver) Snapshot() ReceiverState {
 		Status: "disconnected", Port: r.port, PreferredPort: r.preferred, Error: r.portError,
 		Board: r.board, Firmware: r.firmware, Capabilities: append([]string{}, r.caps...),
 		Demo: r.demo, Stats: r.stats, Tracks: make([]Track, 0, len(r.tracks)), Session: r.session,
+		liveRIDEpoch: r.liveRIDEpoch,
 	}
 	switch {
 	case r.connection == nil || r.connection.ctx.Err() != nil:
@@ -213,7 +227,7 @@ func (r *Receiver) Snapshot() ReceiverState {
 		}
 		copy := *track
 		copy.AgeSeconds = age
-		copy.Stale = age > 60
+		copy.Stale = now.Sub(track.LastSeen) > receiverTrackFreshness
 		copy.MACs = append([]string{}, track.MACs...)
 		copy.Sources = append([]string{}, track.Sources...)
 		copy.Trail = append([]GeoPoint{}, track.Trail...)

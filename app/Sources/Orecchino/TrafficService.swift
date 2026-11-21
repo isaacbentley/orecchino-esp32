@@ -1,7 +1,8 @@
 // TrafficService.swift — the Mac's ADS-B source (plan §8.1, §8.5).
 //
 // Fetches adsb.lol around a reference point (this Mac's position, else the
-// drones') every 10 s, backs off on errors, keeps each aircraft for 60 s,
+// drones') while a drone is live or the map is visible, backs off on errors,
+// keeps each aircraft for 60 s,
 // runs TrafficRules against the drones, and hands the `traffic` host lines
 // (TrafficWire.hostLines) to AppModel to push to a receiver that takes them.
 // The network fetch and the clock are injected, so the tests drive it with a
@@ -23,12 +24,41 @@ public protocol AdsbFetching: Sendable {
 
 public enum AdsbError: Error, Equatable, LocalizedError {
     case http(Int)
+    case rateLimited(retryAfter: String?)
     case badAnswer
     public var errorDescription: String? {
         switch self {
         case .http(let c): return "HTTP \(c)"
+        case .rateLimited: return "ADS-B request limit (HTTP 429)"
         case .badAnswer:   return "unreadable answer"
         }
+    }
+
+    /// Without a usable Retry-After the provider's daily quota resets at
+    /// midnight UTC.
+    static func retryTime(_ header: String?, nowMs: Int64) -> Int64 {
+        let now = Date(timeIntervalSince1970: Double(nowMs) / 1000)
+        let utc = TimeZone(secondsFromGMT: 0)!
+        if let value = header?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+            if value.utf8.allSatisfy({ (48...57).contains($0) }),
+               let seconds = Int64(value), seconds <= (8_640_000_000_000_000 - nowMs) / 1000 {
+                return nowMs + seconds * 1000
+            }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = utc
+            for format in ["EEE',' dd MMM yyyy HH:mm:ss 'GMT'",
+                           "EEEE',' dd-MMM-yy HH:mm:ss 'GMT'", "EEE MMM d HH:mm:ss yyyy"] {
+                formatter.dateFormat = format
+                if let retry = formatter.date(from: value), retry >= now {
+                    return TrafficRules.nowMs(retry)
+                }
+            }
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        let tomorrow = calendar.dateInterval(of: .day, for: now)?.end
+        return tomorrow.map(TrafficRules.nowMs) ?? nowMs + 86_400_000
     }
 }
 
@@ -47,7 +77,7 @@ public struct URLSessionAdsbFetcher: AdsbFetching {
         // no version string; 1.0 then.)
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         cfg.httpAdditionalHeaders =
-            ["User-Agent": "Orecchino/\(version) (macOS; manned traffic near an Orecchino receiver; 1 request/10 s)"]
+            ["User-Agent": "Orecchino/\(version) (macOS; manned traffic near an Orecchino receiver)"]
         session = URLSession(configuration: cfg)
     }
 
@@ -57,6 +87,9 @@ public struct URLSessionAdsbFetcher: AdsbFetching {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         let (d, resp) = try await session.data(for: req)
         if let h = resp as? HTTPURLResponse, !(200..<300).contains(h.statusCode) {
+            if h.statusCode == 429 {
+                throw AdsbError.rateLimited(retryAfter: h.value(forHTTPHeaderField: "Retry-After"))
+            }
             throw AdsbError.http(h.statusCode)
         }
         return d
@@ -191,9 +224,25 @@ public struct AdsbArea: Equatable, Sendable {
 @MainActor
 @Observable
 public final class TrafficService {
+    public enum Demand: Equatable {
+        case idle
+        case map
+        case drone
+
+        fileprivate var intervalMs: Int64? {
+            switch self {
+            case .idle: return nil
+            case .map: return 30_000
+            case .drone: return TrafficService.intervalMs
+            }
+        }
+    }
+
     public enum FeedStatus: Equatable {
         /// Not polling: the layer is off, or demo mode supplies the aircraft.
         case off
+        /// The layer is enabled and waiting for a drone or a visible map.
+        case idle
         /// Polling, but neither this Mac nor any drone has a position yet.
         case noPosition
         case waiting
@@ -221,6 +270,10 @@ public final class TrafficService {
     @ObservationIgnored public private(set) var failures = 0
     @ObservationIgnored public private(set) var nextFetchMs: Int64 = 0
     @ObservationIgnored public private(set) var inFlight = false
+    @ObservationIgnored private var demand: Demand = .idle
+    @ObservationIgnored private var pollArea: AdsbArea?
+    @ObservationIgnored private var lastFetchMs: Int64?
+    @ObservationIgnored private var lastFailure: (message: String, retryMs: Int64)?
     @ObservationIgnored private var lastPushMs: Int64? = nil
     @ObservationIgnored private var pushedDataMs: Int64? = nil
     /// Bumped by clear() and pause(): a fetch that started before must not
@@ -237,6 +290,10 @@ public final class TrafficService {
     /// The most urgent alert naming this aircraft.
     public func alert(forHex hex: String) -> TrafficAlert? { result.alert(forHex: hex) }
 
+    var watchLabel: String {
+        status == .idle ? "ADS-B waiting for a drone or the visible map" : result.summary
+    }
+
     public func clear() {
         generation += 1
         aircraft = []
@@ -244,8 +301,10 @@ public final class TrafficService {
         result = .empty
         publishedSecond = .min
         state = TrafficState()
-        failures = 0
-        nextFetchMs = 0
+        // Reset the display for demo mode, but keep the current source's
+        // polling deadline and any rate limit across the preference change.
+        demand = .idle
+        pollArea = nil
         lastPushMs = nil
         pushedDataMs = nil
         if status != .off { status = .off }
@@ -268,37 +327,63 @@ public final class TrafficService {
     /// The area of the last fetch.
     public private(set) var area: AdsbArea?
 
-    /// Start a fetch when one is due. `area`: where to look; nil (no
-    /// position anywhere) fetches nothing.
-    public func pollIfDue(nowMs: Int64, area: AdsbArea?) {
-        guard let ref = area else {
-            if status != .noPosition { status = .noPosition }
-            return
-        }
-        if status == .off || status == .noPosition { status = .waiting }
-        guard !inFlight, nowMs >= nextFetchMs else { return }
+    /// Start a due fetch when there is both demand and a position. The first
+    /// drone may fetch immediately after a successful map-only request.
+    public func pollIfDue(nowMs: Int64, area: AdsbArea?, demand: Demand,
+                          firstDrone: Bool = false) {
+        let becameLive = demand == .drone && (firstDrone || self.demand != .drone)
+        self.demand = demand
+        pollArea = area
+        updatePollingStatus()
+        guard demand != .idle, area != nil, !inFlight,
+              nowMs >= nextFetchMs || (becameLive && lastFailure == nil) else { return }
         inFlight = true
+        let gen = generation
         Task { @MainActor [weak self] in
-            await self?.fetchNow(area: ref)
+            guard let self else { return }
+            guard gen == self.generation, self.demand != .idle, let ref = self.pollArea else {
+                self.inFlight = false
+                return
+            }
+            await self.fetch(area: ref, generation: gen, scheduled: true)
         }
     }
 
     /// Stop polling (layer off, or demo mode): data already held ages out.
     public func pause() {
-        guard status != .off || failures != 0 || nextFetchMs != 0 else { return }
+        guard status != .off else { return }
         generation += 1
-        if status != .off { status = .off }
-        nextFetchMs = 0
-        failures = 0
+        demand = .idle
+        pollArea = nil
+        status = .off
     }
 
-    /// One fetch, now. Success installs the set (merged with aircraft still
-    /// under 60 s old that the answer left out) and schedules the next fetch
-    /// 10 s on; a failure keeps the set and backs off.
+    /// One explicit fetch, used by tests with an injected source.
     public func fetchNow(area ref: AdsbArea) async {
+        guard !inFlight else { return }
         inFlight = true
+        await fetch(area: ref, generation: generation, scheduled: false)
+    }
+
+    private func updatePollingStatus(explicit: Bool = false) {
+        let interval = explicit ? Self.intervalMs : (demand.intervalMs ?? Self.intervalMs)
+        let normal = lastFetchMs.map { $0 + interval } ?? 0
+        nextFetchMs = max(normal, lastFailure?.retryMs ?? 0)
+        let nextStatus: FeedStatus
+        if !explicit && demand == .idle {
+            nextStatus = .idle
+        } else if !explicit && pollArea == nil {
+            nextStatus = .noPosition
+        } else if let failure = lastFailure {
+            nextStatus = .failed(failure.message, retryMs: nextFetchMs)
+        } else {
+            nextStatus = dataMs == nil ? .waiting : .ok
+        }
+        if status != nextStatus { status = nextStatus }
+    }
+
+    private func fetch(area ref: AdsbArea, generation gen: Int, scheduled: Bool) async {
         defer { inFlight = false }
-        let gen = generation
         let started = clock()
         guard let url = AdsbLol.url(template: AdsbLol.template, lat: ref.lat, lon: ref.lon,
                                     radiusNM: ref.radiusNM) else {
@@ -307,21 +392,30 @@ public final class TrafficService {
         }
         do {
             let data = try await fetcher.data(from: url)
-            guard gen == generation else { return }
             let rx = clock()
             let fresh = try AdsbLol.parse(data, receivedMs: rx)
-            install(fresh, receivedMs: rx, area: ref)
+            if gen == generation && (!scheduled || (demand != .idle && pollArea != nil)) {
+                install(fresh, receivedMs: rx, area: ref)
+            }
+            lastFetchMs = rx
+            lastFailure = nil
             failures = 0
-            nextFetchMs = rx + Self.intervalMs
-            status = .ok
         } catch {
-            guard gen == generation else { return }
             failures += 1
             let now = max(clock(), started)
-            nextFetchMs = now + Self.backoffMs(failures: failures)
+            lastFetchMs = now
             let why = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            status = .failed(why, retryMs: nextFetchMs)
+            var retry = now + Self.backoffMs(failures: failures)
+            switch error as? AdsbError {
+            case .rateLimited(let header):
+                retry = max(retry, AdsbError.retryTime(header, nowMs: now))
+            case .http(429):
+                retry = max(retry, AdsbError.retryTime(nil, nowMs: now))
+            default: break
+            }
+            lastFailure = (why, retry)
         }
+        if gen == generation { updatePollingStatus(explicit: !scheduled) }
     }
 
     /// Keep the fresh answer, plus earlier aircraft it no longer lists while

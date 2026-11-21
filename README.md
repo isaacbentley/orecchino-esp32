@@ -604,9 +604,13 @@ What it does:
   that cuts inside it
 - The app is about drones; ADS-B is used only to spot and resolve
   conflicts with them (the **Traffic** toolbar toggle turns the check
-  off). It fetches adsb.lol every 10 s (backing off on errors) within
-  10 km of this Mac, settable from 5 to 30 km in Settings; when a live
-  drone is more than 3 km away the circle moves and grows so every live
+  off). The first live drone starts an ADS-B fetch. The app then fetches
+  every 10 seconds while a drone has been heard within the last minute.
+  With no live drones, it fetches every 30 seconds while the map is visible
+  and pauses when the map is hidden. Errors extend the retry interval.
+  The default adsb.lol search covers 10 km around this Mac, settable from
+  5 to 30 km in Settings. When a live drone is more than 3 km away, the
+  circle moves and grows so every live
   drone has 9 km around it covered (at most 30 km), and aircraft beyond it
   are dropped. There is no aircraft list and no aircraft count: an
   aircraft appears on the map only while it is in an alert, with a dashed

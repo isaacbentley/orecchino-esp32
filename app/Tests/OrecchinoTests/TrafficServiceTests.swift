@@ -172,9 +172,80 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
 
     @MainActor @Test func noPositionFetchesNothing() {
         let (s, f, _) = service(.failure(AdsbError.badAnswer), at: 0)
-        s.pollIfDue(nowMs: 0, area: nil)
+        s.pollIfDue(nowMs: 0, area: nil, demand: .drone)
         #expect(s.status == .noPosition && !s.inFlight && f.urls.isEmpty)
         #expect(s.result.summary == "CONFLICT WATCH OFF: no ADS-B source")   // never "no traffic"
+    }
+
+    @MainActor @Test func visibilityAndFirstDroneSetThePollingCadence() async {
+        let (s, f, c) = service(.success(Data(#"{"ac":[]}"#.utf8)), at: 1_000)
+
+        func poll(_ demand: TrafficService.Demand) {
+            s.pollIfDue(nowMs: c.ms, area: sfoArea, demand: demand)
+        }
+        func finishFetch() async {
+            while s.inFlight { await Task.yield() }
+        }
+
+        poll(.idle)
+        #expect(f.urls.isEmpty && !s.inFlight && s.status == .idle)
+        poll(.map)
+        poll(.map)
+        await finishFetch()
+        #expect(f.urls.count == 1 && s.nextFetchMs == 31_000)
+
+        c.ms = 2_000
+        poll(.drone)
+        await finishFetch()
+        #expect(f.urls.count == 2 && s.nextFetchMs == 12_000)
+        c.ms = 11_999
+        poll(.drone)
+        #expect(!s.inFlight)
+        c.ms = 12_000
+        poll(.drone)
+        await finishFetch()
+        #expect(f.urls.count == 3)
+
+        c.ms = 32_000
+        poll(.map)
+        #expect(!s.inFlight && s.nextFetchMs == 42_000)
+        c.ms = 42_000
+        poll(.map)
+        await finishFetch()
+        #expect(f.urls.count == 4)
+        c.ms = 72_000
+        poll(.idle)
+        #expect(!s.inFlight && f.urls.count == 4 && s.status == .idle)
+    }
+
+    @MainActor @Test func firstDroneAndLayerChangesRespectRateLimit() async {
+        let (s, f, c) = service(.failure(AdsbError.rateLimited(retryAfter: "120")), at: 1_000)
+        s.pollIfDue(nowMs: c.ms, area: sfoArea, demand: .map)
+        while s.inFlight { await Task.yield() }
+        #expect(s.nextFetchMs == 121_000)
+
+        c.ms = 50_000
+        s.pollIfDue(nowMs: c.ms, area: nil, demand: .idle)
+        s.pause()
+        s.clear()
+        s.pollIfDue(nowMs: c.ms, area: sfoArea, demand: .drone, firstDrone: true)
+        #expect(s.nextFetchMs == 121_000 && !s.inFlight && f.urls.count == 1)
+
+        c.ms = 121_000
+        f.answer = .success(Data(#"{"ac":[]}"#.utf8))
+        s.pollIfDue(nowMs: c.ms, area: sfoArea, demand: .drone)
+        while s.inFlight { await Task.yield() }
+        #expect(s.nextFetchMs == 131_000 && s.status == .ok && f.urls.count == 2)
+    }
+
+    @Test func retryAfterUsesHTTPDateOrUTCMidnight() {
+        let now: Int64 = 1_790_190_047_000
+        #expect(AdsbError.retryTime(" 120 ", nowMs: now) == now + 120_000)
+        #expect(AdsbError.retryTime("Thu, 24 Sep 2026 12:00:00 GMT", nowMs: now) == 1_790_251_200_000)
+        let midnight = TrafficRules.nowMs(ISO8601DateFormatter().date(from: "2026-09-24T00:00:00Z")!)
+        for value in [nil, "bad", "Mon, 21 Sep 2026 12:00:00 GMT"] {
+            #expect(AdsbError.retryTime(value, nowMs: now) == midnight)
+        }
     }
 
     @MainActor @Test func stalenessAndRetention() async throws {
@@ -327,6 +398,22 @@ final class FakeFetcher: AdsbFetching, @unchecked Sendable {
             coordinate: CLLocationCoordinate2D(latitude: 37.8, longitude: -122.4), altitude: 30,
             horizontalAccuracy: 50, verticalAccuracy: 10, timestamp: Date())
         #expect(model.trafficObserver.elevM != nil)
+    }
+
+    @MainActor @Test func trafficDemandIncludesBasicIDWithoutPosition() throws {
+        let model = AppModel(startServices: false)
+        model.ingest(line: #"{"type":"hb","board":"lilygo-t5-epaper-s3-pro","caps":["traffic"]}"#)
+        let packet = #"{"type":"rid","mac":"02:00:5E:7E:57:31","basic_id":[{"id_type":1,"ua_type":2,"uas_id":"1581F20000D9A03"}]}"#
+        #expect(!model.hasLiveTrafficContact(at: Date()))
+        model.ingest(line: packet)
+        let track = try #require(model.tracks["uas:1581F20000D9A03"])
+        #expect(track.coordinate == nil)
+        #expect(model.hasLiveTrafficContact(at: track.lastSeen.addingTimeInterval(60)))
+        #expect(!model.hasLiveTrafficContact(at: track.lastSeen.addingTimeInterval(61)))
+        let simulated = AppModel(startServices: false)
+        let message = try JSONDecoder().decode(RidMessage.self, from: Data(packet.utf8))
+        simulated.ingest(message, demo: true)
+        #expect(!simulated.hasLiveTrafficContact(at: Date()))
     }
 
     @MainActor @Test func pairAlertsNameTheDroneByItsId() throws {

@@ -41,13 +41,17 @@ type airspaceView struct {
 }
 
 type airspaceService struct {
-	mu           sync.Mutex
-	settings     airspaceSettings
-	settingsPath string
-	view         airspaceView
-	refreshTFR   chan struct{}
-	zones        []tfrZone
+	mu              sync.Mutex
+	settings        airspaceSettings
+	settingsPath    string
+	view            airspaceView
+	refreshTFR      chan struct{}
+	zones           []tfrZone
+	mapVisibleUntil time.Time
+	wakeTraffic     chan struct{}
 }
+
+const airMapVisibilityLease = 15 * time.Second
 
 func registerAirspace(mux *http.ServeMux, receiver *Receiver, location func() *GeoPoint, dataDirs ...string) (func(), func() []airAlert) {
 	service := &airspaceService{
@@ -57,8 +61,9 @@ func registerAirspace(mux *http.ServeMux, receiver *Receiver, location func() *G
 			TrafficStatus: "Waiting for a position", TrafficState: "position",
 			TrackTFRs: map[string]string{}, Alerts: []airAlert{},
 		},
-		refreshTFR: make(chan struct{}, 1),
-		zones:      []tfrZone{},
+		refreshTFR:  make(chan struct{}, 1),
+		zones:       []tfrZone{},
+		wakeTraffic: make(chan struct{}, 1),
 	}
 	if len(dataDirs) > 0 && dataDirs[0] != "" {
 		service.settingsPath = filepath.Join(dataDirs[0], "traffic.json")
@@ -73,6 +78,7 @@ func registerAirspace(mux *http.ServeMux, receiver *Receiver, location func() *G
 	mux.HandleFunc("GET /api/airspace", service.getView)
 	mux.HandleFunc("POST /api/airspace/traffic", service.saveSettings)
 	mux.HandleFunc("POST /api/airspace/refresh", service.manualTFRRefresh)
+	mux.HandleFunc("POST /api/airspace/map-visibility", service.setMapVisibility)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	service.refreshTFR <- struct{}{}
@@ -146,8 +152,42 @@ func (service *airspaceService) saveSettings(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		service.settings = settings
+		service.wake()
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (service *airspaceService) setMapVisibility(w http.ResponseWriter, r *http.Request) {
+	var update struct {
+		Visible *bool `json:"visible"`
+	}
+	if !readRequest(w, r, &update) {
+		return
+	}
+	if update.Visible == nil {
+		replyError(w, http.StatusBadRequest, errors.New("geef aan of de kaart zichtbaar is"))
+		return
+	}
+	now := time.Now()
+	service.mu.Lock()
+	wasVisible := now.Before(service.mapVisibleUntil)
+	if *update.Visible {
+		service.mapVisibleUntil = now.Add(airMapVisibilityLease)
+	} else {
+		service.mapVisibleUntil = time.Time{}
+	}
+	service.mu.Unlock()
+	if *update.Visible != wasVisible {
+		service.wake()
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (service *airspaceService) wake() {
+	select {
+	case service.wakeTraffic <- struct{}{}:
+	default:
+	}
 }
 
 func airSaveSettings(path string, settings airspaceSettings) error {
@@ -216,59 +256,142 @@ type airFetchResult struct {
 	Aircraft   []airAircraft
 	Err        error
 	Area       airArea
+	Source     string
 	Generation uint64
 }
 
-type airTrafficRun struct {
-	State                           airRuleState
-	Aircraft                        []airAircraft
-	Received                        time.Time
-	NextFetch, LastPush, PushedData time.Time
-	Failures                        int
-	FetchError                      string
-	FetchID                         uint64
-	Inflight                        bool
-	CancelFetch                     context.CancelFunc
+type airTrafficDemand uint8
+
+const (
+	airNoDemand airTrafficDemand = iota
+	airMapDemand
+	airDroneDemand
+)
+
+func airDemandFor(enabled, demo, hasArea, mapVisible bool, drones []airDrone) airTrafficDemand {
+	if !enabled || demo || !hasArea {
+		return airNoDemand
+	}
+	if slices.ContainsFunc(drones, func(drone airDrone) bool { return drone.Live }) {
+		return airDroneDemand
+	}
+	if mapVisible {
+		return airMapDemand
+	}
+	return airNoDemand
 }
 
-func (run *airTrafficRun) reset() {
+type airTrafficRun struct {
+	State                airRuleState
+	Aircraft             []airAircraft
+	Received             time.Time
+	LastAttempt, RetryAt time.Time
+	LastPush, PushedData time.Time
+	Failures             int
+	FetchError           string
+	FetchID              uint64
+	Inflight             bool
+	CancelFetch          context.CancelFunc
+	Demand               airTrafficDemand
+}
+
+func (run *airTrafficRun) stopFetch() {
 	if run.CancelFetch != nil {
 		run.CancelFetch()
+		run.CancelFetch = nil
+		run.FetchID++
 	}
-	*run = airTrafficRun{FetchID: run.FetchID + 1}
 }
 
-func (run *airTrafficRun) accept(result airFetchResult, now time.Time) {
+func (run *airTrafficRun) reset(keepSchedule bool) {
+	run.stopFetch()
+	next := airTrafficRun{FetchID: run.FetchID, Inflight: run.Inflight}
+	if keepSchedule {
+		next.LastAttempt, next.RetryAt = run.LastAttempt, run.RetryAt
+		next.Failures, next.FetchError = run.Failures, run.FetchError
+		next.Demand = run.Demand
+	}
+	*run = next
+}
+
+func (run *airTrafficRun) updateDemand(next airTrafficDemand, firstLive bool) {
+	if next == airDroneDemand && (firstLive || run.Demand != airDroneDemand) &&
+		run.CancelFetch == nil && run.Failures == 0 {
+		// A first live drone may request a fetch immediately after a map
+		// fetch, provided that request has finished without a backoff.
+		run.LastAttempt = time.Time{}
+	}
+	run.Demand = next
+}
+
+func (run *airTrafficRun) nextFetch() time.Time {
+	interval := 10 * time.Second
+	if run.Demand == airMapDemand {
+		interval = 30 * time.Second
+	}
+	normal := run.LastAttempt.Add(interval)
+	if run.RetryAt.After(normal) {
+		return run.RetryAt
+	}
+	return normal
+}
+
+func (run *airTrafficRun) due(now time.Time) bool {
+	return run.Demand != airNoDemand && !run.Inflight && !now.Before(run.nextFetch())
+}
+
+func (run *airTrafficRun) backOff(err error, now time.Time) {
+	run.Failures++
+	run.FetchError = err.Error()
+	run.RetryAt = now.Add((10 << min(run.Failures, 4)) * time.Second)
+	var httpError airFetchHTTPError
+	if errors.As(err, &httpError) && httpError.RetryAt.After(run.RetryAt) {
+		run.RetryAt = httpError.RetryAt
+	}
+}
+
+func (run *airTrafficRun) accept(result airFetchResult, now time.Time, demand airTrafficDemand, source string) {
+	// A canceled request still occupies the only slot until its worker
+	// reports completion. Its stale result cannot update a new run.
+	run.Inflight = false
 	if result.Generation != run.FetchID {
+		// A settings change that races a response may discard aircraft, but
+		// a rate-limit deadline from that same source is still valid.
+		var httpError airFetchHTTPError
+		if result.Source == source && errors.As(result.Err, &httpError) && !httpError.RetryAt.IsZero() {
+			run.backOff(result.Err, now)
+		}
 		return
 	}
-	run.Inflight = false
 	if run.CancelFetch != nil {
 		run.CancelFetch()
 		run.CancelFetch = nil
 	}
 	if result.Err != nil {
-		run.Failures++
-		run.FetchError = result.Err.Error()
-		run.NextFetch = now.Add((10 << min(run.Failures, 4)) * time.Second)
+		run.backOff(result.Err, now)
 		return
 	}
-	run.Aircraft = airMerge(run.Aircraft, result.Aircraft, result.Area, now)
 	run.FetchError = ""
 	run.Failures = 0
-	run.Received = now
-	run.NextFetch = now.Add(10 * time.Second)
+	run.RetryAt = time.Time{}
+	if demand != airNoDemand {
+		run.Aircraft = airMerge(run.Aircraft, result.Aircraft, result.Area, now)
+		run.Received = now
+	}
 }
 
-func (run *airTrafficRun) fetch(ctx context.Context, client *http.Client, results chan<- airFetchResult, template string, area airArea) {
+func (run *airTrafficRun) fetch(ctx context.Context, client *http.Client, results chan<- airFetchResult, template string, area airArea, now time.Time) {
 	run.Inflight = true
+	run.LastAttempt = now
+	run.FetchID++
 	id := run.FetchID
-	ctx, run.CancelFetch = context.WithCancel(ctx)
+	requestContext, cancel := context.WithCancel(ctx)
+	run.CancelFetch = cancel
 	go func() {
-		aircraft, err := airFetch(ctx, client, template, area)
+		aircraft, err := airFetch(requestContext, client, template, area)
 		select {
 		case <-ctx.Done():
-		case results <- airFetchResult{Aircraft: aircraft, Err: err, Area: area, Generation: id}:
+		case results <- airFetchResult{Aircraft: aircraft, Err: err, Area: area, Source: template, Generation: id}:
 		}
 	}()
 }
@@ -397,20 +520,23 @@ func (run *airTrafficRun) push(receiver *Receiver, state ReceiverState, now time
 func (service *airspaceService) run(ctx context.Context, receiver *Receiver, location func() *GeoPoint) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	results := make(chan airFetchResult, 4)
+	results := make(chan airFetchResult, 1)
 	client := &http.Client{Timeout: 8 * time.Second}
 	var run airTrafficRun
 	var device airDeviceRun
 	var previous airspaceSettings
-	var lastSession uint64
+	var lastSession, liveRIDEpoch uint64
 	var wasDemo, hadArea bool
 	var lastHome *GeoPoint
 	for {
+		var result *airFetchResult
 		select {
 		case <-ctx.Done():
 			return
-		case result := <-results:
-			run.accept(result, time.Now())
+		case fetched := <-results:
+			result = &fetched
+		case <-receiver.trafficWake:
+		case <-service.wakeTraffic:
 		case <-ticker.C:
 		}
 		now := time.Now()
@@ -423,9 +549,16 @@ func (service *airspaceService) run(ctx context.Context, receiver *Receiver, loc
 		lastHome = home
 		service.mu.Lock()
 		settings, zones, revision := service.settings, service.zones, service.view.TFRRevision
+		mapVisible := now.Before(service.mapVisibleUntil)
 		service.mu.Unlock()
-		if snapshot.Demo != wasDemo || settings != previous || homeChanged && !snapshot.Demo {
-			run.reset()
+		areaChanged := settings.RadiusKm != previous.RadiusKm || homeChanged && !snapshot.Demo
+		if snapshot.Demo != wasDemo || settings != previous || areaChanged {
+			run.reset(settings.Source == previous.Source)
+			// An area change needs fresh data when no retry/backoff is
+			// pending. Changing the query cannot bypass a source cooldown.
+			if areaChanged && run.Failures == 0 {
+				run.LastAttempt = time.Time{}
+			}
 		}
 		if lastSession != snapshot.Session {
 			run.PushedData, run.LastPush = time.Time{}, time.Time{}
@@ -435,9 +568,16 @@ func (service *airspaceService) run(ctx context.Context, receiver *Receiver, loc
 		drones := airDrones(snapshot.Tracks, snapshot.Demo)
 		area := airMakeArea(home, drones, settings.RadiusKm)
 		if hadArea && area == nil && !snapshot.Demo {
-			run.reset()
+			run.reset(true)
 		}
 		hadArea = area != nil
+		demand := airDemandFor(settings.Enabled, snapshot.Demo, area != nil,
+			mapVisible && desktopWindowVisible(), drones)
+		if result != nil {
+			run.accept(*result, now, demand, settings.Source)
+		}
+		run.updateDemand(demand, liveRIDEpoch != snapshot.liveRIDEpoch)
+		liveRIDEpoch = snapshot.liveRIDEpoch
 		status, code := "Conflict watch off", "off"
 		alerts := []airAlert{}
 		var trafficAge *float64
@@ -446,8 +586,8 @@ func (service *airspaceService) run(ctx context.Context, receiver *Receiver, loc
 				run.Received = now.Add(-2 * time.Second)
 				run.Aircraft = airDemo(now, drones)
 				home = nil
-			} else if area != nil && !run.Inflight && !now.Before(run.NextFetch) {
-				run.fetch(ctx, client, results, settings.Source, *area)
+			} else if run.due(now) {
+				run.fetch(ctx, client, results, settings.Source, *area, now)
 			}
 			if area != nil || snapshot.Demo {
 				run.Aircraft = slices.DeleteFunc(run.Aircraft, func(a airAircraft) bool { return airAge(a.Seen, now) > trafficPresent })
@@ -464,10 +604,12 @@ func (service *airspaceService) run(ctx context.Context, receiver *Receiver, loc
 				}
 			case area == nil:
 				status, code = "Waiting for a position", "position"
+			case demand == airNoDemand:
+				status, code = "Waiting for a drone or a visible map", "idle"
 			case !run.Received.IsZero() && airAge(run.Received, now) > trafficFresh:
 				status, code = airTrafficSummary(alerts, run.Received, now), "stale"
 			case run.FetchError != "":
-				wait := max(0, int(math.Ceil(run.NextFetch.Sub(now).Seconds())))
+				wait := max(0, int(math.Ceil(run.nextFetch().Sub(now).Seconds())))
 				status, code = fmt.Sprintf("ADS-B fetch failed (%s); retry in %d s", run.FetchError, wait), "error"
 			case run.Received.IsZero():
 				status, code = "Waiting for ADS-B data", "loading"

@@ -1,6 +1,7 @@
 import SwiftUI
 import MapKit
 import CoreLocation
+import AppKit
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
@@ -848,7 +849,26 @@ struct MapPane: View {
                 }
             }
         }
+        .background {
+            TrafficMapWindowProbe(model: model)
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
+}
+
+/// Gives the ADS-B scheduler the window that contains this map.
+private struct TrafficMapWindowProbe: NSViewRepresentable {
+    let model: AppModel
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        model.setTrafficMapView(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// Full-width amber bar across the top of the map while demo mode is on,

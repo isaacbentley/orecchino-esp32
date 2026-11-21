@@ -9,12 +9,28 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"unsafe"
 
 	webview "github.com/jchv/go-webview2"
 	"github.com/jchv/go-webview2/webviewloader"
 	"golang.org/x/sys/windows"
 )
+
+var (
+	desktopWindowHandle atomic.Uintptr
+	isWindowVisible     = user32.NewProc("IsWindowVisible")
+)
+
+func desktopWindowVisible() bool {
+	handle := desktopWindowHandle.Load()
+	if handle == 0 {
+		return true // Browser preview has no native Orecchino window.
+	}
+	visible, _, _ := isWindowVisible.Call(handle)
+	minimized, _, _ := isIconic.Call(handle)
+	return visible != 0 && minimized == 0
+}
 
 func defaultDataRoot() (string, error) {
 	if root := os.Getenv("LOCALAPPDATA"); root != "" {
@@ -49,8 +65,11 @@ func showDesktop(ctx context.Context, address, dataDir string, receiver *Receive
 		return errors.New("het Orecchino-venster kon niet worden geopend")
 	}
 	defer window.Destroy()
+	handle := uintptr(window.Window())
+	desktopWindowHandle.Store(handle)
+	defer desktopWindowHandle.Store(0)
 	window.SetSize(780, 560, webview.HintMin)
-	defer startTray(uintptr(window.Window()), receiver, alerts)()
+	defer startTray(handle, receiver, alerts)()
 	window.Navigate(address)
 	done := make(chan struct{})
 	defer close(done)
